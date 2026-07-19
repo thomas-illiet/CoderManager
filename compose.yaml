@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: coder_manager
+      POSTGRES_USER: coder_manager
+      POSTGRES_PASSWORD: coder_manager
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coder_manager -d coder_manager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment: &app-environment
+      CODER_MANAGER_DATABASE_URL: postgresql+asyncpg://coder_manager:coder_manager@postgres:5432/coder_manager
+      CODER_MANAGER_CELERY_BROKER_URL: redis://redis:6379/0
+      CODER_MANAGER_CELERY_RESULT_BACKEND: redis://redis:6379/1
+      CODER_MANAGER_CRYPTO_KEY: ${CODER_MANAGER_CRYPTO_KEY:-}
+      CODER_MANAGER_ARGOCD_URL: ${CODER_MANAGER_ARGOCD_URL:-}
+      CODER_MANAGER_ARGOCD_TOKEN: ${CODER_MANAGER_ARGOCD_TOKEN:-}
+      CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY: ${CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY:-false}
+      CODER_MANAGER_ARGOCD_PROJECT: ${CODER_MANAGER_ARGOCD_PROJECT:-}
+      CODER_MANAGER_ARGOCD_APPLICATION_PREFIX: ${CODER_MANAGER_ARGOCD_APPLICATION_PREFIX:-coder}
+      CODER_MANAGER_ARGOCD_REPOSITORY_URL: ${CODER_MANAGER_ARGOCD_REPOSITORY_URL:-}
+      CODER_MANAGER_ARGOCD_REPOSITORY_PATH: ${CODER_MANAGER_ARGOCD_REPOSITORY_PATH:-}
+      CODER_MANAGER_ARGOCD_TARGET_REVISION: ${CODER_MANAGER_ARGOCD_TARGET_REVISION:-}
+      CODER_MANAGER_ARGOCD_DESTINATION_SERVER: ${CODER_MANAGER_ARGOCD_DESTINATION_SERVER:-}
+      CODER_MANAGER_DEFAULT_ADMINS: ${CODER_MANAGER_DEFAULT_ADMINS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment: *app-environment
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["celery", "-A", "coder_manager.celery_app:celery_app", "worker", "--loglevel=INFO"]
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
