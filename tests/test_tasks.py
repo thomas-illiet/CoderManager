@@ -45,6 +45,7 @@ def test_worker_healthcheck_and_registered_names() -> None:
     """Verify the worker healthcheck and registered names scenario."""
 
     assert healthcheck.run() == {"status": "ok"}
+    assert tasks.sync_database.run() == {"status": "success"}
     assert {
         tasks.create_instance.name,
         tasks.update_instance.name,
@@ -52,6 +53,7 @@ def test_worker_healthcheck_and_registered_names() -> None:
         tasks.create_workspace.name,
         tasks.update_workspace.name,
         tasks.delete_workspace.name,
+        tasks.sync_database.name,
     } == {
         "coder_manager.create_instance",
         "coder_manager.update_instance",
@@ -59,6 +61,7 @@ def test_worker_healthcheck_and_registered_names() -> None:
         "coder_manager.create_workspace",
         "coder_manager.update_workspace",
         "coder_manager.delete_workspace",
+        "coder_manager.sync_database",
     }
 
 

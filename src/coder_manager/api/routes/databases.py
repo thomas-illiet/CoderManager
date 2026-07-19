@@ -4,13 +4,19 @@ from collections import defaultdict
 from typing import Annotated
 from uuid import UUID
 
+import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.config import Settings, get_settings
-from coder_manager.crypto import CryptoConfigurationError, PasswordCipher
+from coder_manager.crypto import (
+    CryptoConfigurationError,
+    PasswordCipher,
+    PasswordDecryptionError,
+)
 from coder_manager.database import get_session
-from coder_manager.models import InstanceRegion
+from coder_manager.models import Database, InstanceRegion
 from coder_manager.repositories import (
     DatabaseAlreadyExistsError,
     DatabaseCapacityConflictError,
@@ -33,10 +39,12 @@ from coder_manager.schemas import (
     InstancePage,
     InstanceRead,
 )
+from coder_manager.tasks import sync_database as sync_database_job
 
 router = APIRouter(prefix="/databases", tags=["databases"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
+DATABASE_CONNECTION_TIMEOUT_SECONDS = 5.0
 
 
 def password_cipher(settings: Settings) -> PasswordCipher:
@@ -78,6 +86,26 @@ def database_read(usage: DatabaseUsage) -> DatabaseRead:
         created_at=database.created_at,
         updated_at=database.updated_at,
     )
+
+
+async def check_managed_database_connection(
+    database: Database,
+    password: SecretStr,
+) -> None:
+    """Open and validate one managed PostgreSQL connection."""
+
+    connection = await asyncpg.connect(
+        host=database.host,
+        port=database.port,
+        database=database.database_name,
+        user=database.username,
+        password=password.get_secret_value(),
+        timeout=DATABASE_CONNECTION_TIMEOUT_SECONDS,
+    )
+    try:
+        await connection.execute("SELECT 1")
+    finally:
+        await connection.close(timeout=DATABASE_CONNECTION_TIMEOUT_SECONDS)
 
 
 @router.get("", summary="List managed databases")
@@ -169,6 +197,18 @@ async def get_database_statistics(session: SessionDependency) -> DatabaseStatist
     )
 
 
+@router.post(
+    "/sync",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Synchronize managed databases",
+)
+async def sync_databases() -> dict[str, str]:
+    """Enqueue the managed database synchronization placeholder job."""
+
+    sync_database_job.delay()
+    return {"status": "accepted"}
+
+
 @router.get("/{database_id}/instances", summary="List a managed database's Coder instances")
 async def list_database_instances(
     database_id: UUID,
@@ -193,6 +233,37 @@ async def list_database_instances(
         total=total,
         pages=pages,
     )
+
+
+@router.get("/{database_id}/check", summary="Check a managed database connection")
+async def check_database(
+    database_id: UUID,
+    session: SessionDependency,
+    settings: SettingsDependency,
+) -> dict[str, str]:
+    """Verify that the stored credentials can connect to the managed database."""
+
+    usage = await DatabaseRepository(session).get_usage(database_id)
+    if usage is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Database not found")
+    try:
+        password = password_cipher(settings).decrypt(
+            usage.database.password_enc,
+            usage.database.id,
+        )
+    except PasswordDecryptionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database password cannot be decrypted",
+        ) from error
+    try:
+        await check_managed_database_connection(usage.database, password)
+    except (asyncpg.PostgresError, OSError, TimeoutError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Database connection is unavailable",
+        ) from error
+    return {"status": "ok"}
 
 
 @router.get("/{database_id}", summary="Get a managed database")

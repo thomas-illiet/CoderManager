@@ -6,6 +6,7 @@ from coder_manager.tasks.create_workspace import create_workspace
 from coder_manager.tasks.delete_instance import _delete_instance, delete_instance
 from coder_manager.tasks.delete_workspace import delete_workspace
 from coder_manager.tasks.healthcheck import healthcheck
+from coder_manager.tasks.sync_database import sync_database
 from coder_manager.tasks.update_instance import _update_instance, update_instance
 from coder_manager.tasks.update_workspace import update_workspace
 
@@ -19,6 +20,7 @@ __all__ = [
     "delete_instance",
     "delete_workspace",
     "healthcheck",
+    "sync_database",
     "update_instance",
     "update_workspace",
 ]

@@ -52,7 +52,9 @@ All endpoints are under `/api/v1`:
 | `DELETE` | `/applications/{id}/whitelist` | Remove an application from the whitelist |
 | `GET` | `/databases?page=1&page_size=20&region=emea` | Paginated database pool list |
 | `GET` | `/databases/statistics` | Global, regional, and per-database usage |
+| `POST` | `/databases/sync` | Request database synchronization |
 | `GET` | `/databases/{id}` | Get one database pool entry |
+| `GET` | `/databases/{id}/check` | Check the stored database connection |
 | `POST` | `/databases` | Add a database to the pool |
 | `PUT` | `/databases/{id}` | Replace database metadata or rotate its password |
 | `DELETE` | `/databases/{id}` | Delete an unused database |
@@ -137,6 +139,11 @@ to another region, or reduced below their current usage.
 `GET /api/v1/databases/statistics` reports total capacity, allocations, available slots, and
 utilization percentages globally, by region, and for every pool entry. These values are derived
 from allocation rows rather than stored counters.
+
+`GET /api/v1/databases/{id}/check` decrypts the stored password and opens a short-lived PostgreSQL
+connection to validate the configured host, port, database, username, and password. Connection
+errors are returned without exposing credentials. `POST /api/v1/databases/sync` accepts a global
+synchronization request and enqueues the placeholder `coder_manager.sync_database` worker task.
 
 ## Instances API
 
@@ -304,7 +311,8 @@ updated or deleted. The list supports `instance_id`, `template_id`, `member_id`,
 
 ## Celery
 
-The worker exposes `coder_manager.healthcheck` plus six lifecycle tasks. Instance creation and
+The worker exposes `coder_manager.healthcheck`, the `coder_manager.sync_database` placeholder, and
+six lifecycle tasks. Instance creation and
 updates reconcile Argo CD Applications; workspace operations and instance deletion retain their
 dedicated lifecycle implementations:
 

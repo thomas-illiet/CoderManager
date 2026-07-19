@@ -22,6 +22,7 @@ from coder_manager.tasks import (
     create_workspace,
     delete_instance,
     delete_workspace,
+    sync_database,
     update_instance,
     update_workspace,
 )
@@ -41,6 +42,7 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         create_workspace,
         update_workspace,
         delete_workspace,
+        sync_database,
     ):
         monkeypatch.setattr(task, "delay", MagicMock())
 

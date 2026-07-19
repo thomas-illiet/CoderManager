@@ -3,6 +3,7 @@
 # ruff: noqa: S105, S106, S107, SLF001
 
 from base64 import b64encode
+from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -274,6 +275,97 @@ async def test_database_crud_encrypts_and_rotates_password(
     missing = await client.get(f"/api/v1/databases/{database_id}")
     assert deleted.status_code == 204
     assert missing.status_code == 404
+
+
+async def test_database_connection_check_and_sync_dispatch(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Check stored credentials and enqueue the database synchronization job."""
+
+    database = await create_database(client, name="Connectivity")
+    connection_check = AsyncMock()
+    monkeypatch.setattr(
+        database_routes,
+        "check_managed_database_connection",
+        connection_check,
+    )
+
+    checked = await client.get(f"/api/v1/databases/{database['id']}/check")
+    synced = await client.post("/api/v1/databases/sync")
+
+    assert checked.status_code == 200
+    assert checked.json() == {"status": "ok"}
+    checked_database, checked_password = connection_check.await_args.args
+    assert str(checked_database.id) == database["id"]
+    assert checked_password.get_secret_value() == "database-secret"
+    assert synced.status_code == 202
+    assert synced.json() == {"status": "accepted"}
+    tasks.sync_database.delay.assert_called_once_with()
+
+
+async def test_managed_database_connection_executes_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Open, probe, and close the configured PostgreSQL connection."""
+
+    connection = AsyncMock()
+    connect = AsyncMock(return_value=connection)
+    monkeypatch.setattr(database_routes.asyncpg, "connect", connect)
+    database = Database(
+        name="Probe",
+        region="emea",
+        instance_max=1,
+        host="postgres.internal",
+        port=5433,
+        database_name="coder",
+        username="coder_manager",
+        password_enc=b"unused",
+    )
+
+    await database_routes.check_managed_database_connection(
+        database,
+        SecretStr("database-secret"),
+    )
+
+    connect.assert_awaited_once_with(
+        host="postgres.internal",
+        port=5433,
+        database="coder",
+        user="coder_manager",
+        password="database-secret",
+        timeout=database_routes.DATABASE_CONNECTION_TIMEOUT_SECONDS,
+    )
+    connection.execute.assert_awaited_once_with("SELECT 1")
+    connection.close.assert_awaited_once_with(
+        timeout=database_routes.DATABASE_CONNECTION_TIMEOUT_SECONDS
+    )
+
+
+async def test_database_connection_check_errors(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return stable errors for missing, unreachable, and undecryptable databases."""
+
+    database = await create_database(client, name="Unavailable")
+    missing = await client.get(f"/api/v1/databases/{uuid4()}/check")
+    monkeypatch.setattr(
+        database_routes,
+        "check_managed_database_connection",
+        AsyncMock(side_effect=OSError("connection details must stay private")),
+    )
+    unavailable = await client.get(f"/api/v1/databases/{database['id']}/check")
+    app.dependency_overrides[get_settings] = lambda: Settings(crypto_key=OTHER_CRYPTO_KEY)
+    undecryptable = await client.get(f"/api/v1/databases/{database['id']}/check")
+
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Database not found"}
+    assert unavailable.status_code == 502
+    assert unavailable.json() == {"detail": "Database connection is unavailable"}
+    assert "connection details must stay private" not in unavailable.text
+    assert undecryptable.status_code == 503
+    assert undecryptable.json() == {"detail": "Database password cannot be decrypted"}
 
 
 async def test_database_validation_duplicates_and_crypto_configuration(
