@@ -21,6 +21,7 @@ from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
     from coder_manager.models.application import Application
+    from coder_manager.models.instance_kubernetes import InstanceKubernetes
     from coder_manager.models.managed_database import DatabaseAllocation
     from coder_manager.models.member import Member
     from coder_manager.models.workspace import Workspace
@@ -137,6 +138,11 @@ class Instance(Base):
         passive_deletes=True,
     )
     database_allocation: Mapped["DatabaseAllocation | None"] = relationship(
+        back_populates="instance",
+        passive_deletes=True,
+        uselist=False,
+    )
+    kubernetes_provider: Mapped["InstanceKubernetes | None"] = relationship(
         back_populates="instance",
         passive_deletes=True,
         uselist=False,

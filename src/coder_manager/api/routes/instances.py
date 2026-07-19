@@ -9,14 +9,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from coder_manager.config import Settings, get_settings
+from coder_manager.crypto import CryptoConfigurationError, KubernetesTokenCipher
 from coder_manager.database import get_session
 from coder_manager.domains import argocd
+from coder_manager.models import InstanceKubernetes
 from coder_manager.repositories import (
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
     InstanceApplicationNotFoundError,
     InstanceApplicationNotWhitelistedError,
     InstanceDatabaseUnavailableError,
+    InstanceKubernetesAlreadyConfiguredError,
+    InstanceKubernetesImmutableFieldError,
+    InstanceKubernetesNotFoundError,
+    InstanceKubernetesRepository,
     InstanceNotFoundError,
     InstanceRepository,
     InvalidApplicationSlugError,
@@ -24,6 +30,9 @@ from coder_manager.repositories import (
 from coder_manager.schemas import (
     InstanceArgoCdStatusRead,
     InstanceCreate,
+    InstanceKubernetesCreate,
+    InstanceKubernetesRead,
+    InstanceKubernetesUpdate,
     InstancePage,
     InstanceRead,
 )
@@ -34,6 +43,32 @@ from coder_manager.tasks import update_instance as update_instance_job
 router = APIRouter(prefix="/instances", tags=["instances"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
+
+
+def kubernetes_token_cipher(settings: Settings) -> KubernetesTokenCipher:
+    """Build the token cipher or return a redacted configuration error."""
+
+    try:
+        return KubernetesTokenCipher(settings.crypto_key)
+    except CryptoConfigurationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Kubernetes token encryption is not configured",
+        ) from error
+
+
+def kubernetes_provider_read(provider: InstanceKubernetes) -> InstanceKubernetesRead:
+    """Build a provider response without exposing encrypted token material."""
+
+    return InstanceKubernetesRead(
+        instance_id=provider.instance_id,
+        host=provider.host,
+        namespace=provider.namespace,
+        token_configured=bool(provider.token_enc),
+        ca=provider.ca,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+    )
 
 
 @router.get("", summary="List Coder instances")
@@ -68,6 +103,112 @@ async def get_instance(instance_id: UUID, session: SessionDependency) -> Instanc
     if instance is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instance not found")
     return InstanceRead.model_validate(instance)
+
+
+@router.get(
+    "/{instance_id}/provider",
+    summary="Get an instance Kubernetes provider",
+)
+async def get_instance_provider(
+    instance_id: UUID,
+    session: SessionDependency,
+) -> InstanceKubernetesRead:
+    """Return the public Kubernetes configuration without its token."""
+
+    try:
+        provider = await InstanceKubernetesRepository(session).get(instance_id)
+    except InstanceNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+        ) from error
+    except InstanceKubernetesNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kubernetes provider not configured",
+        ) from error
+    return kubernetes_provider_read(provider)
+
+
+@router.post(
+    "/{instance_id}/provider",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Configure an instance Kubernetes provider",
+)
+async def create_instance_provider(
+    instance_id: UUID,
+    payload: InstanceKubernetesCreate,
+    session: SessionDependency,
+    settings: SettingsDependency,
+) -> InstanceKubernetesRead:
+    """Create Kubernetes configuration and enqueue an instance reconciliation."""
+
+    try:
+        provider = await InstanceKubernetesRepository(session).create_and_request_update(
+            instance_id,
+            payload,
+            kubernetes_token_cipher(settings),
+        )
+    except InstanceNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+        ) from error
+    except InstanceActionConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Instance has an action in progress",
+        ) from error
+    except InstanceKubernetesAlreadyConfiguredError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Kubernetes provider is already configured",
+        ) from error
+    update_instance_job.delay(str(instance_id))
+    return kubernetes_provider_read(provider)
+
+
+@router.put(
+    "/{instance_id}/provider",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Update an instance Kubernetes provider",
+)
+async def update_instance_provider(
+    instance_id: UUID,
+    payload: InstanceKubernetesUpdate,
+    session: SessionDependency,
+    settings: SettingsDependency,
+) -> InstanceKubernetesRead:
+    """Update CA or token without allowing host or namespace changes."""
+
+    try:
+        provider = await InstanceKubernetesRepository(session).update_and_request_update(
+            instance_id,
+            payload,
+            kubernetes_token_cipher(settings),
+        )
+    except InstanceNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+        ) from error
+    except InstanceKubernetesNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kubernetes provider not configured",
+        ) from error
+    except InstanceActionConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Instance has an action in progress",
+        ) from error
+    except InstanceKubernetesImmutableFieldError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Kubernetes provider host and namespace are immutable",
+        ) from error
+    update_instance_job.delay(str(instance_id))
+    return kubernetes_provider_read(provider)
 
 
 @router.get(

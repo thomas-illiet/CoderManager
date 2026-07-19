@@ -12,6 +12,11 @@ from coder_manager.schemas.instance import (
     InstancePage,
     InstanceRead,
 )
+from coder_manager.schemas.instance_kubernetes import (
+    InstanceKubernetesCreate,
+    InstanceKubernetesRead,
+    InstanceKubernetesUpdate,
+)
 from coder_manager.schemas.managed_database import (
     DatabaseCreate,
     DatabaseItemStatistics,
@@ -60,6 +65,9 @@ __all__ = [
     "DatabaseUsageStatistics",
     "InstanceArgoCdStatusRead",
     "InstanceCreate",
+    "InstanceKubernetesCreate",
+    "InstanceKubernetesRead",
+    "InstanceKubernetesUpdate",
     "InstancePage",
     "InstanceRead",
     "MemberCreate",

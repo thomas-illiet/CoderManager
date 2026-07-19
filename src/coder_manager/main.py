@@ -13,12 +13,16 @@ from coder_manager.config import get_settings
 
 
 def redacted_validation_errors(error: RequestValidationError) -> list[dict[str, Any]]:
-    """Remove password inputs from validation details before returning them."""
+    """Remove credential inputs from validation details before returning them."""
 
     errors: list[dict[str, Any]] = []
     for detail in error.errors():
         safe_detail = dict(detail)
-        if any("password" in str(part).lower() for part in detail.get("loc", ())):
+        if any(
+            credential in str(part).lower()
+            for part in detail.get("loc", ())
+            for credential in ("password", "token")
+        ):
             safe_detail["input"] = "[REDACTED]"
             safe_detail.pop("ctx", None)
         errors.append(safe_detail)

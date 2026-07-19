@@ -5,6 +5,12 @@ from coder_manager.repositories.applications import (
     ApplicationHasInstancesError,
     ApplicationRepository,
 )
+from coder_manager.repositories.instance_kubernetes import (
+    InstanceKubernetesAlreadyConfiguredError,
+    InstanceKubernetesImmutableFieldError,
+    InstanceKubernetesNotFoundError,
+    InstanceKubernetesRepository,
+)
 from coder_manager.repositories.instances import (
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
@@ -84,6 +90,10 @@ __all__ = [
     "InstanceApplicationNotFoundError",
     "InstanceApplicationNotWhitelistedError",
     "InstanceDatabaseUnavailableError",
+    "InstanceKubernetesAlreadyConfiguredError",
+    "InstanceKubernetesImmutableFieldError",
+    "InstanceKubernetesNotFoundError",
+    "InstanceKubernetesRepository",
     "InstanceNotFoundError",
     "InstanceRepository",
     "InvalidApplicationSlugError",

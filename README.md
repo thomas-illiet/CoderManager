@@ -61,6 +61,9 @@ All endpoints are under `/api/v1`:
 | `GET` | `/instances/{id}/status` | Get the live Argo CD status |
 | `POST` | `/instances` | Request instance creation |
 | `POST` | `/instances/{id}/sync` | Force Argo CD reconciliation |
+| `GET` | `/instances/{id}/provider` | Get the Kubernetes provider configuration |
+| `POST` | `/instances/{id}/provider` | Create the provider and update the instance |
+| `PUT` | `/instances/{id}/provider` | Update the provider CA or token |
 | `DELETE` | `/instances/{id}` | Request instance deletion |
 | `GET` | `/instances/{id}/members?page=1&page_size=20` | List instance members |
 | `GET` | `/instances/{id}/members/{member_id}` | Get one instance member |
@@ -173,6 +176,13 @@ The worker requests synchronization but does not wait for Argo CD health converg
 
 `GET /api/v1/instances/{id}/status` reads Argo CD directly and returns the Application name, sync
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.
+
+`POST /api/v1/instances/{id}/provider` creates the Kubernetes provider with `host`, `namespace`,
+`ca`, and the write-only `token`. `PUT` updates `ca` and optionally rotates `token`; `host` and
+`namespace` are immutable, whether omitted or repeated unchanged in the update payload. The token
+is encrypted with AES-256-GCM in `token_enc` and bound to the instance UUID. Every accepted change
+moves the instance to `updating/pending` and enqueues the `coder_manager.update_instance` worker.
+`GET` returns `token_configured` and never token material.
 
 The API generates an immutable HTTPS URL from the application name, region, and environment. For
 example, application `My App` in `emea` and `development` receives

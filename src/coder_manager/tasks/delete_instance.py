@@ -9,7 +9,14 @@ from sqlalchemy import delete, select
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
-from coder_manager.models import DatabaseAllocation, Instance, InstanceStatus, Member, Workspace
+from coder_manager.models import (
+    DatabaseAllocation,
+    Instance,
+    InstanceKubernetes,
+    InstanceStatus,
+    Member,
+    Workspace,
+)
 from coder_manager.tasks import _common
 
 if TYPE_CHECKING:
@@ -57,6 +64,9 @@ def _delete_instance(
         session.execute(delete(Member).where(Member.instance_id == instance_id))
         session.execute(
             delete(DatabaseAllocation).where(DatabaseAllocation.instance_id == instance_id)
+        )
+        session.execute(
+            delete(InstanceKubernetes).where(InstanceKubernetes.instance_id == instance_id)
         )
         session.delete(instance)
         session.commit()
