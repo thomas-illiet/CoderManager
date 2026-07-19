@@ -1,0 +1,1 @@
+"""Coder Manager test suite."""
