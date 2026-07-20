@@ -150,6 +150,7 @@ class ArgoCdClient:
         path = f"api/v1/applications/{name}"
         response = self._client.delete(
             path,
+            headers={"Content-Type": "application/json"},
             params={
                 "cascade": "true",
                 "propagationPolicy": "foreground",

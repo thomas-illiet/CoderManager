@@ -320,6 +320,11 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
             "project": "coder",
         },
     ]
+    assert [request.headers["content-type"] for request in requests] == [
+        "application/json",
+        "application/json",
+    ]
+    assert [request.content for request in requests] == [b"", b""]
 
 
 def test_delete_instance_application_uses_process_configuration(
