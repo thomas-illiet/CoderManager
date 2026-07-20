@@ -174,7 +174,7 @@ both parameters without creating API member records.
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
 `CODER_MANAGER_ARGOCD_PROJECT`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`, and
-`CODER_MANAGER_ARGOCD_DESTINATION_SERVER`. TLS certificate verification is enabled by default;
+`CODER_MANAGER_ARGOCD_DESTINATION_NAME`. TLS certificate verification is enabled by default;
 set `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment.
 The worker requests synchronization but does not wait for Argo CD health convergence.
 

@@ -28,7 +28,7 @@ def configured_settings(**overrides: object) -> Settings:
         "argocd_repository_url": "https://git.test/platform.git",
         "argocd_repository_path": "charts/coder",
         "argocd_target_revision": "v1.2.3",
-        "argocd_destination_server": "https://kubernetes.default.svc",
+        "argocd_destination_name": "in-cluster",
         "default_admins": " Root.Admin,alice ",
     }
     values.update(overrides)
@@ -95,7 +95,7 @@ def test_create_application_and_sync_contract() -> None:
         },
     }
     assert payload["spec"]["destination"] == {
-        "server": "https://kubernetes.default.svc",
+        "name": "in-cluster",
         "namespace": name,
     }
     assert payload["spec"]["syncPolicy"] == {"syncOptions": ["CreateNamespace=true"]}

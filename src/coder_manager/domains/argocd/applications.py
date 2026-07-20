@@ -69,7 +69,7 @@ def application_payload(
                 },
             },
             "destination": {
-                "server": config.destination_server,
+                "name": config.destination_name,
                 "namespace": name,
             },
             "syncPolicy": {"syncOptions": ["CreateNamespace=true"]},

@@ -31,7 +31,7 @@ class ArgoCdConfig:
     repository_url: str
     repository_path: str
     target_revision: str
-    destination_server: str
+    destination_name: str
     default_admins: tuple[str, ...]
 
     @classmethod
@@ -47,7 +47,7 @@ class ArgoCdConfig:
             "CODER_MANAGER_ARGOCD_REPOSITORY_URL": settings.argocd_repository_url,
             "CODER_MANAGER_ARGOCD_REPOSITORY_PATH": settings.argocd_repository_path,
             "CODER_MANAGER_ARGOCD_TARGET_REVISION": settings.argocd_target_revision,
-            "CODER_MANAGER_ARGOCD_DESTINATION_SERVER": settings.argocd_destination_server,
+            "CODER_MANAGER_ARGOCD_DESTINATION_NAME": settings.argocd_destination_name,
         }
         missing = [name for name, value in required.items() if not value or not value.strip()]
         if missing:
@@ -70,7 +70,7 @@ class ArgoCdConfig:
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
             target_revision=_required_value(required, "CODER_MANAGER_ARGOCD_TARGET_REVISION"),
-            destination_server=_required_value(required, "CODER_MANAGER_ARGOCD_DESTINATION_SERVER"),
+            destination_name=_required_value(required, "CODER_MANAGER_ARGOCD_DESTINATION_NAME"),
             default_admins=_parse_default_admins(settings.default_admins),
         )
 

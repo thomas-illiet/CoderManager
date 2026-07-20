@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     argocd_repository_url: str | None = None
     argocd_repository_path: str | None = None
     argocd_target_revision: str | None = None
-    argocd_destination_server: str | None = None
+    argocd_destination_name: str | None = None
     default_admins: str = ""
 
 
