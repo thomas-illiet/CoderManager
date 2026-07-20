@@ -39,6 +39,11 @@ def application_payload(
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(*target)
+    values_environment = {
+        "development": "dev",
+        "staging": "stg",
+        "production": "prd",
+    }[target[1]]
     return {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Application",
@@ -61,6 +66,7 @@ def application_payload(
                         {
                             "name": "HELM_ARGS",
                             "value": (
+                                f"-f values.{values_environment}.yaml "
                                 f"--set users={','.join(users)} --set admins={','.join(admins)}"
                             ),
                         }

@@ -96,7 +96,10 @@ def test_create_application_and_sync_contract() -> None:
             "env": [
                 {
                     "name": "HELM_ARGS",
-                    "value": "--set users=alice,root.admin,zoe --set admins=alice,root.admin",
+                    "value": (
+                        "-f values.dev.yaml --set users=alice,root.admin,zoe "
+                        "--set admins=alice,root.admin"
+                    ),
                 }
             ],
             "parameters": [
@@ -163,6 +166,12 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert update["metadata"]["labels"]["existing"] == "kept"
     assert update["metadata"]["labels"]["coder-manager/managed"] == "true"
     assert update["spec"]["project"] == "coder"
+    assert update["spec"]["source"]["plugin"]["env"] == [
+        {
+            "name": "HELM_ARGS",
+            "value": "-f values.stg.yaml --set users= --set admins=",
+        }
+    ]
     assert update["spec"]["source"]["plugin"]["parameters"][0]["map"] == {
         "appId": "apac-staging-app",
         "certName": "apac-staging-cert",
@@ -198,6 +207,15 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
         client.ensure_application(uuid4(), "attached", (), "amer", "production")
 
     assert [request.method for request in requests] == ["GET", "POST", "GET", "PUT", "POST"]
+    update = json.loads(requests[3].content)
+    assert update["spec"]["source"]["plugin"]["env"] == [
+        {
+            "name": "HELM_ARGS",
+            "value": (
+                "-f values.prd.yaml --set users=alice,root.admin --set admins=alice,root.admin"
+            ),
+        }
+    ]
 
 
 def test_application_status_is_read_without_triggering_sync() -> None:
