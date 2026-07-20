@@ -29,6 +29,8 @@ class _UpdateClaim:
     member_ids: tuple[UUID, ...]
     active_members: tuple[tuple[str, str], ...]
     attached_name: str | None
+    region: str
+    environment: str
     owns_transition: bool = True
 
 
@@ -53,7 +55,8 @@ def update_instance(instance_id: str, *, force: bool = False) -> JobResult:
 def _update_instance(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
-    reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...]], str] | None = None,
+    reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...], str, str], str]
+    | None = None,
     *,
     force: bool = False,
 ) -> JobResult:
@@ -133,7 +136,7 @@ def _reconcile_claim(
     instance_id: UUID,
     claim: _UpdateClaim,
     session_factory: sessionmaker[Session],
-    reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...]], str] | None,
+    reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...], str, str], str] | None,
 ) -> str:
     """Reconcile outside the transaction and fail only an owned transition."""
 
@@ -143,6 +146,8 @@ def _reconcile_claim(
             instance_id,
             claim.attached_name,
             claim.active_members,
+            claim.region,
+            claim.environment,
         )
     except Exception:
         if claim.owns_transition:
@@ -182,6 +187,8 @@ def _claim_update(
                     if member.action != "deleting"
                 ),
                 attached_name=instance.argocd_application_name,
+                region=instance.region.value,
+                environment=instance.environment.value,
                 owns_transition=False,
             )
         instance.status = InstanceStatus.RUNNING
@@ -207,6 +214,8 @@ def _claim_update(
                 if member.action != "deleting"
             ),
             attached_name=instance.argocd_application_name,
+            region=instance.region.value,
+            environment=instance.environment.value,
         )
         session.commit()
         return claim

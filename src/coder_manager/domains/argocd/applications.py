@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 MANAGED_LABEL = "coder-manager/managed"
 INSTANCE_ID_LABEL = "coder-manager/instance-id"
+PLUGIN_NAME = "argocd-cyberark-plugin-helm"
 
 
 def application_name(config: ArgoCdConfig, instance_id: UUID, attached_name: str | None) -> str:
@@ -28,14 +29,17 @@ def application_payload(
     name: str,
     instance_id: UUID,
     members: Iterable[tuple[str, str]],
+    target: tuple[str, str],
 ) -> dict[str, Any]:
     """Build the desired Argo CD Application for one managed instance.
 
-    The payload maps active members into deterministic Helm values and pins the
-    destination namespace to the managed Application name.
+    The payload maps active members into deterministic plugin Helm arguments,
+    supplies the CyberArk lookup parameters, and pins the destination namespace
+    to the managed Application name.
     """
 
     users, admins = _member_values(config.default_admins, members)
+    cyberark = config.cyberark_for(*target)
     return {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Application",
@@ -52,19 +56,27 @@ def application_payload(
                 "repoURL": config.repository_url,
                 "path": config.repository_path,
                 "targetRevision": config.target_revision,
-                "helm": {
-                    "releaseName": name,
+                "plugin": {
+                    "name": PLUGIN_NAME,
+                    "env": [
+                        {
+                            "name": "HELM_ARGS",
+                            "value": (
+                                f"--set users={','.join(users)} --set admins={','.join(admins)}"
+                            ),
+                        }
+                    ],
                     "parameters": [
                         {
-                            "name": "users",
-                            "value": ",".join(users),
-                            "forceString": True,
-                        },
-                        {
-                            "name": "admins",
-                            "value": ",".join(admins),
-                            "forceString": True,
-                        },
+                            "name": "cyberark",
+                            "map": {
+                                "appId": cyberark.app_id,
+                                "certName": cyberark.cert_name,
+                                "keyName": cyberark.key_name,
+                                "region": cyberark.region,
+                                "safe": cyberark.safe,
+                            },
+                        }
                     ],
                 },
             },

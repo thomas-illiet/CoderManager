@@ -19,12 +19,20 @@ def reconcile_instance_application(
     instance_id: UUID,
     attached_name: str | None,
     members: Iterable[tuple[str, str]],
+    region: str,
+    environment: str,
 ) -> str:
     """Reconcile one instance using the process-wide Argo CD configuration."""
 
     config = ArgoCdConfig.from_settings(get_settings())
     with ArgoCdClient(config) as client:
-        return client.ensure_application(instance_id, attached_name, members)
+        return client.ensure_application(
+            instance_id,
+            attached_name,
+            members,
+            region,
+            environment,
+        )
 
 
 def read_instance_application_status(

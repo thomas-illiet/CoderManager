@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from coder_manager.domains.argocd.errors import ArgoCdConfigurationError
@@ -17,6 +18,20 @@ APPLICATION_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 MAX_APPLICATION_NAME_LENGTH = 63
 UUID_HEX_LENGTH = 32
 MAX_USERNAME_LENGTH = 255
+INSTANCE_REGIONS = ("emea", "apac", "amer")
+INSTANCE_ENVIRONMENTS = ("development", "staging", "production")
+CYBERARK_FIELDS = ("app_id", "cert_name", "key_name", "region", "safe")
+
+
+@dataclass(frozen=True)
+class CyberArkParameters:
+    """Plugin parameters selected for one instance region and environment."""
+
+    app_id: str
+    cert_name: str
+    key_name: str
+    region: str
+    safe: str
 
 
 @dataclass(frozen=True)
@@ -32,13 +47,14 @@ class ArgoCdConfig:
     repository_path: str
     target_revision: str
     destination_name: str
+    cyberark_parameters: Mapping[tuple[str, str], CyberArkParameters]
     default_admins: tuple[str, ...]
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ArgoCdConfig:
         """Validate runtime settings only when an Argo CD operation is requested."""
 
-        required = {
+        required: dict[str, str | None] = {
             "CODER_MANAGER_ARGOCD_URL": settings.argocd_url,
             "CODER_MANAGER_ARGOCD_TOKEN": (
                 settings.argocd_token.get_secret_value() if settings.argocd_token else None
@@ -49,6 +65,7 @@ class ArgoCdConfig:
             "CODER_MANAGER_ARGOCD_TARGET_REVISION": settings.argocd_target_revision,
             "CODER_MANAGER_ARGOCD_DESTINATION_NAME": settings.argocd_destination_name,
         }
+        required.update(_cyberark_settings(settings))
         missing = [name for name, value in required.items() if not value or not value.strip()]
         if missing:
             joined = ", ".join(sorted(missing))
@@ -71,8 +88,18 @@ class ArgoCdConfig:
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
             target_revision=_required_value(required, "CODER_MANAGER_ARGOCD_TARGET_REVISION"),
             destination_name=_required_value(required, "CODER_MANAGER_ARGOCD_DESTINATION_NAME"),
+            cyberark_parameters=_cyberark_parameters(required),
             default_admins=_parse_default_admins(settings.default_admins),
         )
+
+    def cyberark_for(self, region: str, environment: str) -> CyberArkParameters:
+        """Return the CyberArk parameters configured for one instance target."""
+
+        try:
+            return self.cyberark_parameters[(region, environment)]
+        except KeyError as error:  # pragma: no cover - callers use domain enum values
+            msg = f"Unsupported CyberArk target: {region}/{environment}"
+            raise ArgoCdConfigurationError(msg) from error
 
 
 def _required_value(values: Mapping[str, str | None], name: str) -> str:
@@ -82,6 +109,60 @@ def _required_value(values: Mapping[str, str | None], name: str) -> str:
     if value is None:  # pragma: no cover - checked by caller
         raise ArgoCdConfigurationError(name)
     return value.strip()
+
+
+def _cyberark_settings(settings: Settings) -> dict[str, str | None]:
+    """Collect the nine region/environment CyberArk setting groups."""
+
+    return {
+        _cyberark_environment_name(region, environment, field_name): getattr(
+            settings,
+            f"cyberark_{region}_{environment}_{field_name}",
+        )
+        for region in INSTANCE_REGIONS
+        for environment in INSTANCE_ENVIRONMENTS
+        for field_name in CYBERARK_FIELDS
+    }
+
+
+def _cyberark_parameters(
+    values: Mapping[str, str | None],
+) -> Mapping[tuple[str, str], CyberArkParameters]:
+    """Build an immutable lookup for all supported instance targets."""
+
+    parameters = {
+        (region, environment): CyberArkParameters(
+            app_id=_required_value(
+                values,
+                _cyberark_environment_name(region, environment, "app_id"),
+            ),
+            cert_name=_required_value(
+                values,
+                _cyberark_environment_name(region, environment, "cert_name"),
+            ),
+            key_name=_required_value(
+                values,
+                _cyberark_environment_name(region, environment, "key_name"),
+            ),
+            region=_required_value(
+                values,
+                _cyberark_environment_name(region, environment, "region"),
+            ),
+            safe=_required_value(
+                values,
+                _cyberark_environment_name(region, environment, "safe"),
+            ),
+        )
+        for region in INSTANCE_REGIONS
+        for environment in INSTANCE_ENVIRONMENTS
+    }
+    return MappingProxyType(parameters)
+
+
+def _cyberark_environment_name(region: str, environment: str, field_name: str) -> str:
+    """Return the public environment variable name for one CyberArk value."""
+
+    return f"CODER_MANAGER_CYBERARK_{region}_{environment}_{field_name}".upper()
 
 
 def _parse_default_admins(raw_value: str) -> tuple[str, ...]:

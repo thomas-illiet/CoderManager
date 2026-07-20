@@ -35,6 +35,8 @@ def successful_reconcile(
     instance_id: UUID,
     attached_name: str | None,
     _members: tuple[tuple[str, str], ...],
+    _region: str,
+    _environment: str,
 ) -> str:
     """Return a deterministic Argo CD name without making a network request."""
 
@@ -101,6 +103,8 @@ async def test_create_instance_success_duplicate_and_error(
         _instance_id: UUID,
         _attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
+        _region: str,
+        _environment: str,
     ) -> str:
         """Simulate the expected failing reconcile behavior."""
 
@@ -329,10 +333,14 @@ async def test_update_instance_finalizes_and_coalesces_members(
         reconciled_instance_id: UUID,
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
+        region: str,
+        environment: str,
     ) -> str:
         """Record the reconcile calls made by this scenario."""
 
         reconciled_members.append(members)
+        assert region == "emea"
+        assert environment == "development"
         return attached_name or f"coder-{reconciled_instance_id.hex}"
 
     first_pass = tasks._update_instance(
@@ -384,6 +392,8 @@ async def test_update_instance_finalizes_and_coalesces_members(
         _instance_id: UUID,
         attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
+        _region: str,
+        _environment: str,
     ) -> str:
         """Add member during pass during the test scenario."""
 
@@ -441,6 +451,8 @@ async def test_update_instance_error_and_instance_delete_cascade(
         _instance_id: UUID,
         _attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
+        _region: str,
+        _environment: str,
     ) -> str:
         """Simulate the expected failing reconcile behavior."""
 
@@ -566,6 +578,8 @@ async def test_forced_sync_reconciles_without_stealing_a_running_transition(
         observed_instance_id: UUID,
         _attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
+        _region: str,
+        _environment: str,
     ) -> str:
         """Record the forced remote reconciliation."""
 
@@ -629,6 +643,8 @@ async def test_force_sync_retries_failed_member_deletion(
         _instance_id: UUID,
         _attached_name: str | None,
         members: tuple[tuple[str, str], ...],
+        _region: str,
+        _environment: str,
     ) -> str:
         """Record the reconcile calls made by this scenario."""
 

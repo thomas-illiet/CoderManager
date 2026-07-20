@@ -36,19 +36,26 @@ def create_instance(instance_id: str) -> JobResult:
 def _create_instance(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
-    reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...]], str] | None = None,
+    reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...], str, str], str]
+    | None = None,
 ) -> JobResult:
     """Claim and reconcile the initial Argo CD Application for an instance."""
 
     # Atomically claim the pending operation before contacting Argo CD.
-    claimed, attached_name = _claim_creation(instance_id, session_factory)
+    claimed, attached_name, region, environment = _claim_creation(instance_id, session_factory)
     if not claimed:
         return {"status": "noop"}
 
     # Keep the slow remote reconciliation outside the database transaction.
     try:
         reconcile_operation = reconcile or argocd.reconcile_instance_application
-        application_name = reconcile_operation(instance_id, attached_name, ())
+        application_name = reconcile_operation(
+            instance_id,
+            attached_name,
+            (),
+            region,
+            environment,
+        )
     except Exception:
         _mark_creation_error(instance_id, session_factory)
         raise
@@ -73,7 +80,7 @@ def _create_instance(
 def _claim_creation(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, str, str]:
     """Move an eligible creation operation to running and return its attachment."""
 
     with session_factory() as session:
@@ -85,11 +92,13 @@ def _claim_creation(
             or instance.action != "creating"
             or instance.status is not InstanceStatus.PENDING
         ):
-            return False, None
+            return False, None, "", ""
         instance.status = InstanceStatus.RUNNING
         attached_name = instance.argocd_application_name
+        region = instance.region.value
+        environment = instance.environment.value
         session.commit()
-        return True, attached_name
+        return True, attached_name, region, environment
 
 
 def _mark_creation_error(

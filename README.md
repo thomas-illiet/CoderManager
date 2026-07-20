@@ -167,16 +167,23 @@ statuses are limited to `pending`, `running`, `success`, and `error`.
 
 The creation worker creates or attaches an Argo CD Application named
 `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance UUID without dashes>`. The Application uses a
-Helm chart from the configured Git repository and receives comma-separated `users` and `admins`
-parameters. `CODER_MANAGER_DEFAULT_ADMINS` is a comma-separated list that is always included in
-both parameters without creating API member records.
+Helm chart from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
+The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
+`cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
+`CODER_MANAGER_DEFAULT_ADMINS` is a comma-separated list that is always included in both Helm
+values without creating API member records.
 
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
 `CODER_MANAGER_ARGOCD_PROJECT`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`, and
-`CODER_MANAGER_ARGOCD_DESTINATION_NAME`. TLS certificate verification is enabled by default;
-set `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment.
-The worker requests synchronization but does not wait for Argo CD health convergence.
+`CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure one CyberArk plugin map for each of the nine
+region/environment combinations. Variable names follow
+`CODER_MANAGER_CYBERARK_<REGION>_<ENVIRONMENT>_<FIELD>`, where regions are `EMEA`, `APAC`, and
+`AMER`, environments are `DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`,
+`CERT_NAME`, `KEY_NAME`, `REGION`, and `SAFE`. All 45 values are required for Argo CD
+reconciliation; `.env.example` lists the complete matrix. TLS certificate verification is enabled
+by default; set `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test
+environment. The worker requests synchronization but does not wait for Argo CD health convergence.
 
 `POST /api/v1/instances/{id}/sync` retries an idle successful or failed instance through the same
 `update_instance` worker. Pending or running instances return HTTP 409. Pass the `force=true` query

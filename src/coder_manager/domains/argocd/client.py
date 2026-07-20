@@ -77,11 +77,19 @@ class ArgoCdClient:
         instance_id: UUID,
         attached_name: str | None,
         members: Iterable[tuple[str, str]],
+        region: str,
+        environment: str,
     ) -> str:
         """Create or overwrite an Application and request one synchronization."""
 
         name = application_name(self._config, instance_id, attached_name)
-        desired = application_payload(self._config, name, instance_id, members)
+        desired = application_payload(
+            self._config,
+            name,
+            instance_id,
+            members,
+            (region, environment),
+        )
         existing = self._get_application(name)
 
         # Attempt creation first, but recover if another worker won the race.

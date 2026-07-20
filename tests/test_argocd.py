@@ -31,8 +31,20 @@ def configured_settings(**overrides: object) -> Settings:
         "argocd_destination_name": "in-cluster",
         "default_admins": " Root.Admin,alice ",
     }
+    for region in ("emea", "apac", "amer"):
+        for environment in ("development", "staging", "production"):
+            prefix = f"cyberark_{region}_{environment}"
+            values.update(
+                {
+                    f"{prefix}_app_id": f"{region}-{environment}-app",
+                    f"{prefix}_cert_name": f"{region}-{environment}-cert",
+                    f"{prefix}_key_name": f"{region}-{environment}-key",
+                    f"{prefix}_region": region.upper(),
+                    f"{prefix}_safe": f"{region}-{environment}-safe",
+                }
+            )
     values.update(overrides)
-    return Settings(**values)
+    return Settings.model_validate(values)
 
 
 def test_create_application_and_sync_contract() -> None:
@@ -55,6 +67,8 @@ def test_create_application_and_sync_contract() -> None:
             instance_id,
             None,
             (("zoe", "user"), ("alice", "admin")),
+            "emea",
+            "development",
         )
 
     assert name == "managed-12345678123456781234567812345678"
@@ -78,19 +92,25 @@ def test_create_application_and_sync_contract() -> None:
         "repoURL": "https://git.test/platform.git",
         "path": "charts/coder",
         "targetRevision": "v1.2.3",
-        "helm": {
-            "releaseName": name,
+        "plugin": {
+            "name": "argocd-cyberark-plugin-helm",
+            "env": [
+                {
+                    "name": "HELM_ARGS",
+                    "value": "--set users=alice,root.admin,zoe --set admins=alice,root.admin",
+                }
+            ],
             "parameters": [
                 {
-                    "name": "users",
-                    "value": "alice,root.admin,zoe",
-                    "forceString": True,
-                },
-                {
-                    "name": "admins",
-                    "value": "alice,root.admin",
-                    "forceString": True,
-                },
+                    "name": "cyberark",
+                    "map": {
+                        "appId": "emea-development-app",
+                        "certName": "emea-development-cert",
+                        "keyName": "emea-development-key",
+                        "region": "EMEA",
+                        "safe": "emea-development-safe",
+                    },
+                }
             ],
         },
     }
@@ -134,7 +154,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        returned_name = client.ensure_application(uuid4(), attached_name, ())
+        returned_name = client.ensure_application(uuid4(), attached_name, (), "apac", "staging")
 
     assert returned_name == attached_name
     assert [request.method for request in requests] == ["GET", "PUT", "POST"]
@@ -144,6 +164,13 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert update["metadata"]["labels"]["existing"] == "kept"
     assert update["metadata"]["labels"]["coder-manager/managed"] == "true"
     assert update["spec"]["project"] == "coder"
+    assert update["spec"]["source"]["plugin"]["parameters"][0]["map"] == {
+        "appId": "apac-staging-app",
+        "certName": "apac-staging-cert",
+        "keyName": "apac-staging-key",
+        "region": "APAC",
+        "safe": "apac-staging-safe",
+    }
     assert "status" not in update
 
 
@@ -169,7 +196,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        client.ensure_application(uuid4(), "attached", ())
+        client.ensure_application(uuid4(), "attached", (), "amer", "production")
 
     assert [request.method for request in requests] == ["GET", "POST", "GET", "PUT", "POST"]
 
@@ -259,7 +286,7 @@ def test_invalid_existing_application_response_is_rejected(response: httpx.Respo
         ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
         pytest.raises(ArgoCdRequestError),
     ):
-        client.ensure_application(uuid4(), "attached", ())
+        client.ensure_application(uuid4(), "attached", (), "emea", "development")
 
 
 def test_request_errors_do_not_include_token_or_response_body() -> None:
@@ -275,7 +302,7 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
         ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
         pytest.raises(ArgoCdRequestError) as caught,
     ):
-        client.ensure_application(uuid4(), None, ())
+        client.ensure_application(uuid4(), None, (), "emea", "development")
 
     message = str(caught.value)
     assert "HTTP 500" in message
@@ -335,6 +362,10 @@ def test_client_tls_and_timeout_configuration(
         (
             configured_settings(default_admins="x" * 256),
             "longer than 255",
+        ),
+        (
+            configured_settings(cyberark_amer_production_safe=" "),
+            "CODER_MANAGER_CYBERARK_AMER_PRODUCTION_SAFE",
         ),
     ],
 )
