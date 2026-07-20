@@ -309,11 +309,19 @@ async def create_instance(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Force an instance synchronization",
 )
-async def sync_instance(instance_id: UUID, session: SessionDependency) -> InstanceRead:
-    """Request a full Argo CD reconciliation for an idle or failed instance."""
+async def sync_instance(
+    instance_id: UUID,
+    session: SessionDependency,
+    *,
+    force: Annotated[
+        bool,
+        Query(description="Start a new reconciliation when one is already in progress"),
+    ] = False,
+) -> InstanceRead:
+    """Request a full Argo CD reconciliation, optionally alongside one in progress."""
 
     try:
-        instance = await InstanceRepository(session).request_sync(instance_id)
+        instance = await InstanceRepository(session).request_sync(instance_id, force=force)
     except InstanceNotFoundError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -324,7 +332,10 @@ async def sync_instance(instance_id: UUID, session: SessionDependency) -> Instan
             status_code=status.HTTP_409_CONFLICT,
             detail="Instance has an action in progress",
         ) from error
-    update_instance_job.delay(str(instance.id))
+    if force:
+        update_instance_job.delay(str(instance.id), force=True)
+    else:
+        update_instance_job.delay(str(instance.id))
     return InstanceRead.model_validate(instance)
 
 

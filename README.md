@@ -179,7 +179,9 @@ set `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted t
 The worker requests synchronization but does not wait for Argo CD health convergence.
 
 `POST /api/v1/instances/{id}/sync` retries an idle successful or failed instance through the same
-`update_instance` worker. Pending or running instances return HTTP 409.
+`update_instance` worker. Pending or running instances return HTTP 409. Pass the `force=true` query
+parameter to enqueue an additional reconciliation when the current action is already an instance
+update; creation and deletion in progress remain protected.
 
 `GET /api/v1/instances/{id}/status` reads Argo CD directly and returns the Application name, sync
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.

@@ -420,21 +420,82 @@ async def test_force_sync_accepts_idle_instances_and_rejects_busy_or_missing(
     instance_id = UUID(str(instance["id"]))
 
     busy = await client.post(f"/api/v1/instances/{instance_id}/sync")
+    forced_creation = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
     assert busy.status_code == 409
+    assert forced_creation.status_code == 409
     assert busy.json() == {"detail": "Instance has an action in progress"}
 
     await set_instance_status(session_maker, instance_id)
     tasks.update_instance.delay.reset_mock()
     accepted = await client.post(f"/api/v1/instances/{instance_id}/sync")
     repeated = await client.post(f"/api/v1/instances/{instance_id}/sync")
+    forced = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
     missing = await client.post(f"/api/v1/instances/{uuid4()}/sync")
 
     assert accepted.status_code == 202
     assert accepted.json()["action"] == "updating"
     assert accepted.json()["status"] == "pending"
     assert repeated.status_code == 409
+    assert forced.status_code == 202
+    assert forced.json()["action"] == "updating"
+    assert forced.json()["status"] == "pending"
     assert missing.status_code == 404
-    tasks.update_instance.delay.assert_called_once_with(str(instance_id))
+    assert tasks.update_instance.delay.call_args_list == [
+        ((str(instance_id),), {}),
+        ((str(instance_id),), {"force": True}),
+    ]
+
+
+async def test_forced_sync_reconciles_without_stealing_a_running_transition(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Run a forced reconciliation while preserving the active worker state."""
+
+    application = await create_application(client, suffix="forced-running-sync")
+    instance = await create_instance(client, application["id"])
+    instance_id = UUID(str(instance["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.RUNNING
+        await session.commit()
+
+    tasks.update_instance.delay.reset_mock()
+    accepted = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
+    assert accepted.status_code == 202
+    assert accepted.json()["status"] == "running"
+    tasks.update_instance.delay.assert_called_once_with(str(instance_id), force=True)
+
+    reconciled = False
+
+    def record_reconcile(
+        observed_instance_id: UUID,
+        _attached_name: str | None,
+        _members: tuple[tuple[str, str], ...],
+    ) -> str:
+        """Record the forced remote reconciliation."""
+
+        nonlocal reconciled
+        reconciled = True
+        assert observed_instance_id == instance_id
+        return f"coder-{instance_id.hex}"
+
+    result = tasks._update_instance(
+        instance_id,
+        sync_session_maker,
+        record_reconcile,
+        force=True,
+    )
+    assert result == {"status": "success"}
+    assert reconciled is True
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.action == "updating"
+        assert stored.status is InstanceStatus.RUNNING
 
 
 async def test_force_sync_retries_failed_member_deletion(

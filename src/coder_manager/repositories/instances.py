@@ -254,8 +254,8 @@ class InstanceRepository:
             raise InstanceNotFoundError
         return stored_instance
 
-    async def request_sync(self, instance_id: UUID) -> Instance:
-        """Request an Argo CD reconciliation for an idle or failed instance."""
+    async def request_sync(self, instance_id: UUID, *, force: bool = False) -> Instance:
+        """Request a reconciliation, optionally while an update is already in progress."""
 
         # Serialize manual sync requests with all other instance transitions.
         instance = await self._session.scalar(
@@ -267,9 +267,27 @@ class InstanceRepository:
         if instance is None:
             await self._session.rollback()
             raise InstanceNotFoundError
-        if instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}:
+        action_in_progress = instance.status in {
+            InstanceStatus.PENDING,
+            InstanceStatus.RUNNING,
+        }
+        sync_in_progress = action_in_progress and instance.action == "updating"
+        if action_in_progress and not (force and sync_in_progress):
             await self._session.rollback()
             raise InstanceActionConflictError
+
+        if sync_in_progress:
+            # The forced worker performs a read-only reconciliation pass so the
+            # worker that owns the current transition can still finalize it.
+            await self._session.commit()
+            stored_instance = await self._session.scalar(
+                select(Instance)
+                .where(Instance.id == instance_id)
+                .options(selectinload(Instance.database_allocation))
+            )
+            if stored_instance is None:  # pragma: no cover - protected by the row lock
+                raise InstanceNotFoundError
+            return stored_instance
 
         # Retry failed member mutations in the same reconciliation pass.
         failed_members = await self._session.scalars(
