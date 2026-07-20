@@ -35,6 +35,17 @@ def reconcile_instance_application(
         )
 
 
+def delete_instance_application(
+    instance_id: UUID,
+    attached_name: str | None,
+) -> None:
+    """Delete one instance's Application using the process-wide configuration."""
+
+    config = ArgoCdConfig.from_settings(get_settings())
+    with ArgoCdClient(config) as client:
+        client.delete_application(instance_id, attached_name)
+
+
 def read_instance_application_status(
     instance_id: UUID,
     attached_name: str | None,

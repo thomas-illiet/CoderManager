@@ -9,6 +9,7 @@ from sqlalchemy import delete, select
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
+from coder_manager.domains import argocd
 from coder_manager.models import (
     DatabaseAllocation,
     Instance,
@@ -17,10 +18,11 @@ from coder_manager.models import (
     Member,
     Workspace,
 )
-from coder_manager.tasks import _common
 from coder_manager.tasks._common import StatefulResourceTask
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sqlalchemy.orm import Session, sessionmaker
 
     from coder_manager.tasks._common import JobResult
@@ -41,16 +43,19 @@ def delete_instance(instance_id: str) -> JobResult:
 def _delete_instance(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
+    delete_application: Callable[[UUID, str | None], None] | None = None,
 ) -> JobResult:
     """Claim and execute one instance deletion operation."""
 
     # Claim the transition so duplicate deliveries become harmless no-ops.
-    if not _claim_deletion(instance_id, session_factory):
+    claimed, attached_name = _claim_deletion(instance_id, session_factory)
+    if not claimed:
         return {"status": "noop"}
 
     # Run external cleanup without holding the instance row lock.
     try:
-        _common.placeholder()
+        delete_operation = delete_application or argocd.delete_instance_application
+        delete_operation(instance_id, attached_name)
     except Exception:
         _mark_deletion_error(instance_id, session_factory)
         raise
@@ -82,8 +87,8 @@ def _delete_instance(
 def _claim_deletion(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
-) -> bool:
-    """Move an eligible deletion operation to running."""
+) -> tuple[bool, str | None]:
+    """Move an eligible deletion operation to running and return its attachment."""
 
     with session_factory() as session:
         instance = session.scalar(
@@ -94,10 +99,11 @@ def _claim_deletion(
             or instance.action != "deleting"
             or instance.status is not InstanceStatus.PENDING
         ):
-            return False
+            return False, None
         instance.status = InstanceStatus.RUNNING
+        attached_name = instance.argocd_application_name
         session.commit()
-        return True
+        return True, attached_name
 
 
 def _mark_deletion_error(

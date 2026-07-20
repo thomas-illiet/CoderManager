@@ -139,6 +139,27 @@ class ArgoCdClient:
             raise ArgoCdApplicationNotFoundError(name)
         return application_status(name, application)
 
+    def delete_application(
+        self,
+        instance_id: UUID,
+        attached_name: str | None,
+    ) -> None:
+        """Delete an Application and its managed resources idempotently."""
+
+        name = application_name(self._config, instance_id, attached_name)
+        path = f"api/v1/applications/{name}"
+        response = self._client.delete(
+            path,
+            params={
+                "cascade": "true",
+                "propagationPolicy": "foreground",
+                "project": self._config.project,
+            },
+        )
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return
+        self._raise_for_response(response, "DELETE", path)
+
     def _get_application(self, name: str) -> dict[str, Any] | None:
         """Fetch one Application, returning none only for an explicit 404 response."""
 

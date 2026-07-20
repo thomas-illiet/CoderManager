@@ -326,9 +326,10 @@ updated or deleted. The list supports `instance_id`, `template_id`, `member_id`,
 ## Celery
 
 The worker exposes `coder_manager.healthcheck`, the `coder_manager.sync_database` placeholder, and
-six lifecycle tasks. Instance creation and
-updates reconcile Argo CD Applications; workspace operations and instance deletion retain their
-dedicated lifecycle implementations:
+six lifecycle tasks. Instance creation and updates reconcile Argo CD Applications. Instance
+deletion removes the Application and its managed resources with foreground cascading deletion
+before removing local rows; an already absent remote Application is treated as a successful retry.
+Workspace operations retain their dedicated lifecycle implementations:
 
 - `coder_manager.create_instance`, `coder_manager.update_instance`, and
   `coder_manager.delete_instance`

@@ -651,7 +651,10 @@ async def test_instance_deletion_releases_database_slot(
     accepted = await client.delete(f"/api/v1/instances/{instance_id}")
     assert accepted.status_code == 202
 
-    result = tasks._delete_instance(instance_id, sync_session_maker)
+    def successful_delete(_instance_id: UUID, _attached_name: str | None) -> None:
+        """Simulate successful Argo CD cleanup for the database capacity scenario."""
+
+    result = tasks._delete_instance(instance_id, sync_session_maker, successful_delete)
     assert result == {"status": "deleted"}
 
     second_application = await create_application(client, "delete-second")

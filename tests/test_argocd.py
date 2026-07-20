@@ -1,6 +1,7 @@
 """Argo CD configuration and HTTP contract tests."""
 
 import json
+from typing import Self
 from uuid import UUID, uuid4
 
 import httpx
@@ -15,6 +16,7 @@ from coder_manager.domains.argocd import (
     ArgoCdRequestError,
 )
 from coder_manager.domains.argocd import client as argocd_client
+from coder_manager.domains.argocd import service as argocd_service
 
 
 def configured_settings(**overrides: object) -> Settings:
@@ -282,6 +284,77 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
     assert partial.operation_phase is None
     assert partial.revision is None
     assert partial.reconciled_at is None
+
+
+def test_delete_application_is_cascading_and_idempotent() -> None:
+    """Delete managed resources and tolerate an already absent Application."""
+
+    requests: list[httpx.Request] = []
+    responses = iter((httpx.Response(200, json={}), httpx.Response(404)))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Record both the initial deletion and its idempotent retry."""
+
+        requests.append(request)
+        return next(responses)
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    instance_id = uuid4()
+    with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
+        client.delete_application(instance_id, "attached")
+        client.delete_application(instance_id, "attached")
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("DELETE", "/root/api/v1/applications/attached"),
+        ("DELETE", "/root/api/v1/applications/attached"),
+    ]
+    assert [dict(request.url.params) for request in requests] == [
+        {
+            "cascade": "true",
+            "propagationPolicy": "foreground",
+            "project": "coder",
+        },
+        {
+            "cascade": "true",
+            "propagationPolicy": "foreground",
+            "project": "coder",
+        },
+    ]
+
+
+def test_delete_instance_application_uses_process_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the configured client when the worker invokes the deletion service."""
+
+    deleted: list[tuple[UUID, str | None]] = []
+    instance_id = uuid4()
+
+    class StubClient:
+        """Capture calls made by the process-wide deletion service."""
+
+        def __init__(self, _config: ArgoCdConfig) -> None:
+            """Accept the validated process configuration."""
+
+        def __enter__(self) -> Self:
+            """Enter the client context."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the client context."""
+
+        def delete_application(self, deleted_id: UUID, attached_name: str | None) -> None:
+            """Capture the requested Application deletion."""
+
+            deleted.append((deleted_id, attached_name))
+
+    monkeypatch.setattr(argocd_service, "get_settings", configured_settings)
+    monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
+
+    argocd_service.delete_instance_application(instance_id, "attached")
+
+    assert deleted == [(instance_id, "attached")]
 
 
 @pytest.mark.parametrize(

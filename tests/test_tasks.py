@@ -475,17 +475,25 @@ async def test_update_instance_error_and_instance_delete_cascade(
         json=workspace_payload(managed_instance, owner, template, image),
     )
     assert workspace_response.status_code == 201
+    async with session_maker() as session:
+        stored_instance = await session.get(Instance, managed_id)
+        assert stored_instance is not None
+        stored_instance.argocd_application_name = "managed-attached"
+        await session.commit()
     deletion = await client.delete(f"/api/v1/instances/{managed_id}")
     assert deletion.status_code == 202
 
-    def successful_placeholder() -> None:
-        """Simulate a successful placeholder operation."""
+    deleted_applications: list[tuple[UUID, str | None]] = []
 
-        return
+    def successful_delete(deleted_id: UUID, attached_name: str | None) -> None:
+        """Record the successful remote Application cleanup."""
 
-    monkeypatch.setattr(task_common, "placeholder", successful_placeholder)
+        deleted_applications.append((deleted_id, attached_name))
+
+    monkeypatch.setattr(argocd, "delete_instance_application", successful_delete)
     result = tasks._delete_instance(managed_id, sync_session_maker)
     assert result == {"status": "deleted"}
+    assert deleted_applications == [(managed_id, "managed-attached")]
     async with session_maker() as session:
         assert await session.get(Instance, managed_id) is None
         member_count = await session.scalar(
@@ -502,6 +510,35 @@ async def test_update_instance_error_and_instance_delete_cascade(
         assert member_count == 0
         assert workspace_count == 0
         assert allocation_count == 0
+
+
+async def test_delete_instance_keeps_local_state_when_argocd_fails(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Retain an errored instance when its Argo CD Application cannot be deleted."""
+
+    application = await create_application(client, suffix="delete-error")
+    instance = await create_instance(client, application["id"])
+    instance_id = UUID(str(instance["id"]))
+    await set_instance_status(session_maker, instance_id)
+    deletion = await client.delete(f"/api/v1/instances/{instance_id}")
+    assert deletion.status_code == 202
+
+    def failing_delete(_instance_id: UUID, _attached_name: str | None) -> None:
+        """Simulate a rejected Argo CD deletion."""
+
+        raise RuntimeError("Argo CD deletion failed")
+
+    with pytest.raises(RuntimeError, match="Argo CD deletion failed"):
+        tasks._delete_instance(instance_id, sync_session_maker, failing_delete)
+
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.action == "deleting"
+        assert stored.status is InstanceStatus.ERROR
 
 
 async def test_missing_update_instance_is_a_noop(
