@@ -15,7 +15,6 @@ if TYPE_CHECKING:
 
 MANAGED_LABEL = "coder-manager/managed"
 INSTANCE_ID_LABEL = "coder-manager/instance-id"
-PLUGIN_NAME = "argocd-cyberark-plugin-helm"
 
 
 def application_name(config: ArgoCdConfig, instance_id: UUID, attached_name: str | None) -> str:
@@ -57,7 +56,7 @@ def application_payload(
                 "path": config.repository_path,
                 "targetRevision": config.target_revision,
                 "plugin": {
-                    "name": PLUGIN_NAME,
+                    "name": "argocd-cyberark-plugin-helm",
                     "env": [
                         {
                             "name": "HELM_ARGS",
@@ -73,7 +72,7 @@ def application_payload(
                                 "appId": cyberark.app_id,
                                 "certName": cyberark.cert_name,
                                 "keyName": cyberark.key_name,
-                                "region": cyberark.region,
+                                "region": target[0].upper(),
                                 "safe": cyberark.safe,
                             },
                         }

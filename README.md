@@ -180,10 +180,11 @@ Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
 region/environment combinations. Variable names follow
 `CODER_MANAGER_CYBERARK_<REGION>_<ENVIRONMENT>_<FIELD>`, where regions are `EMEA`, `APAC`, and
 `AMER`, environments are `DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`,
-`CERT_NAME`, `KEY_NAME`, `REGION`, and `SAFE`. All 45 values are required for Argo CD
-reconciliation; `.env.example` lists the complete matrix. TLS certificate verification is enabled
-by default; set `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test
-environment. The worker requests synchronization but does not wait for Argo CD health convergence.
+`CERT_NAME`, `KEY_NAME`, and `SAFE`. All 36 values are required for Argo CD reconciliation. The
+plugin `region` parameter comes directly from the instance region in uppercase; `.env.example`
+lists the complete matrix. TLS certificate verification is enabled by default; set
+`CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
+worker requests synchronization but does not wait for Argo CD health convergence.
 
 `POST /api/v1/instances/{id}/sync` retries an idle successful or failed instance through the same
 `update_instance` worker. Pending or running instances return HTTP 409. Pass the `force=true` query

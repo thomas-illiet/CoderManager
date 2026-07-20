@@ -20,7 +20,7 @@ UUID_HEX_LENGTH = 32
 MAX_USERNAME_LENGTH = 255
 INSTANCE_REGIONS = ("emea", "apac", "amer")
 INSTANCE_ENVIRONMENTS = ("development", "staging", "production")
-CYBERARK_FIELDS = ("app_id", "cert_name", "key_name", "region", "safe")
+CYBERARK_FIELDS = ("app_id", "cert_name", "key_name", "safe")
 
 
 @dataclass(frozen=True)
@@ -30,7 +30,6 @@ class CyberArkParameters:
     app_id: str
     cert_name: str
     key_name: str
-    region: str
     safe: str
 
 
@@ -143,10 +142,6 @@ def _cyberark_parameters(
             key_name=_required_value(
                 values,
                 _cyberark_environment_name(region, environment, "key_name"),
-            ),
-            region=_required_value(
-                values,
-                _cyberark_environment_name(region, environment, "region"),
             ),
             safe=_required_value(
                 values,

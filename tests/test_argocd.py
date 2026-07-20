@@ -39,7 +39,6 @@ def configured_settings(**overrides: object) -> Settings:
                     f"{prefix}_app_id": f"{region}-{environment}-app",
                     f"{prefix}_cert_name": f"{region}-{environment}-cert",
                     f"{prefix}_key_name": f"{region}-{environment}-key",
-                    f"{prefix}_region": region.upper(),
                     f"{prefix}_safe": f"{region}-{environment}-safe",
                 }
             )
