@@ -35,7 +35,6 @@ class StatefulResourceTask(Task):
     resource_type: str
     expected_action: str
     fail_running_members = False
-    skip_failure_for_force = False
 
     def on_failure(
         self,
@@ -48,8 +47,6 @@ class StatefulResourceTask(Task):
         """Turn a matching pending/running transition into an error state."""
 
         try:
-            if self.skip_failure_for_force and kwargs.get("force") is True:
-                return super().on_failure(exc, task_id, args, kwargs, einfo)
             resource_id = UUID(str(args[0]))
             session_factory = worker_database.get_worker_session_maker()
             if self.resource_type == "instance":

@@ -192,7 +192,7 @@ async def test_celery_failure_guard_marks_active_database_states_as_error(
     async with session_maker() as session:
         stored_instance = await session.get(Instance, instance_id)
         assert stored_instance is not None
-        assert stored_instance.status is InstanceStatus.RUNNING
+        assert stored_instance.status is InstanceStatus.ERROR
 
     ready_instance, owner, template, image = await create_ready_context(client, session_maker)
     workspace_response = await client.post(
@@ -549,12 +549,12 @@ async def test_force_sync_accepts_idle_instances_and_rejects_busy_or_missing(
     ]
 
 
-async def test_forced_sync_reconciles_without_stealing_a_running_transition(
+async def test_forced_sync_finalizes_a_running_transition(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
 ) -> None:
-    """Run a forced reconciliation while preserving the active worker state."""
+    """Let a successful forced reconciliation finalize the active transition."""
 
     application = await create_application(client, suffix="forced-running-sync")
     instance = await create_instance(client, application["id"])
@@ -564,7 +564,24 @@ async def test_forced_sync_reconciles_without_stealing_a_running_transition(
         assert stored is not None
         stored.action = "updating"
         stored.status = InstanceStatus.RUNNING
+        running_member = Member(
+            instance_id=instance_id,
+            username="running-member",
+            role="user",
+            action="updating",
+            status=MemberStatus.RUNNING,
+        )
+        deleting_member = Member(
+            instance_id=instance_id,
+            username="deleting-member",
+            role="user",
+            action="deleting",
+            status=MemberStatus.RUNNING,
+        )
+        session.add_all([running_member, deleting_member])
         await session.commit()
+        running_member_id = running_member.id
+        deleting_member_id = deleting_member.id
 
     tasks.update_instance.delay.reset_mock()
     accepted = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
@@ -586,6 +603,7 @@ async def test_forced_sync_reconciles_without_stealing_a_running_transition(
         nonlocal reconciled
         reconciled = True
         assert observed_instance_id == instance_id
+        assert _members == (("running-member", "user"),)
         return f"coder-{instance_id.hex}"
 
     result = tasks._update_instance(
@@ -598,9 +616,67 @@ async def test_forced_sync_reconciles_without_stealing_a_running_transition(
     assert reconciled is True
     async with session_maker() as session:
         stored = await session.get(Instance, instance_id)
+        stored_running_member = await session.get(Member, running_member_id)
         assert stored is not None
         assert stored.action == "updating"
-        assert stored.status is InstanceStatus.RUNNING
+        assert stored.status is InstanceStatus.SUCCESS
+        assert stored_running_member is not None
+        assert stored_running_member.status is MemberStatus.SUCCESS
+        assert await session.get(Member, deleting_member_id) is None
+
+
+async def test_forced_sync_failure_finalizes_a_running_transition_as_error(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Let a failed forced reconciliation finalize the active transition."""
+
+    application = await create_application(client, suffix="forced-running-error")
+    instance = await create_instance(client, application["id"])
+    instance_id = UUID(str(instance["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.RUNNING
+        running_member = Member(
+            instance_id=instance_id,
+            username="failed-member",
+            role="user",
+            action="updating",
+            status=MemberStatus.RUNNING,
+        )
+        session.add(running_member)
+        await session.commit()
+        running_member_id = running_member.id
+
+    def fail_reconcile(
+        _instance_id: UUID,
+        _attached_name: str | None,
+        _members: tuple[tuple[str, str], ...],
+        _region: str,
+        _environment: str,
+    ) -> str:
+        """Fail the forced reconciliation."""
+
+        raise RuntimeError("forced reconciliation failed")
+
+    with pytest.raises(RuntimeError, match="forced reconciliation failed"):
+        tasks._update_instance(
+            instance_id,
+            sync_session_maker,
+            fail_reconcile,
+            force=True,
+        )
+
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        stored_member = await session.get(Member, running_member_id)
+        assert stored is not None
+        assert stored.status is InstanceStatus.ERROR
+        assert stored_member is not None
+        assert stored_member.status is MemberStatus.ERROR
 
 
 async def test_force_sync_retries_failed_member_deletion(

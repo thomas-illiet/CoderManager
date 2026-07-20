@@ -31,7 +31,6 @@ class _UpdateClaim:
     attached_name: str | None
     region: str
     environment: str
-    owns_transition: bool = True
 
 
 @celery_app.task(
@@ -40,7 +39,6 @@ class _UpdateClaim:
     resource_type="instance",
     expected_action="updating",
     fail_running_members=True,
-    skip_failure_for_force=True,
 )
 def update_instance(instance_id: str, *, force: bool = False) -> JobResult:
     """Reconcile pending member changes for one Coder instance."""
@@ -73,9 +71,6 @@ def _update_instance(
         session_factory,
         reconcile,
     )
-
-    if not claim.owns_transition:
-        return {"status": "success"}
 
     # Finalize only the claimed members, preserving changes queued during reconciliation.
     enqueue_next_pass = False
@@ -138,7 +133,7 @@ def _reconcile_claim(
     session_factory: sessionmaker[Session],
     reconcile: Callable[[UUID, str | None, tuple[tuple[str, str], ...], str, str], str] | None,
 ) -> str:
-    """Reconcile outside the transaction and fail only an owned transition."""
+    """Reconcile outside the transaction and fail the claimed transition."""
 
     try:
         reconcile_operation = reconcile or argocd.reconcile_instance_application
@@ -150,8 +145,7 @@ def _reconcile_claim(
             claim.environment,
         )
     except Exception:
-        if claim.owns_transition:
-            _mark_instance_update_error(instance_id, list(claim.member_ids), session_factory)
+        _mark_instance_update_error(instance_id, list(claim.member_ids), session_factory)
         raise
 
 
@@ -170,17 +164,20 @@ def _claim_update(
         if instance is None or instance.action != "updating":
             return None
         if instance.status is not InstanceStatus.PENDING:
-            if not force:
+            if not force or instance.status is not InstanceStatus.RUNNING:
                 return None
             members = list(
                 session.scalars(
                     select(Member)
                     .where(Member.instance_id == instance_id)
                     .order_by(Member.username, Member.id)
+                    .with_for_update()
                 )
             )
             return _UpdateClaim(
-                member_ids=(),
+                member_ids=tuple(
+                    member.id for member in members if member.status is MemberStatus.RUNNING
+                ),
                 active_members=tuple(
                     (member.username, member.role.value)
                     for member in members
@@ -189,7 +186,6 @@ def _claim_update(
                 attached_name=instance.argocd_application_name,
                 region=instance.region.value,
                 environment=instance.environment.value,
-                owns_transition=False,
             )
         instance.status = InstanceStatus.RUNNING
         members = list(
