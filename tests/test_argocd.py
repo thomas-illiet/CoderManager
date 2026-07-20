@@ -99,7 +99,7 @@ def test_create_application_and_sync_contract() -> None:
                 {
                     "name": "HELM_ARGS",
                     "value": (
-                        "-f values-global.yaml -f value-dev.yaml "
+                        "-f values-global.yaml -f values-dev.yaml "
                         "--set users=alice,root.admin,zoe "
                         "--set admins=alice,root.admin"
                     ),
@@ -172,7 +172,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert update["spec"]["source"]["plugin"]["env"] == [
         {
             "name": "HELM_ARGS",
-            "value": ("-f values-global.yaml -f value-stg.yaml --set users= --set admins="),
+            "value": ("-f values-global.yaml -f values-stg.yaml --set users= --set admins="),
         }
     ]
     assert update["spec"]["source"]["plugin"]["parameters"][0]["map"] == {
@@ -215,7 +215,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
-                "-f values-global.yaml -f value-prd.yaml "
+                "-f values-global.yaml -f values-prd.yaml "
                 "--set users=alice,root.admin --set admins=alice,root.admin"
             ),
         }

@@ -66,7 +66,7 @@ def application_payload(
                         {
                             "name": "HELM_ARGS",
                             "value": (
-                                f"-f values-global.yaml -f value-{values_environment}.yaml "
+                                f"-f values-global.yaml -f values-{values_environment}.yaml "
                                 f"--set users={','.join(users)} --set admins={','.join(admins)}"
                             ),
                         }
