@@ -72,7 +72,12 @@ def application_payload(
                 "name": config.destination_name,
                 "namespace": name,
             },
-            "syncPolicy": {"syncOptions": ["CreateNamespace=true"]},
+            "syncPolicy": {
+                "automated": {
+                    "prune": True,
+                    "selfHeal": True,
+                }
+            },
         },
     }
 

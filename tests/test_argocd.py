@@ -98,7 +98,12 @@ def test_create_application_and_sync_contract() -> None:
         "name": "in-cluster",
         "namespace": name,
     }
-    assert payload["spec"]["syncPolicy"] == {"syncOptions": ["CreateNamespace=true"]}
+    assert payload["spec"]["syncPolicy"] == {
+        "automated": {
+            "prune": True,
+            "selfHeal": True,
+        }
+    }
 
 
 def test_existing_application_is_attached_and_overwritten() -> None:
