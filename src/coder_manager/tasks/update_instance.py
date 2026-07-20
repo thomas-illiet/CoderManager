@@ -12,6 +12,7 @@ from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
 from coder_manager.domains import argocd
 from coder_manager.models import Instance, InstanceStatus, Member, MemberStatus
+from coder_manager.tasks._common import StatefulResourceTask
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -31,7 +32,14 @@ class _UpdateClaim:
     owns_transition: bool = True
 
 
-@celery_app.task(name="coder_manager.update_instance")
+@celery_app.task(
+    name="coder_manager.update_instance",
+    base=StatefulResourceTask,
+    resource_type="instance",
+    expected_action="updating",
+    fail_running_members=True,
+    skip_failure_for_force=True,
+)
 def update_instance(instance_id: str, *, force: bool = False) -> JobResult:
     """Reconcile pending member changes for one Coder instance."""
 

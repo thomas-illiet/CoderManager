@@ -4,11 +4,16 @@ from uuid import UUID
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
-from coder_manager.tasks._common import JobResult
+from coder_manager.tasks._common import JobResult, StatefulResourceTask
 from coder_manager.tasks._workspace_lifecycle import _workspace_lifecycle
 
 
-@celery_app.task(name="coder_manager.delete_workspace")
+@celery_app.task(
+    name="coder_manager.delete_workspace",
+    base=StatefulResourceTask,
+    resource_type="workspace",
+    expected_action="deleting",
+)
 def delete_workspace(workspace_id: str) -> JobResult:
     """Run the placeholder deletion lifecycle for one Coder workspace."""
 

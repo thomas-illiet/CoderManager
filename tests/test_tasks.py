@@ -118,6 +118,97 @@ async def test_create_instance_success_duplicate_and_error(
         assert stored.status is InstanceStatus.ERROR
 
 
+async def test_celery_failure_guard_marks_active_database_states_as_error(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persist terminal errors even when a task fails outside its lifecycle helper."""
+
+    monkeypatch.setattr(
+        worker_database,
+        "get_worker_session_maker",
+        lambda: sync_session_maker,
+    )
+    application = await create_application(client, suffix="failure-guard")
+    instance = await create_instance(client, application["id"])
+    instance_id = UUID(str(instance["id"]))
+
+    tasks.create_instance.on_failure(
+        RuntimeError("worker failed"),
+        "create-task-id",
+        (str(instance_id),),
+        {},
+        None,
+    )
+    async with session_maker() as session:
+        stored_instance = await session.get(Instance, instance_id)
+        assert stored_instance is not None
+        assert stored_instance.status is InstanceStatus.ERROR
+
+        stored_instance.action = "updating"
+        stored_instance.status = InstanceStatus.RUNNING
+        running_member = Member(
+            instance_id=instance_id,
+            username="claimed-member",
+            role="user",
+            action="updating",
+            status=MemberStatus.RUNNING,
+        )
+        session.add(running_member)
+        await session.commit()
+        member_id = running_member.id
+
+    tasks.update_instance.on_failure(
+        RuntimeError("Argo CD failed"),
+        "update-task-id",
+        (str(instance_id),),
+        {},
+        None,
+    )
+    async with session_maker() as session:
+        stored_instance = await session.get(Instance, instance_id)
+        stored_member = await session.get(Member, member_id)
+        assert stored_instance is not None
+        assert stored_instance.status is InstanceStatus.ERROR
+        assert stored_member is not None
+        assert stored_member.status is MemberStatus.ERROR
+
+        stored_instance.status = InstanceStatus.RUNNING
+        await session.commit()
+
+    tasks.update_instance.on_failure(
+        RuntimeError("forced sync failed"),
+        "forced-update-task-id",
+        (str(instance_id),),
+        {"force": True},
+        None,
+    )
+    async with session_maker() as session:
+        stored_instance = await session.get(Instance, instance_id)
+        assert stored_instance is not None
+        assert stored_instance.status is InstanceStatus.RUNNING
+
+    ready_instance, owner, template, image = await create_ready_context(client, session_maker)
+    workspace_response = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(ready_instance, owner, template, image, name="guarded"),
+    )
+    workspace_id = UUID(workspace_response.json()["id"])
+    tasks.create_workspace.on_failure(
+        RuntimeError("workspace worker failed"),
+        "workspace-task-id",
+        (str(workspace_id),),
+        {},
+        None,
+    )
+    async with session_maker() as session:
+        stored_workspace = await session.get(Workspace, workspace_id)
+        assert stored_workspace is not None
+        assert stored_workspace.status.value == "error"
+
+
 async def test_workspace_create_update_delete_duplicate_and_error(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],

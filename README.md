@@ -325,7 +325,9 @@ dedicated lifecycle implementations:
 
 The API commits a resource in `pending` before enqueueing its task. Workers claim that resource as
 `running`, then either finish it as `success`, retain it as `error`, or remove it after a successful
-deletion. Missing, duplicate, and stale jobs are safe no-ops.
+deletion. A shared Celery failure hook also moves the still-current `pending` or `running` database
+transition to `error` when a lifecycle task raises outside its normal reconciliation path. It checks
+the expected action before writing, so missing, duplicate, and stale jobs remain safe no-ops.
 
 FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`. Celery tasks use a
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection

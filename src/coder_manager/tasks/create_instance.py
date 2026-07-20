@@ -11,6 +11,7 @@ from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
 from coder_manager.domains import argocd
 from coder_manager.models import Instance, InstanceStatus
+from coder_manager.tasks._common import StatefulResourceTask
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,7 +21,12 @@ if TYPE_CHECKING:
     from coder_manager.tasks._common import JobResult
 
 
-@celery_app.task(name="coder_manager.create_instance")
+@celery_app.task(
+    name="coder_manager.create_instance",
+    base=StatefulResourceTask,
+    resource_type="instance",
+    expected_action="creating",
+)
 def create_instance(instance_id: str) -> JobResult:
     """Create or attach the Argo CD Application for one Coder instance."""
 

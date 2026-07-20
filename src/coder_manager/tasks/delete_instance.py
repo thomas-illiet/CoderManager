@@ -18,6 +18,7 @@ from coder_manager.models import (
     Workspace,
 )
 from coder_manager.tasks import _common
+from coder_manager.tasks._common import StatefulResourceTask
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session, sessionmaker
@@ -25,7 +26,12 @@ if TYPE_CHECKING:
     from coder_manager.tasks._common import JobResult
 
 
-@celery_app.task(name="coder_manager.delete_instance")
+@celery_app.task(
+    name="coder_manager.delete_instance",
+    base=StatefulResourceTask,
+    resource_type="instance",
+    expected_action="deleting",
+)
 def delete_instance(instance_id: str) -> JobResult:
     """Delete one Coder instance and all of its database-owned resources."""
 
