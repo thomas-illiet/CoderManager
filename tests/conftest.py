@@ -18,13 +18,13 @@ from coder_manager.main import app
 from coder_manager.models import Database, InstanceRegion
 from coder_manager.models.base import Base
 from coder_manager.tasks import (
-    create_instance,
     create_workspace,
     delete_instance,
     delete_workspace,
+    retry_failed_instances,
     sync_database,
-    update_instance,
     update_workspace,
+    upsert_instance,
 )
 from coder_manager.worker_database import derive_sync_database_url
 
@@ -36,12 +36,12 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep API tests independent from a running Redis broker."""
 
     for task in (
-        create_instance,
-        update_instance,
+        upsert_instance,
         delete_instance,
         create_workspace,
         update_workspace,
         delete_workspace,
+        retry_failed_instances,
         sync_database,
     ):
         monkeypatch.setattr(task, "delay", MagicMock())

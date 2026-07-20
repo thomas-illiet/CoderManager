@@ -197,10 +197,7 @@ class MemberRepository:
             InstanceStatus.PENDING,
             InstanceStatus.RUNNING,
         }
-        if (
-            instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}
-            and not update_in_progress
-        ):
+        if not update_in_progress and instance.status is not InstanceStatus.SUCCESS:
             await self._session.rollback()
             raise MemberInstanceBusyError
         return instance

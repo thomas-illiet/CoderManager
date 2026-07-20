@@ -395,6 +395,30 @@ async def test_workspace_crud_filters_and_image_change(
     assert deleted.json()["action"] == "deleting"
 
 
+async def test_failed_parent_instance_blocks_workspace_creation(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Do not let child mutations overwrite a failed instance deletion."""
+
+    instance, member, template, image = await create_ready_context(client, session_maker)
+    instance_id = UUID(str(instance["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "deleting"
+        stored.status = InstanceStatus.ERROR
+        await session.commit()
+
+    blocked = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(instance, member, template, image, name="blocked"),
+    )
+
+    assert blocked.status_code == 409
+    assert blocked.json() == {"detail": "Instance has an action in progress"}
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

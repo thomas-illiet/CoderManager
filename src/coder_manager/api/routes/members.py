@@ -17,7 +17,7 @@ from coder_manager.repositories import (
     MemberRepository,
 )
 from coder_manager.schemas import MemberCreate, MemberPage, MemberRead, MemberRoleUpdate
-from coder_manager.tasks import update_instance as update_instance_job
+from coder_manager.tasks import upsert_instance as upsert_instance_job
 
 router = APIRouter(prefix="/instances/{instance_id}/members", tags=["members"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -70,7 +70,7 @@ async def create_member(
             detail="Member already exists for this instance",
         ) from error
     if _consume_instance_update_request(session):
-        update_instance_job.delay(str(instance_id))
+        upsert_instance_job.delay(str(instance_id))
     return MemberRead.model_validate(member)
 
 
@@ -115,7 +115,7 @@ async def update_member_role(
     if changed:
         response.status_code = status.HTTP_202_ACCEPTED
     if _consume_instance_update_request(session):
-        update_instance_job.delay(str(instance_id))
+        upsert_instance_job.delay(str(instance_id))
     return MemberRead.model_validate(member)
 
 
@@ -147,7 +147,7 @@ async def delete_member(
             detail="Member still owns workspaces",
         ) from error
     if _consume_instance_update_request(session):
-        update_instance_job.delay(str(instance_id))
+        upsert_instance_job.delay(str(instance_id))
     return MemberRead.model_validate(member)
 
 

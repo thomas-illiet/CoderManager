@@ -32,23 +32,33 @@ if TYPE_CHECKING:
     name="coder_manager.delete_instance",
     base=StatefulResourceTask,
     resource_type="instance",
-    expected_action="deleting",
+    actions=("deleting",),
 )
-def delete_instance(instance_id: str) -> JobResult:
+def delete_instance(instance_id: str, *, retry_error: bool = False) -> JobResult:
     """Delete one Coder instance and all of its database-owned resources."""
 
-    return _delete_instance(UUID(instance_id), worker_database.get_worker_session_maker())
+    return _delete_instance(
+        UUID(instance_id),
+        worker_database.get_worker_session_maker(),
+        retry_error=retry_error,
+    )
 
 
 def _delete_instance(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
     delete_application: Callable[[UUID, str | None], None] | None = None,
+    *,
+    retry_error: bool = False,
 ) -> JobResult:
     """Claim and execute one instance deletion operation."""
 
     # Claim the transition so duplicate deliveries become harmless no-ops.
-    claimed, attached_name = _claim_deletion(instance_id, session_factory)
+    claimed, attached_name = _claim_deletion(
+        instance_id,
+        session_factory,
+        retry_error=retry_error,
+    )
     if not claimed:
         return {"status": "noop"}
 
@@ -87,6 +97,8 @@ def _delete_instance(
 def _claim_deletion(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
+    *,
+    retry_error: bool,
 ) -> tuple[bool, str | None]:
     """Move an eligible deletion operation to running and return its attachment."""
 
@@ -94,11 +106,10 @@ def _claim_deletion(
         instance = session.scalar(
             select(Instance).where(Instance.id == instance_id).with_for_update()
         )
-        if (
-            instance is None
-            or instance.action != "deleting"
-            or instance.status is not InstanceStatus.PENDING
-        ):
+        if instance is None or instance.action != "deleting":
+            return False, None
+        retryable_error = retry_error and instance.status is InstanceStatus.ERROR
+        if instance.status is not InstanceStatus.PENDING and not retryable_error:
             return False, None
         instance.status = InstanceStatus.RUNNING
         attached_name = instance.argocd_application_name

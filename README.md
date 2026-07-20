@@ -23,8 +23,8 @@ docker compose up --build
 ```
 
 The API is then available at <http://localhost:8000>, with interactive documentation at
-<http://localhost:8000/docs>. The migration container applies pending migrations before the API
-and worker start.
+<http://localhost:8000/docs>. The migration container applies pending migrations before the API,
+worker, and Beat scheduler start.
 
 To run Python tooling directly on the host:
 
@@ -35,7 +35,8 @@ uv run ruff check .
 uv run ty check src
 ```
 
-Copy `.env.example` to `.env` before running the API, migrations, or worker directly on the host.
+Copy `.env.example` to `.env` before running the API, migrations, worker, or Beat directly on the
+host.
 
 ## Applications API
 
@@ -189,11 +190,9 @@ lists the complete matrix. TLS certificate verification is enabled by default; s
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
 worker requests synchronization but does not wait for Argo CD health convergence.
 
-`POST /api/v1/instances/{id}/sync` retries an idle successful or failed instance through the same
-`update_instance` worker. Pending or running instances return HTTP 409. Pass the `force=true` query
-parameter for the rare administrative retry of an instance update already in progress; the forced
-worker finalizes that running update as `success` or `error`. Creation and deletion in progress
-remain protected.
+`POST /api/v1/instances/{id}/sync` sends an idle successful or failed instance through the same
+`upsert_instance` worker used for creation and updates. Pending, running, and deleting instances
+return HTTP 409. Only one upsert can own an instance at a time; there is no parallel force mode.
 
 `GET /api/v1/instances/{id}/status` reads Argo CD directly and returns the Application name, sync
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.
@@ -202,7 +201,7 @@ and health statuses, current operation phase, revision, and latest reconciliatio
 `ca`, and the write-only `token`. `PUT` updates `ca` and optionally rotates `token`; `host` and
 `namespace` are immutable, whether omitted or repeated unchanged in the update payload. The token
 is encrypted with AES-256-GCM in `token_enc` and bound to the instance UUID. Every accepted change
-moves the instance to `updating/pending` and enqueues the `coder_manager.update_instance` worker.
+moves the instance to `updating/pending` and enqueues the `coder_manager.upsert_instance` worker.
 `GET` returns `token_configured` and never token material.
 
 The API generates an immutable HTTPS URL from the application name, region, and environment. For
@@ -211,8 +210,9 @@ example, application `My App` in `emea` and `development` receives
 `cib` for development, staging, and production respectively.
 
 Deletion is asynchronous. It is accepted after `creating/success` or `updating/success`, returns
-HTTP 202, and changes the state to `deleting/pending`; the worker removes the instance and its
-attached members, workspaces, and database allocation after the placeholder deletion succeeds.
+HTTP 202, and changes the state to `deleting/pending`. The worker first removes the Argo CD
+Application and its managed resources, then removes the instance and its attached members,
+workspaces, provider configuration, and database allocation.
 Instance responses expose both `created_at` and `updated_at`; the latter changes whenever the
 instance action or status changes. They also expose the assigned `database_id` and deterministic
 `schema_name`; no database password is returned.
@@ -318,23 +318,21 @@ inside the same transaction as the update. Modules must be unique and selected f
 an empty module list is valid. An image change is limited to another image from the same template.
 
 Creation starts in `creating/pending`; accepted updates and deletions return HTTP 202 and move to
-`updating/pending` or `deleting/pending`. Reads remain available during processing. Mutations return
-HTTP 409 while the instance or workspace is `pending` or `running`; workspaces in `error` can be
-updated or deleted. The list supports `instance_id`, `template_id`, `member_id`, `image_id`,
-`status`, and case-insensitive literal `name` filters.
+`updating/pending` or `deleting/pending`. Reads remain available during processing. Instance-owned
+mutations require a successful parent instance; workspaces in `error` can still be updated or
+deleted after their parent is successful. The list supports `instance_id`, `template_id`,
+`member_id`, `image_id`, `status`, and case-insensitive literal `name` filters.
 
 ## Celery
 
-The worker exposes `coder_manager.healthcheck`, the `coder_manager.sync_database` placeholder, and
-six lifecycle tasks. Instance creation and updates reconcile Argo CD Applications. Instance
-deletion removes the Application and its managed resources with foreground cascading deletion
-before removing local rows; an already absent remote Application is treated as a successful retry.
-Workspace operations retain their dedicated lifecycle implementations:
+The worker exposes `coder_manager.healthcheck`, the `coder_manager.sync_database` placeholder, five
+resource lifecycle tasks, and one flat recovery task. Instance creation and updates share one Argo
+CD upsert implementation; deletion remains a separate destructive operation:
 
-- `coder_manager.create_instance`, `coder_manager.update_instance`, and
-  `coder_manager.delete_instance`
+- `coder_manager.upsert_instance` and `coder_manager.delete_instance`
 - `coder_manager.create_workspace`, `coder_manager.update_workspace`, and
   `coder_manager.delete_workspace`
+- `coder_manager.retry_failed_instances`
 
 The API commits a resource in `pending` before enqueueing its task. Workers claim that resource as
 `running`, then either finish it as `success`, retain it as `error`, or remove it after a successful
@@ -342,13 +340,21 @@ deletion. A shared Celery failure hook also moves the still-current `pending` or
 transition to `error` when a lifecycle task raises outside its normal reconciliation path. It checks
 the expected action before writing, so missing, duplicate, and stale jobs remain safe no-ops.
 
+The dedicated `beat` service schedules `retry_failed_instances` every 60 seconds by default. The
+interval is configured with `CODER_MANAGER_INSTANCE_RETRY_INTERVAL_SECONDS`. The recovery task only
+reads failed instances and sends either an upsert or delete retry; it does not rewrite their state.
+The receiving worker claims the `error` row under a database lock, so duplicate Beat deliveries are
+safe no-ops. Unsupported free-form actions remain untouched and are logged for manual review.
+
 FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`. Celery tasks use a
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection
 pool after the process starts and disposes it during process shutdown. The worker derives the sync
 driver from `CODER_MANAGER_DATABASE_URL`, so the API, migrations, and worker continue to share one
 database URL setting.
 
-Member changes are reconciled by `coder_manager.update_instance` rather than individual member
+Member changes are reconciled by `coder_manager.upsert_instance` rather than individual member
 tasks. One pass claims the currently pending members, finalizes member creations and role changes,
 deletes members marked for deletion, and schedules another pass when changes arrived while it was
-running.
+running. New member changes can join that active upsert; otherwise member, provider, and workspace
+mutations require a successful parent, so they cannot overwrite a failed creation or deletion
+before Beat retries it.

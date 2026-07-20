@@ -267,11 +267,11 @@ async def test_instance_busy_blocks_mutations_but_not_reads(
     assert readable_member.status_code == 200
 
 
-async def test_instance_error_allows_member_creation(
+async def test_instance_error_blocks_member_creation_until_retry(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Verify the instance error allows member creation scenario."""
+    """Preserve a failed lifecycle intention until Beat retries it."""
 
     application = await create_application(client)
     instance = await create_instance(client, application["id"])
@@ -281,9 +281,13 @@ async def test_instance_error_allows_member_creation(
         status=InstanceStatus.ERROR,
     )
 
-    created = await create_member(client, instance["id"])
+    blocked = await client.post(
+        f"/api/v1/instances/{instance['id']}/members",
+        json={"username": "alice", "role": "user"},
+    )
 
-    assert created["username"] == "alice"
+    assert blocked.status_code == 409
+    assert blocked.json() == {"detail": "Instance has an action in progress"}
 
 
 async def test_member_error_blocks_role_update_and_deletion(

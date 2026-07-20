@@ -2,6 +2,7 @@
 
 # ruff: noqa: EM101, PLR0915, SLF001, TRY003
 
+from datetime import timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,6 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
 from coder_manager import tasks, worker_database
+from coder_manager.celery_app import celery_app
+from coder_manager.config import get_settings
 from coder_manager.domains import argocd
 from coder_manager.models import (
     DatabaseAllocation,
@@ -49,25 +52,31 @@ def test_worker_healthcheck_and_registered_names() -> None:
     assert healthcheck.run() == {"status": "ok"}
     assert tasks.sync_database.run() == {"status": "success"}
     assert {
-        tasks.create_instance.name,
-        tasks.update_instance.name,
+        tasks.upsert_instance.name,
         tasks.delete_instance.name,
+        tasks.retry_failed_instances.name,
         tasks.create_workspace.name,
         tasks.update_workspace.name,
         tasks.delete_workspace.name,
         tasks.sync_database.name,
     } == {
-        "coder_manager.create_instance",
-        "coder_manager.update_instance",
+        "coder_manager.upsert_instance",
         "coder_manager.delete_instance",
+        "coder_manager.retry_failed_instances",
         "coder_manager.create_workspace",
         "coder_manager.update_workspace",
         "coder_manager.delete_workspace",
         "coder_manager.sync_database",
     }
 
+    retry_schedule = celery_app.conf.beat_schedule["retry-failed-instances"]
+    assert retry_schedule["task"] == "coder_manager.retry_failed_instances"
+    assert retry_schedule["schedule"] == timedelta(
+        seconds=get_settings().instance_retry_interval_seconds
+    )
 
-async def test_create_instance_success_duplicate_and_error(
+
+async def test_upsert_instance_creation_success_duplicate_and_error(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
@@ -78,12 +87,12 @@ async def test_create_instance_success_duplicate_and_error(
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
 
-    result = tasks._create_instance(
+    result = tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         successful_reconcile,
     )
-    duplicate = tasks._create_instance(
+    duplicate = tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         successful_reconcile,
@@ -111,7 +120,7 @@ async def test_create_instance_success_duplicate_and_error(
         raise RuntimeError("Argo CD failed")
 
     with pytest.raises(RuntimeError, match="Argo CD failed"):
-        tasks._create_instance(
+        tasks._upsert_instance(
             failed_id,
             sync_session_maker,
             failing_reconcile,
@@ -120,6 +129,19 @@ async def test_create_instance_success_duplicate_and_error(
         stored = await session.get(Instance, failed_id)
         assert stored is not None
         assert stored.status is InstanceStatus.ERROR
+
+    assert tasks._upsert_instance(
+        failed_id,
+        sync_session_maker,
+        successful_reconcile,
+        retry_error=True,
+    ) == {"status": "success"}
+    assert tasks._upsert_instance(
+        failed_id,
+        sync_session_maker,
+        successful_reconcile,
+        retry_error=True,
+    ) == {"status": "noop"}
 
 
 async def test_celery_failure_guard_marks_active_database_states_as_error(
@@ -139,7 +161,7 @@ async def test_celery_failure_guard_marks_active_database_states_as_error(
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
 
-    tasks.create_instance.on_failure(
+    tasks.upsert_instance.on_failure(
         RuntimeError("worker failed"),
         "create-task-id",
         (str(instance_id),),
@@ -164,7 +186,7 @@ async def test_celery_failure_guard_marks_active_database_states_as_error(
         await session.commit()
         member_id = running_member.id
 
-    tasks.update_instance.on_failure(
+    tasks.upsert_instance.on_failure(
         RuntimeError("Argo CD failed"),
         "update-task-id",
         (str(instance_id),),
@@ -178,21 +200,6 @@ async def test_celery_failure_guard_marks_active_database_states_as_error(
         assert stored_instance.status is InstanceStatus.ERROR
         assert stored_member is not None
         assert stored_member.status is MemberStatus.ERROR
-
-        stored_instance.status = InstanceStatus.RUNNING
-        await session.commit()
-
-    tasks.update_instance.on_failure(
-        RuntimeError("forced sync failed"),
-        "forced-update-task-id",
-        (str(instance_id),),
-        {"force": True},
-        None,
-    )
-    async with session_maker() as session:
-        stored_instance = await session.get(Instance, instance_id)
-        assert stored_instance is not None
-        assert stored_instance.status is InstanceStatus.ERROR
 
     ready_instance, owner, template, image = await create_ready_context(client, session_maker)
     workspace_response = await client.post(
@@ -211,6 +218,64 @@ async def test_celery_failure_guard_marks_active_database_states_as_error(
         stored_workspace = await session.get(Workspace, workspace_id)
         assert stored_workspace is not None
         assert stored_workspace.status.value == "error"
+
+
+async def test_retry_failed_instances_dispatches_flat_idempotent_jobs(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Map failed lifecycle intentions to one upsert or delete job without changing rows."""
+
+    instance_ids: list[UUID] = []
+    for suffix in ("retry-create", "retry-update", "retry-delete", "retry-unsupported"):
+        application = await create_application(client, suffix=suffix)
+        instance = await create_instance(client, application["id"])
+        instance_ids.append(UUID(str(instance["id"])))
+
+    actions = ("creating", "updating", "deleting", "manual-repair")
+    async with session_maker() as session:
+        for instance_id, action in zip(instance_ids, actions, strict=True):
+            stored = await session.get(Instance, instance_id)
+            assert stored is not None
+            stored.action = action
+            stored.status = InstanceStatus.ERROR
+        await session.commit()
+
+    scheduled_upserts: list[tuple[str, bool]] = []
+    scheduled_deletes: list[tuple[str, bool]] = []
+
+    def record_upsert(instance_id: str, *, retry_error: bool) -> None:
+        """Record one retryable upsert dispatch."""
+
+        scheduled_upserts.append((instance_id, retry_error))
+        if instance_id == str(instance_ids[1]):
+            raise RuntimeError("broker unavailable")
+
+    def record_delete(instance_id: str, *, retry_error: bool) -> None:
+        """Record one retryable delete dispatch."""
+
+        scheduled_deletes.append((instance_id, retry_error))
+
+    result = tasks._retry_failed_instances(
+        sync_session_maker,
+        record_upsert,
+        record_delete,
+    )
+
+    assert result == {"status": "success", "scheduled": 2, "skipped": 2}
+    assert set(scheduled_upserts) == {
+        (str(instance_ids[0]), True),
+        (str(instance_ids[1]), True),
+    }
+    assert scheduled_deletes == [(str(instance_ids[2]), True)]
+    async with session_maker() as session:
+        statuses: list[InstanceStatus] = []
+        for instance_id in instance_ids:
+            stored = await session.get(Instance, instance_id)
+            assert stored is not None
+            statuses.append(stored.status)
+    assert statuses == [InstanceStatus.ERROR] * 4
 
 
 async def test_workspace_create_update_delete_duplicate_and_error(
@@ -303,7 +368,7 @@ async def test_workspace_create_update_delete_duplicate_and_error(
         assert stored.status.value == "error"
 
 
-async def test_update_instance_finalizes_and_coalesces_members(
+async def test_upsert_instance_finalizes_and_coalesces_members(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
@@ -314,7 +379,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
     await set_instance_status(session_maker, instance_id)
-    tasks.update_instance.delay.reset_mock()
+    tasks.upsert_instance.delay.reset_mock()
     first_response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
         json={"username": "first", "role": "user"},
@@ -325,7 +390,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
     )
     first = first_response.json()
     second = second_response.json()
-    tasks.update_instance.delay.assert_called_once_with(str(instance_id))
+    tasks.upsert_instance.delay.assert_called_once_with(str(instance_id))
 
     reconciled_members: list[tuple[tuple[str, str], ...]] = []
 
@@ -343,7 +408,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
         assert environment == "development"
         return attached_name or f"coder-{reconciled_instance_id.hex}"
 
-    first_pass = tasks._update_instance(
+    first_pass = tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         record_reconcile,
@@ -368,7 +433,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
     removed = await client.delete(f"/api/v1/instances/{instance_id}/members/{second['id']}")
     assert updated.status_code == 202
     assert removed.status_code == 202
-    assert tasks._update_instance(
+    assert tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         record_reconcile,
@@ -386,7 +451,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
         json={"username": "third", "role": "user"},
     )
     third = third_response.json()
-    tasks.update_instance.delay.reset_mock()
+    tasks.upsert_instance.delay.reset_mock()
 
     def add_member_during_pass(
         _instance_id: UUID,
@@ -402,13 +467,13 @@ async def test_update_instance_finalizes_and_coalesces_members(
             session.commit()
         return attached_name or f"coder-{instance_id.hex}"
 
-    coalesced = tasks._update_instance(
+    coalesced = tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         add_member_during_pass,
     )
     assert coalesced == {"status": "pending"}
-    tasks.update_instance.delay.assert_called_once_with(str(instance_id))
+    tasks.upsert_instance.delay.assert_called_once_with(str(instance_id))
     async with session_maker() as session:
         third_member = await session.get(Member, UUID(str(third["id"])))
         late_member = await session.scalar(select(Member).where(Member.username == "late"))
@@ -417,7 +482,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
         assert late_member is not None
         assert late_member.status is MemberStatus.PENDING
 
-    assert tasks._update_instance(
+    assert tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         record_reconcile,
@@ -429,7 +494,7 @@ async def test_update_instance_finalizes_and_coalesces_members(
     )
 
 
-async def test_update_instance_error_and_instance_delete_cascade(
+async def test_upsert_error_and_instance_delete_cascade(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
@@ -459,7 +524,7 @@ async def test_update_instance_error_and_instance_delete_cascade(
         raise RuntimeError("reconciliation failed")
 
     with pytest.raises(RuntimeError, match="reconciliation failed"):
-        tasks._update_instance(instance_id, sync_session_maker, failing_reconcile)
+        tasks._upsert_instance(instance_id, sync_session_maker, failing_reconcile)
     async with session_maker() as session:
         stored_instance = await session.get(Instance, instance_id)
         stored_member = await session.get(Member, UUID(str(member["id"])))
@@ -540,188 +605,69 @@ async def test_delete_instance_keeps_local_state_when_argocd_fails(
         assert stored.action == "deleting"
         assert stored.status is InstanceStatus.ERROR
 
+    assert tasks._delete_instance(
+        instance_id,
+        sync_session_maker,
+        lambda _instance_id, _attached_name: None,
+        retry_error=True,
+    ) == {"status": "deleted"}
 
-async def test_missing_update_instance_is_a_noop(
+
+async def test_missing_upsert_instance_is_a_noop(
     sync_session_maker: sessionmaker[Session],
 ) -> None:
-    """Verify the missing update instance is a noop scenario."""
+    """Keep a missing upsert delivery as a harmless no-op."""
 
-    assert tasks._update_instance(uuid4(), sync_session_maker) == {"status": "noop"}
+    assert tasks._upsert_instance(uuid4(), sync_session_maker) == {"status": "noop"}
 
 
-async def test_force_sync_accepts_idle_instances_and_rejects_busy_or_missing(
+async def test_sync_accepts_idle_instances_and_rejects_concurrent_or_missing(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Verify the force sync accepts idle instances and rejects busy or missing scenario."""
+    """Schedule one upsert and reject concurrent reconciliation attempts."""
 
     application = await create_application(client, suffix="force-sync")
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
 
     busy = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    forced_creation = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
+    repeated_creation = await client.post(f"/api/v1/instances/{instance_id}/sync")
     assert busy.status_code == 409
-    assert forced_creation.status_code == 409
+    assert repeated_creation.status_code == 409
     assert busy.json() == {"detail": "Instance has an action in progress"}
 
     await set_instance_status(session_maker, instance_id)
-    tasks.update_instance.delay.reset_mock()
+    tasks.upsert_instance.delay.reset_mock()
     accepted = await client.post(f"/api/v1/instances/{instance_id}/sync")
     repeated = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    forced = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
+    concurrent = await client.post(f"/api/v1/instances/{instance_id}/sync")
     missing = await client.post(f"/api/v1/instances/{uuid4()}/sync")
 
     assert accepted.status_code == 202
     assert accepted.json()["action"] == "updating"
     assert accepted.json()["status"] == "pending"
     assert repeated.status_code == 409
-    assert forced.status_code == 202
-    assert forced.json()["action"] == "updating"
-    assert forced.json()["status"] == "pending"
+    assert concurrent.status_code == 409
     assert missing.status_code == 404
-    assert tasks.update_instance.delay.call_args_list == [
-        ((str(instance_id),), {}),
-        ((str(instance_id),), {"force": True}),
-    ]
+    tasks.upsert_instance.delay.assert_called_once_with(str(instance_id))
 
-
-async def test_forced_sync_finalizes_a_running_transition(
-    client: AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-    sync_session_maker: sessionmaker[Session],
-) -> None:
-    """Let a successful forced reconciliation finalize the active transition."""
-
-    application = await create_application(client, suffix="forced-running-sync")
-    instance = await create_instance(client, application["id"])
-    instance_id = UUID(str(instance["id"]))
     async with session_maker() as session:
         stored = await session.get(Instance, instance_id)
         assert stored is not None
-        stored.action = "updating"
-        stored.status = InstanceStatus.RUNNING
-        running_member = Member(
-            instance_id=instance_id,
-            username="running-member",
-            role="user",
-            action="updating",
-            status=MemberStatus.RUNNING,
-        )
-        deleting_member = Member(
-            instance_id=instance_id,
-            username="deleting-member",
-            role="user",
-            action="deleting",
-            status=MemberStatus.RUNNING,
-        )
-        session.add_all([running_member, deleting_member])
+        stored.action = "deleting"
+        stored.status = InstanceStatus.ERROR
         await session.commit()
-        running_member_id = running_member.id
-        deleting_member_id = deleting_member.id
-
-    tasks.update_instance.delay.reset_mock()
-    accepted = await client.post(f"/api/v1/instances/{instance_id}/sync?force=true")
-    assert accepted.status_code == 202
-    assert accepted.json()["status"] == "running"
-    tasks.update_instance.delay.assert_called_once_with(str(instance_id), force=True)
-
-    reconciled = False
-
-    def record_reconcile(
-        observed_instance_id: UUID,
-        _attached_name: str | None,
-        _members: tuple[tuple[str, str], ...],
-        _region: str,
-        _environment: str,
-    ) -> str:
-        """Record the forced remote reconciliation."""
-
-        nonlocal reconciled
-        reconciled = True
-        assert observed_instance_id == instance_id
-        assert _members == (("running-member", "user"),)
-        return f"coder-{instance_id.hex}"
-
-    result = tasks._update_instance(
-        instance_id,
-        sync_session_maker,
-        record_reconcile,
-        force=True,
-    )
-    assert result == {"status": "success"}
-    assert reconciled is True
-    async with session_maker() as session:
-        stored = await session.get(Instance, instance_id)
-        stored_running_member = await session.get(Member, running_member_id)
-        assert stored is not None
-        assert stored.action == "updating"
-        assert stored.status is InstanceStatus.SUCCESS
-        assert stored_running_member is not None
-        assert stored_running_member.status is MemberStatus.SUCCESS
-        assert await session.get(Member, deleting_member_id) is None
+    deleting_error = await client.post(f"/api/v1/instances/{instance_id}/sync")
+    assert deleting_error.status_code == 409
 
 
-async def test_forced_sync_failure_finalizes_a_running_transition_as_error(
+async def test_automatic_upsert_retries_failed_member_deletion(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
 ) -> None:
-    """Let a failed forced reconciliation finalize the active transition."""
-
-    application = await create_application(client, suffix="forced-running-error")
-    instance = await create_instance(client, application["id"])
-    instance_id = UUID(str(instance["id"]))
-    async with session_maker() as session:
-        stored = await session.get(Instance, instance_id)
-        assert stored is not None
-        stored.action = "updating"
-        stored.status = InstanceStatus.RUNNING
-        running_member = Member(
-            instance_id=instance_id,
-            username="failed-member",
-            role="user",
-            action="updating",
-            status=MemberStatus.RUNNING,
-        )
-        session.add(running_member)
-        await session.commit()
-        running_member_id = running_member.id
-
-    def fail_reconcile(
-        _instance_id: UUID,
-        _attached_name: str | None,
-        _members: tuple[tuple[str, str], ...],
-        _region: str,
-        _environment: str,
-    ) -> str:
-        """Fail the forced reconciliation."""
-
-        raise RuntimeError("forced reconciliation failed")
-
-    with pytest.raises(RuntimeError, match="forced reconciliation failed"):
-        tasks._update_instance(
-            instance_id,
-            sync_session_maker,
-            fail_reconcile,
-            force=True,
-        )
-
-    async with session_maker() as session:
-        stored = await session.get(Instance, instance_id)
-        stored_member = await session.get(Member, running_member_id)
-        assert stored is not None
-        assert stored.status is InstanceStatus.ERROR
-        assert stored_member is not None
-        assert stored_member.status is MemberStatus.ERROR
-
-
-async def test_force_sync_retries_failed_member_deletion(
-    client: AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-    sync_session_maker: sessionmaker[Session],
-) -> None:
-    """Verify the force sync retries failed member deletion scenario."""
+    """Let a Beat-triggered upsert retry a failed member deletion."""
 
     application = await create_application(client, suffix="force-sync-error")
     instance = await create_instance(client, application["id"])
@@ -743,13 +689,6 @@ async def test_force_sync_retries_failed_member_deletion(
         stored_member.status = MemberStatus.ERROR
         await session.commit()
 
-    accepted = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    assert accepted.status_code == 202
-    async with session_maker() as session:
-        reset_member = await session.get(Member, member_id)
-        assert reset_member is not None
-        assert reset_member.status is MemberStatus.PENDING
-
     observed_members: tuple[tuple[str, str], ...] | None = None
 
     def capture_reconcile(
@@ -765,10 +704,11 @@ async def test_force_sync_retries_failed_member_deletion(
         observed_members = members
         return f"coder-{instance_id.hex}"
 
-    assert tasks._update_instance(
+    assert tasks._upsert_instance(
         instance_id,
         sync_session_maker,
         capture_reconcile,
+        retry_error=True,
     ) == {"status": "success"}
     assert observed_members == ()
     async with session_maker() as session:
@@ -798,8 +738,8 @@ async def test_public_tasks_run_sequentially_inside_an_active_event_loop(
     )
     monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
 
-    assert tasks.create_instance.run(str(first["id"])) == {"status": "success"}
-    assert tasks.create_instance.run(str(second["id"])) == {"status": "success"}
+    assert tasks.upsert_instance.run(str(first["id"])) == {"status": "success"}
+    assert tasks.upsert_instance.run(str(second["id"])) == {"status": "success"}
 
     async with session_maker() as session:
         first_stored = await session.get(Instance, UUID(str(first["id"])))

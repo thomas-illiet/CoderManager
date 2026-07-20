@@ -15,7 +15,7 @@ from coder_manager.crypto import (
     KubernetesTokenDecryptionError,
 )
 from coder_manager.main import app
-from coder_manager.models import InstanceKubernetes, InstanceStatus
+from coder_manager.models import Instance, InstanceKubernetes, InstanceStatus
 from coder_manager.repositories import (
     InstanceActionConflictError,
     InstanceKubernetesAlreadyConfiguredError,
@@ -26,7 +26,7 @@ from coder_manager.repositories import (
     InstanceRepository,
 )
 from coder_manager.schemas import InstanceKubernetesCreate, InstanceKubernetesUpdate
-from coder_manager.tasks import update_instance
+from coder_manager.tasks import upsert_instance
 from tests.test_instances import create_application, create_instance
 
 CRYPTO_KEY = "MDAxMTIyMzM0NDU1NjY3Nzg4ODlhYWJiY2NkZGVlZmY="
@@ -142,7 +142,7 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
     assert busy.json() == {"detail": "Instance has an action in progress"}
 
     await mark_instance_idle(session_maker, instance_id, expected_action="creating")
-    update_instance.delay.reset_mock()
+    upsert_instance.delay.reset_mock()
     created = await client.post(
         f"/api/v1/instances/{instance_id}/provider",
         json=provider_payload(),
@@ -155,7 +155,7 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
     assert created.json()["token_configured"] is True
     assert "token" not in created.json()
     assert "token_enc" not in created.json()
-    update_instance.delay.assert_called_once_with(str(instance_id))
+    upsert_instance.delay.assert_called_once_with(str(instance_id))
 
     async with session_maker() as session:
         stored = await session.get(InstanceKubernetes, instance_id)
@@ -189,7 +189,7 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
     assert updated.json()["host"] == "https://kubernetes.example.test:6443"
     assert updated.json()["namespace"] == "coder-workspaces"
     assert "updated-ca" in updated.json()["ca"]
-    assert update_instance.delay.call_count == 2
+    assert upsert_instance.delay.call_count == 2
     async with session_maker() as session:
         stored = await session.get(InstanceKubernetes, instance_id)
         assert stored is not None
@@ -250,7 +250,7 @@ async def test_provider_put_rejects_missing_busy_and_immutable_changes(
     assert missing_provider.status_code == 404
     assert missing_provider.json() == {"detail": "Kubernetes provider not configured"}
 
-    update_instance.delay.reset_mock()
+    upsert_instance.delay.reset_mock()
     created = await client.post(
         f"/api/v1/instances/{instance_id}/provider",
         json=provider_payload(),
@@ -283,7 +283,7 @@ async def test_provider_put_rejects_missing_busy_and_immutable_changes(
     for response in (changed_host, changed_namespace):
         assert response.status_code == 409
         assert response.json() == {"detail": "Kubernetes provider host and namespace are immutable"}
-    update_instance.delay.assert_called_once_with(str(instance_id))
+    upsert_instance.delay.assert_called_once_with(str(instance_id))
 
     fetched = await client.get(f"/api/v1/instances/{instance_id}/provider")
     assert fetched.json()["host"] == "https://kubernetes.example.test:6443"
@@ -312,6 +312,19 @@ async def test_provider_repository_covers_resource_and_rotation_boundaries(
             await repository.create_and_request_update(uuid4(), initial_payload, cipher)
         with pytest.raises(InstanceActionConflictError):
             await repository.create_and_request_update(instance_id, initial_payload, cipher)
+
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.status = InstanceStatus.ERROR
+        await session.commit()
+    async with session_maker() as session:
+        with pytest.raises(InstanceActionConflictError):
+            await InstanceKubernetesRepository(session).create_and_request_update(
+                instance_id,
+                initial_payload,
+                cipher,
+            )
 
     await mark_instance_idle(session_maker, instance_id, expected_action="creating")
     async with session_maker() as session:

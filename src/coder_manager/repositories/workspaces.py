@@ -271,7 +271,7 @@ class WorkspaceRepository:
         if instance is None:
             await self._session.rollback()
             raise WorkspaceInstanceNotFoundError
-        if instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}:
+        if instance.status is not InstanceStatus.SUCCESS:
             await self._session.rollback()
             raise WorkspaceInstanceBusyError
         return instance

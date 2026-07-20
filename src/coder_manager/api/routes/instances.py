@@ -36,9 +36,8 @@ from coder_manager.schemas import (
     InstancePage,
     InstanceRead,
 )
-from coder_manager.tasks import create_instance as create_instance_job
 from coder_manager.tasks import delete_instance as delete_instance_job
-from coder_manager.tasks import update_instance as update_instance_job
+from coder_manager.tasks import upsert_instance as upsert_instance_job
 
 router = APIRouter(prefix="/instances", tags=["instances"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -164,7 +163,7 @@ async def create_instance_provider(
             status_code=status.HTTP_409_CONFLICT,
             detail="Kubernetes provider is already configured",
         ) from error
-    update_instance_job.delay(str(instance_id))
+    upsert_instance_job.delay(str(instance_id))
     return kubernetes_provider_read(provider)
 
 
@@ -207,7 +206,7 @@ async def update_instance_provider(
             status_code=status.HTTP_409_CONFLICT,
             detail="Kubernetes provider host and namespace are immutable",
         ) from error
-    update_instance_job.delay(str(instance_id))
+    upsert_instance_job.delay(str(instance_id))
     return kubernetes_provider_read(provider)
 
 
@@ -300,7 +299,7 @@ async def create_instance(
             status_code=status.HTTP_409_CONFLICT,
             detail="No database capacity available for region",
         ) from error
-    create_instance_job.delay(str(instance.id))
+    upsert_instance_job.delay(str(instance.id))
     return InstanceRead.model_validate(instance)
 
 
@@ -312,16 +311,11 @@ async def create_instance(
 async def sync_instance(
     instance_id: UUID,
     session: SessionDependency,
-    *,
-    force: Annotated[
-        bool,
-        Query(description="Start a new reconciliation when one is already in progress"),
-    ] = False,
 ) -> InstanceRead:
-    """Request a full Argo CD reconciliation, optionally alongside one in progress."""
+    """Request one full Argo CD reconciliation for an idle instance."""
 
     try:
-        instance = await InstanceRepository(session).request_sync(instance_id, force=force)
+        instance = await InstanceRepository(session).request_sync(instance_id)
     except InstanceNotFoundError as error:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -332,10 +326,7 @@ async def sync_instance(
             status_code=status.HTTP_409_CONFLICT,
             detail="Instance has an action in progress",
         ) from error
-    if force:
-        update_instance_job.delay(str(instance.id), force=True)
-    else:
-        update_instance_job.delay(str(instance.id))
+    upsert_instance_job.delay(str(instance.id))
     return InstanceRead.model_validate(instance)
 
 

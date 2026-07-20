@@ -12,7 +12,7 @@ from coder_manager.tasks._workspace_lifecycle import _workspace_lifecycle
     name="coder_manager.create_workspace",
     base=StatefulResourceTask,
     resource_type="workspace",
-    expected_action="creating",
+    actions=("creating",),
 )
 def create_workspace(workspace_id: str) -> JobResult:
     """Run the placeholder creation lifecycle for one Coder workspace."""

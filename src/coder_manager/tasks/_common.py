@@ -33,7 +33,7 @@ class StatefulResourceTask(Task):
 
     abstract = True
     resource_type: str
-    expected_action: str
+    actions: tuple[str, ...]
     fail_running_members = False
 
     def on_failure(
@@ -52,12 +52,12 @@ class StatefulResourceTask(Task):
             if self.resource_type == "instance":
                 _fail_instance_transition(
                     resource_id,
-                    self.expected_action,
+                    self.actions,
                     session_factory,
                     fail_running_members=self.fail_running_members,
                 )
             elif self.resource_type == "workspace":
-                _fail_workspace_transition(resource_id, self.expected_action, session_factory)
+                _fail_workspace_transition(resource_id, self.actions, session_factory)
             else:  # pragma: no cover - task registration invariant
                 logger.error("Unsupported stateful resource type: %s", self.resource_type)
         except Exception:
@@ -72,7 +72,7 @@ class StatefulResourceTask(Task):
 
 def _fail_instance_transition(
     instance_id: UUID,
-    expected_action: str,
+    actions: tuple[str, ...],
     session_factory: sessionmaker[Session],
     *,
     fail_running_members: bool,
@@ -85,7 +85,7 @@ def _fail_instance_transition(
         )
         if (
             instance is None
-            or instance.action != expected_action
+            or instance.action not in actions
             or instance.status not in {InstanceStatus.PENDING, InstanceStatus.RUNNING}
         ):
             return
@@ -104,7 +104,7 @@ def _fail_instance_transition(
 
 def _fail_workspace_transition(
     workspace_id: UUID,
-    expected_action: str,
+    actions: tuple[str, ...],
     session_factory: sessionmaker[Session],
 ) -> None:
     """Fail only the workspace transition still owned by the crashed job."""
@@ -115,7 +115,7 @@ def _fail_workspace_transition(
         )
         if (
             workspace is None
-            or workspace.action != expected_action
+            or workspace.action not in actions
             or workspace.status not in {WorkspaceStatus.PENDING, WorkspaceStatus.RUNNING}
         ):
             return
