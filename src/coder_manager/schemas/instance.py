@@ -31,6 +31,8 @@ class InstanceRead(BaseModel):
     status: InstanceStatus
     instance_url: str
     argocd_application_name: str | None = None
+    job_id: UUID | None = None
+    step: str | None = None
     database_id: UUID | None = None
     schema_name: str | None = None
     created_at: datetime

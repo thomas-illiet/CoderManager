@@ -22,9 +22,9 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     beat_schedule={
-        "retry-failed-instances": {
-            "task": "coder_manager.retry_failed_instances",
-            "schedule": timedelta(seconds=settings.instance_retry_interval_seconds),
+        "retry-job-executions": {
+            "task": "coder_manager.retry_job_executions",
+            "schedule": timedelta(seconds=settings.job_retry_interval_seconds),
         }
     },
 )

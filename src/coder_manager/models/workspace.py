@@ -12,6 +12,7 @@ from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
     from coder_manager.models.instance import Instance
+    from coder_manager.models.job_execution import JobExecution
     from coder_manager.models.member import Member
     from coder_manager.models.template import Template
     from coder_manager.models.template_image import TemplateImage
@@ -64,6 +65,10 @@ class Workspace(Base):
         default=WorkspaceStatus.PENDING,
         server_default=WorkspaceStatus.PENDING.value,
     )
+    job_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("job_executions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    step: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -75,6 +80,7 @@ class Workspace(Base):
     template: Mapped["Template"] = relationship(back_populates="workspaces")
     member: Mapped["Member"] = relationship(back_populates="workspaces")
     image: Mapped["TemplateImage"] = relationship(back_populates="workspaces")
+    job: Mapped["JobExecution | None"] = relationship(foreign_keys=[job_id])
 
     __table_args__ = (
         CheckConstraint("length(trim(name)) > 0", name="name_not_empty"),

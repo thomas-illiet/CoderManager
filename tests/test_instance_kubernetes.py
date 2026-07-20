@@ -26,7 +26,7 @@ from coder_manager.repositories import (
     InstanceRepository,
 )
 from coder_manager.schemas import InstanceKubernetesCreate, InstanceKubernetesUpdate
-from coder_manager.tasks import upsert_instance
+from coder_manager.tasks import step_01_update_instance
 from tests.test_instances import create_application, create_instance
 
 CRYPTO_KEY = "MDAxMTIyMzM0NDU1NjY3Nzg4ODlhYWJiY2NkZGVlZmY="
@@ -142,20 +142,21 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
     assert busy.json() == {"detail": "Instance has an action in progress"}
 
     await mark_instance_idle(session_maker, instance_id, expected_action="creating")
-    upsert_instance.delay.reset_mock()
+    step_01_update_instance.delay.reset_mock()
     created = await client.post(
         f"/api/v1/instances/{instance_id}/provider",
         json=provider_payload(),
     )
 
     assert created.status_code == 202
-    assert created.json()["instance_id"] == str(instance_id)
-    assert created.json()["host"] == "https://kubernetes.example.test:6443"
-    assert created.json()["namespace"] == "coder-workspaces"
-    assert created.json()["token_configured"] is True
-    assert "token" not in created.json()
-    assert "token_enc" not in created.json()
-    upsert_instance.delay.assert_called_once_with(str(instance_id))
+    created_resource = created.json()["resource"]
+    assert created_resource["instance_id"] == str(instance_id)
+    assert created_resource["host"] == "https://kubernetes.example.test:6443"
+    assert created_resource["namespace"] == "coder-workspaces"
+    assert created_resource["token_configured"] is True
+    assert "token" not in created_resource
+    assert "token_enc" not in created_resource
+    step_01_update_instance.delay.assert_called_once()
 
     async with session_maker() as session:
         stored = await session.get(InstanceKubernetes, instance_id)
@@ -175,7 +176,7 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
 
     fetched = await client.get(f"/api/v1/instances/{instance_id}/provider")
     assert fetched.status_code == 200
-    assert fetched.json() == created.json()
+    assert fetched.json() == created_resource
 
     await mark_instance_idle(session_maker, instance_id, expected_action="updating")
     updated = await client.put(
@@ -186,10 +187,11 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
         ),
     )
     assert updated.status_code == 202
-    assert updated.json()["host"] == "https://kubernetes.example.test:6443"
-    assert updated.json()["namespace"] == "coder-workspaces"
-    assert "updated-ca" in updated.json()["ca"]
-    assert upsert_instance.delay.call_count == 2
+    updated_resource = updated.json()["resource"]
+    assert updated_resource["host"] == "https://kubernetes.example.test:6443"
+    assert updated_resource["namespace"] == "coder-workspaces"
+    assert "updated-ca" in updated_resource["ca"]
+    assert step_01_update_instance.delay.call_count == 2
     async with session_maker() as session:
         stored = await session.get(InstanceKubernetes, instance_id)
         assert stored is not None
@@ -250,7 +252,7 @@ async def test_provider_put_rejects_missing_busy_and_immutable_changes(
     assert missing_provider.status_code == 404
     assert missing_provider.json() == {"detail": "Kubernetes provider not configured"}
 
-    upsert_instance.delay.reset_mock()
+    step_01_update_instance.delay.reset_mock()
     created = await client.post(
         f"/api/v1/instances/{instance_id}/provider",
         json=provider_payload(),
@@ -283,7 +285,7 @@ async def test_provider_put_rejects_missing_busy_and_immutable_changes(
     for response in (changed_host, changed_namespace):
         assert response.status_code == 409
         assert response.json() == {"detail": "Kubernetes provider host and namespace are immutable"}
-    upsert_instance.delay.assert_called_once_with(str(instance_id))
+    step_01_update_instance.delay.assert_called_once()
 
     fetched = await client.get(f"/api/v1/instances/{instance_id}/provider")
     assert fetched.json()["host"] == "https://kubernetes.example.test:6443"

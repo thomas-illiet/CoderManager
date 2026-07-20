@@ -67,6 +67,8 @@ class WorkspaceRead(BaseModel):
     disk: int
     action: str
     status: WorkspaceStatus
+    job_id: UUID | None = None
+    step: str | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -77,7 +77,7 @@ async def create_instance(
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    return response.json()["resource"]
 
 
 async def set_instance_status(
@@ -112,7 +112,7 @@ async def create_member(
         json={"username": username, "role": "user"},
     )
     assert response.status_code == 201, response.text
-    member = response.json()
+    member = response.json()["resource"]
     if ready:
         async with session_maker() as session:
             await MemberRepository(session).update_action(
@@ -309,7 +309,7 @@ async def test_workspace_crud_filters_and_image_change(
         "/api/v1/workspaces", json=workspace_payload(instance, member, template, image)
     )
     assert created_response.status_code == 201
-    created = created_response.json()
+    created = created_response.json()["resource"]
     assert created["action"] == "creating"
     assert created["status"] == "pending"
     assert created["disk"] == 20
@@ -349,7 +349,7 @@ async def test_workspace_crud_filters_and_image_change(
         },
     )
     assert no_op.status_code == 200
-    assert no_op.json()["updated_at"] == ready["updated_at"]
+    assert no_op.json()["resource"]["updated_at"] == ready["updated_at"]
 
     updated = await client.put(
         f"/api/v1/workspaces/{created['id']}",
@@ -362,9 +362,10 @@ async def test_workspace_crud_filters_and_image_change(
         },
     )
     assert updated.status_code == 202
-    assert updated.json()["image_id"] == second_image["id"]
-    assert updated.json()["disk"] == 20
-    assert updated.json()["action"] == "updating"
+    updated_resource = updated.json()["resource"]
+    assert updated_resource["image_id"] == second_image["id"]
+    assert updated_resource["disk"] == 20
+    assert updated_resource["action"] == "updating"
 
     await set_workspace_status(
         session_maker,
@@ -392,7 +393,7 @@ async def test_workspace_crud_filters_and_image_change(
     )
     deleted = await client.delete(f"/api/v1/workspaces/{created['id']}")
     assert deleted.status_code == 202
-    assert deleted.json()["action"] == "deleting"
+    assert deleted.json()["resource"]["action"] == "deleting"
 
 
 async def test_failed_parent_instance_blocks_workspace_creation(
@@ -487,7 +488,7 @@ async def test_workspace_update_revalidates_cpu_ram_and_stored_disk(
         await client.post(
             "/api/v1/workspaces", json=workspace_payload(instance, member, template, image)
         )
-    ).json()
+    ).json()["resource"]
     await set_workspace_status(session_maker, created["id"])
     original = (await client.get(f"/api/v1/workspaces/{created['id']}")).json()
 
@@ -560,9 +561,10 @@ async def test_workspace_relationship_validation_and_name_uniqueness(
     assert created.status_code == 201
     assert duplicate.status_code == 409
 
-    await set_workspace_status(session_maker, created.json()["id"])
+    created_resource = created.json()["resource"]
+    await set_workspace_status(session_maker, created_resource["id"])
     immutable = await client.put(
-        f"/api/v1/workspaces/{created.json()['id']}",
+        f"/api/v1/workspaces/{created_resource['id']}",
         json={
             "name": "development",
             "image_id": image["id"],
@@ -586,7 +588,7 @@ async def test_instance_and_workspace_processing_blocks_mutations_but_not_reads(
         await client.post(
             "/api/v1/workspaces", json=workspace_payload(instance, member, template, image)
         )
-    ).json()
+    ).json()["resource"]
     read_while_pending = await client.get(f"/api/v1/workspaces/{created['id']}")
     delete_pending = await client.delete(f"/api/v1/workspaces/{created['id']}")
     assert read_while_pending.status_code == 200
@@ -624,7 +626,7 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
         await client.post(
             "/api/v1/workspaces", json=workspace_payload(instance, member, template, image)
         )
-    ).json()
+    ).json()["resource"]
     await set_workspace_status(session_maker, created["id"])
 
     image_delete = await client.delete(f"/api/v1/templates/{template['id']}/images/{image['id']}")
@@ -708,7 +710,7 @@ async def test_internal_workspace_action_validation(
         await client.post(
             "/api/v1/workspaces", json=workspace_payload(instance, member, template, image)
         )
-    ).json()
+    ).json()["resource"]
     workspace_id = UUID(str(created["id"]))
 
     async with session_maker() as session:
@@ -761,7 +763,7 @@ async def test_workspace_updated_at_changes_on_real_update(
         await client.post(
             "/api/v1/workspaces", json=workspace_payload(instance, member, template, image)
         )
-    ).json()
+    ).json()["resource"]
     await set_workspace_status(session_maker, created["id"])
     old_timestamp = datetime.now(UTC) - timedelta(days=1)
     async with session_maker() as session:
@@ -781,7 +783,9 @@ async def test_workspace_updated_at_changes_on_real_update(
         },
     )
     assert updated.status_code == 202
-    changed_at = datetime.fromisoformat(updated.json()["updated_at"]).replace(tzinfo=UTC)
+    changed_at = datetime.fromisoformat(updated.json()["resource"]["updated_at"]).replace(
+        tzinfo=UTC
+    )
     assert changed_at > datetime.now(UTC) - timedelta(hours=1)
 
 

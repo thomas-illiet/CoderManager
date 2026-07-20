@@ -22,6 +22,11 @@ from coder_manager.repositories.instances import (
     InvalidApplicationSlugError,
     InvalidInstanceActionError,
 )
+from coder_manager.repositories.job_executions import (
+    JobExecutionNotFoundError,
+    JobExecutionRepository,
+    add_job_execution,
+)
 from coder_manager.repositories.managed_databases import (
     DatabaseAlreadyExistsError,
     DatabaseCapacityConflictError,
@@ -100,6 +105,8 @@ __all__ = [
     "InvalidInstanceActionError",
     "InvalidMemberActionError",
     "InvalidWorkspaceActionError",
+    "JobExecutionNotFoundError",
+    "JobExecutionRepository",
     "MemberActionConflictError",
     "MemberAlreadyExistsError",
     "MemberHasWorkspacesError",
@@ -132,4 +139,5 @@ __all__ = [
     "WorkspaceRepository",
     "WorkspaceTemplateNotFoundError",
     "WorkspaceTemplateUnavailableError",
+    "add_job_execution",
 ]

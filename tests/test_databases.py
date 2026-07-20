@@ -1,6 +1,6 @@
 """Managed database pool, encryption, allocation, and statistics tests."""
 
-# ruff: noqa: S105, S106, S107, SLF001
+# ruff: noqa: S105, S106, S107
 
 from base64 import b64encode
 from unittest.mock import AsyncMock
@@ -14,7 +14,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
-from coder_manager import tasks
+from coder_manager import tasks, worker_database
 from coder_manager.api.routes import databases as database_routes
 from coder_manager.config import Settings, get_settings
 from coder_manager.crypto import (
@@ -23,7 +23,13 @@ from coder_manager.crypto import (
     PasswordDecryptionError,
 )
 from coder_manager.main import app
-from coder_manager.models import Database, DatabaseAllocation, Instance, InstanceStatus
+from coder_manager.models import (
+    Database,
+    DatabaseAllocation,
+    Instance,
+    InstanceStatus,
+    JobExecution,
+)
 from coder_manager.repositories import (
     DatabaseAlreadyExistsError,
     DatabaseCapacityConflictError,
@@ -111,7 +117,7 @@ async def create_coder_instance(
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()
+    return response.json()["resource"]
 
 
 def test_password_cipher_round_trip_and_failures() -> None:
@@ -300,8 +306,9 @@ async def test_database_connection_check_and_sync_dispatch(
     assert str(checked_database.id) == database["id"]
     assert checked_password.get_secret_value() == "database-secret"
     assert synced.status_code == 202
-    assert synced.json() == {"status": "accepted"}
-    tasks.sync_database.delay.assert_called_once_with()
+    assert synced.json()["job"]["name"] == "database.sync"
+    assert synced.json()["job"]["step"] == "step_01_sync_database"
+    tasks.step_01_sync_database.delay.assert_called_once()
 
 
 async def test_managed_database_connection_executes_probe(
@@ -632,6 +639,7 @@ async def test_instance_deletion_releases_database_slot(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Verify the instance deletion releases database slot scenario."""
 
@@ -651,10 +659,22 @@ async def test_instance_deletion_releases_database_slot(
     accepted = await client.delete(f"/api/v1/instances/{instance_id}")
     assert accepted.status_code == 202
 
-    def successful_delete(_instance_id: UUID, _attached_name: str | None) -> None:
-        """Simulate successful Argo CD cleanup for the database capacity scenario."""
-
-    result = tasks._delete_instance(instance_id, sync_session_maker, successful_delete)
+    job_id = UUID(accepted.json()["job"]["id"])
+    async with session_maker() as session:
+        stored_instance = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored_instance is not None
+        assert job is not None
+        job.task_name = tasks.step_04_remove_local_configuration.name
+        job.step = "step_04_remove_local_configuration"
+        stored_instance.step = job.step
+        await session.commit()
+    monkeypatch.setattr(
+        worker_database,
+        "get_worker_session_maker",
+        lambda: sync_session_maker,
+    )
+    result = tasks.step_04_remove_local_configuration.run(str(job_id))
     assert result == {"status": "deleted"}
 
     second_application = await create_application(client, "delete-second")

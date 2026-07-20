@@ -72,7 +72,7 @@ async def create_instance(
         },
     )
     assert response.status_code == 201
-    return response.json()
+    return response.json()["resource"]
 
 
 async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
@@ -90,6 +90,8 @@ async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
         "status",
         "instance_url",
         "argocd_application_name",
+        "job_id",
+        "step",
         "database_id",
         "schema_name",
         "created_at",
@@ -338,12 +340,13 @@ async def test_delete_requires_creation_success_and_marks_deleting(
 
     accepted = await client.delete(f"/api/v1/instances/{created['id']}")
     assert accepted.status_code == 202
-    assert accepted.json()["action"] == "deleting"
-    assert accepted.json()["status"] == "pending"
+    accepted_resource = accepted.json()["resource"]
+    assert accepted_resource["action"] == "deleting"
+    assert accepted_resource["status"] == "pending"
 
     fetched = await client.get(f"/api/v1/instances/{created['id']}")
     assert fetched.status_code == 200
-    assert fetched.json() == accepted.json()
+    assert fetched.json() == accepted_resource
 
     repeated = await client.delete(f"/api/v1/instances/{created['id']}")
     assert repeated.status_code == 409
@@ -518,8 +521,8 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
 
     assert page.total == 1
     assert fetched.id == record.id
-    assert created.id == record.id
-    assert deleted.id == record.id
+    assert created.resource.id == record.id
+    assert deleted.resource.id == record.id
 
 
 @pytest.mark.parametrize(

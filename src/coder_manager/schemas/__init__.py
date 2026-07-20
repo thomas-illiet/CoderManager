@@ -17,6 +17,7 @@ from coder_manager.schemas.instance_kubernetes import (
     InstanceKubernetesRead,
     InstanceKubernetesUpdate,
 )
+from coder_manager.schemas.job_execution import JobRead, JobResourceResponse, JobResponse
 from coder_manager.schemas.managed_database import (
     DatabaseCreate,
     DatabaseItemStatistics,
@@ -70,6 +71,9 @@ __all__ = [
     "InstanceKubernetesUpdate",
     "InstancePage",
     "InstanceRead",
+    "JobRead",
+    "JobResourceResponse",
+    "JobResponse",
     "MemberCreate",
     "MemberPage",
     "MemberRead",

@@ -19,7 +19,16 @@ from coder_manager.models import (
     Member,
     MemberStatus,
 )
+from coder_manager.repositories.job_executions import add_job_execution
 from coder_manager.schemas import InstanceCreate
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_01,
+    INSTANCE_CREATE_STEP_01_TASK,
+    INSTANCE_DELETE_STEP_01,
+    INSTANCE_DELETE_STEP_01_TASK,
+    INSTANCE_UPDATE_STEP_01,
+    INSTANCE_UPDATE_STEP_01_TASK,
+)
 
 MAX_ACTION_LENGTH = 255
 MAX_DNS_LABEL_LENGTH = 63
@@ -199,7 +208,17 @@ class InstanceRepository:
             action="creating",
             status=InstanceStatus.PENDING,
             instance_url=instance_url(application.name, payload),
+            step=INSTANCE_CREATE_STEP_01,
         )
+        job = add_job_execution(
+            self._session,
+            name="instance.create",
+            task_name=INSTANCE_CREATE_STEP_01_TASK,
+            resource_type="instance",
+            resource_id=instance_id,
+            step=INSTANCE_CREATE_STEP_01,
+        )
+        instance.job_id = job.id
         allocation = DatabaseAllocation(
             database_id=database.id,
             instance_id=instance_id,
@@ -244,6 +263,16 @@ class InstanceRepository:
         # The worker performs destructive cleanup asynchronously from this request.
         instance.action = "deleting"
         instance.status = InstanceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name="instance.delete",
+            task_name=INSTANCE_DELETE_STEP_01_TASK,
+            resource_type="instance",
+            resource_id=instance.id,
+            step=INSTANCE_DELETE_STEP_01,
+        )
+        instance.job_id = job.id
+        instance.step = INSTANCE_DELETE_STEP_01
         await self._session.commit()
         stored_instance = await self._session.scalar(
             select(Instance)
@@ -287,6 +316,16 @@ class InstanceRepository:
             member.status = MemberStatus.PENDING
         instance.action = "updating"
         instance.status = InstanceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name="instance.update",
+            task_name=INSTANCE_UPDATE_STEP_01_TASK,
+            resource_type="instance",
+            resource_id=instance.id,
+            step=INSTANCE_UPDATE_STEP_01,
+        )
+        instance.job_id = job.id
+        instance.step = INSTANCE_UPDATE_STEP_01
         await self._session.commit()
         stored_instance = await self._session.scalar(
             select(Instance)

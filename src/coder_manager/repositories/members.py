@@ -7,7 +7,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.models import Instance, InstanceStatus, Member, MemberStatus, Workspace
+from coder_manager.repositories.job_executions import add_job_execution
 from coder_manager.schemas import MemberCreate, MemberRoleUpdate
+from coder_manager.tasks.common.registry import (
+    INSTANCE_UPDATE_STEP_01,
+    INSTANCE_UPDATE_STEP_01_TASK,
+)
 
 MAX_ACTION_LENGTH = 255
 
@@ -94,7 +99,7 @@ class MemberRepository:
         self._session.add(member)
         enqueue_update = self._request_instance_update(instance)
         if enqueue_update:
-            self._session.info["enqueue_instance_update"] = True
+            self._stage_instance_update_job(instance)
         try:
             await self._session.commit()
         except IntegrityError as error:
@@ -125,7 +130,7 @@ class MemberRepository:
         member.status = MemberStatus.PENDING
         enqueue_update = self._request_instance_update(instance)
         if enqueue_update:
-            self._session.info["enqueue_instance_update"] = True
+            self._stage_instance_update_job(instance)
         await self._session.commit()
         await self._session.refresh(member)
         return member, True
@@ -149,7 +154,7 @@ class MemberRepository:
         member.status = MemberStatus.PENDING
         enqueue_update = self._request_instance_update(instance)
         if enqueue_update:
-            self._session.info["enqueue_instance_update"] = True
+            self._stage_instance_update_job(instance)
         await self._session.commit()
         await self._session.refresh(member)
         return member
@@ -214,6 +219,21 @@ class MemberRepository:
         instance.action = "updating"
         instance.status = InstanceStatus.PENDING
         return True
+
+    def _stage_instance_update_job(self, instance: Instance) -> None:
+        """Attach one durable update job and expose its ID for post-commit dispatch."""
+
+        job = add_job_execution(
+            self._session,
+            name="instance.update",
+            task_name=INSTANCE_UPDATE_STEP_01_TASK,
+            resource_type="instance",
+            resource_id=instance.id,
+            step=INSTANCE_UPDATE_STEP_01,
+        )
+        instance.job_id = job.id
+        instance.step = INSTANCE_UPDATE_STEP_01
+        self._session.info["enqueue_job_id"] = job.id
 
     async def _lock_member(self, instance_id: UUID, member_id: UUID) -> Member:
         """Lock one member while enforcing instance ownership."""

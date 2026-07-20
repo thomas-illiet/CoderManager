@@ -13,6 +13,8 @@ from coder_manager.models import (  # noqa: F401
     Database,
     DatabaseAllocation,
     Instance,
+    InstanceKubernetes,
+    JobExecution,
     Member,
     Template,
     TemplateImage,

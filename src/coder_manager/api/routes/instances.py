@@ -26,6 +26,7 @@ from coder_manager.repositories import (
     InstanceNotFoundError,
     InstanceRepository,
     InvalidApplicationSlugError,
+    JobExecutionRepository,
 )
 from coder_manager.schemas import (
     InstanceArgoCdStatusRead,
@@ -35,9 +36,15 @@ from coder_manager.schemas import (
     InstanceKubernetesUpdate,
     InstancePage,
     InstanceRead,
+    JobRead,
+    JobResourceResponse,
 )
-from coder_manager.tasks import delete_instance as delete_instance_job
-from coder_manager.tasks import upsert_instance as upsert_instance_job
+from coder_manager.tasks import (
+    step_01_create_schema,
+    step_01_remove_workspaces,
+    step_01_update_instance,
+)
+from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/instances", tags=["instances"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -139,7 +146,7 @@ async def create_instance_provider(
     payload: InstanceKubernetesCreate,
     session: SessionDependency,
     settings: SettingsDependency,
-) -> InstanceKubernetesRead:
+) -> JobResourceResponse[InstanceKubernetesRead]:
     """Create Kubernetes configuration and enqueue an instance reconciliation."""
 
     try:
@@ -163,8 +170,10 @@ async def create_instance_provider(
             status_code=status.HTTP_409_CONFLICT,
             detail="Kubernetes provider is already configured",
         ) from error
-    upsert_instance_job.delay(str(instance_id))
-    return kubernetes_provider_read(provider)
+    job = await _instance_job(session, instance_id)
+    if job is not None:
+        dispatch_registered_step(step_01_update_instance.name, job.id)
+    return JobResourceResponse(resource=kubernetes_provider_read(provider), job=job)
 
 
 @router.put(
@@ -177,7 +186,7 @@ async def update_instance_provider(
     payload: InstanceKubernetesUpdate,
     session: SessionDependency,
     settings: SettingsDependency,
-) -> InstanceKubernetesRead:
+) -> JobResourceResponse[InstanceKubernetesRead]:
     """Update CA or token without allowing host or namespace changes."""
 
     try:
@@ -206,8 +215,10 @@ async def update_instance_provider(
             status_code=status.HTTP_409_CONFLICT,
             detail="Kubernetes provider host and namespace are immutable",
         ) from error
-    upsert_instance_job.delay(str(instance_id))
-    return kubernetes_provider_read(provider)
+    job = await _instance_job(session, instance_id)
+    if job is not None:
+        dispatch_registered_step(step_01_update_instance.name, job.id)
+    return JobResourceResponse(resource=kubernetes_provider_read(provider), job=job)
 
 
 @router.get(
@@ -266,7 +277,7 @@ async def create_instance(
     payload: InstanceCreate,
     session: SessionDependency,
     settings: SettingsDependency,
-) -> InstanceRead:
+) -> JobResourceResponse[InstanceRead]:
     """Create an instance and generate its immutable public URL."""
 
     try:
@@ -299,8 +310,10 @@ async def create_instance(
             status_code=status.HTTP_409_CONFLICT,
             detail="No database capacity available for region",
         ) from error
-    upsert_instance_job.delay(str(instance.id))
-    return InstanceRead.model_validate(instance)
+    job = await _job_read(session, getattr(instance, "job_id", None))
+    if job is not None:
+        dispatch_registered_step(step_01_create_schema.name, job.id)
+    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
 
 
 @router.post(
@@ -311,7 +324,7 @@ async def create_instance(
 async def sync_instance(
     instance_id: UUID,
     session: SessionDependency,
-) -> InstanceRead:
+) -> JobResourceResponse[InstanceRead]:
     """Request one full Argo CD reconciliation for an idle instance."""
 
     try:
@@ -326,8 +339,10 @@ async def sync_instance(
             status_code=status.HTTP_409_CONFLICT,
             detail="Instance has an action in progress",
         ) from error
-    upsert_instance_job.delay(str(instance.id))
-    return InstanceRead.model_validate(instance)
+    job = await _job_read(session, getattr(instance, "job_id", None))
+    if job is not None:
+        dispatch_registered_step(step_01_update_instance.name, job.id)
+    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
 
 
 @router.delete(
@@ -335,7 +350,10 @@ async def sync_instance(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Request Coder instance deletion",
 )
-async def delete_instance(instance_id: UUID, session: SessionDependency) -> InstanceRead:
+async def delete_instance(
+    instance_id: UUID,
+    session: SessionDependency,
+) -> JobResourceResponse[InstanceRead]:
     """Move a successfully reconciled instance to deleting/pending."""
 
     try:
@@ -350,5 +368,23 @@ async def delete_instance(instance_id: UUID, session: SessionDependency) -> Inst
             status_code=status.HTTP_409_CONFLICT,
             detail="Only a successfully reconciled instance can be deleted",
         ) from error
-    delete_instance_job.delay(str(instance.id))
-    return InstanceRead.model_validate(instance)
+    job = await _job_read(session, getattr(instance, "job_id", None))
+    if job is not None:
+        dispatch_registered_step(step_01_remove_workspaces.name, job.id)
+    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+
+
+async def _job_read(session: AsyncSession | None, job_id: UUID | None) -> JobRead | None:
+    """Load the public durable job representation for a committed transition."""
+
+    if session is None or job_id is None:
+        return None
+    job = await JobExecutionRepository(session).get(job_id)
+    return JobRead.model_validate(job) if job is not None else None
+
+
+async def _instance_job(session: AsyncSession, instance_id: UUID) -> JobRead | None:
+    """Load the current job attached to an instance."""
+
+    instance = await InstanceRepository(session).get(instance_id)
+    return await _job_read(session, instance.job_id if instance is not None else None)

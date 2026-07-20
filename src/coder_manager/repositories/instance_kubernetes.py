@@ -12,6 +12,11 @@ from coder_manager.repositories.instances import (
     InstanceActionConflictError,
     InstanceNotFoundError,
 )
+from coder_manager.repositories.job_executions import add_job_execution
+from coder_manager.tasks.common.registry import (
+    INSTANCE_UPDATE_STEP_01,
+    INSTANCE_UPDATE_STEP_01_TASK,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -89,6 +94,16 @@ class InstanceKubernetesRepository:
         self._session.add(provider)
         instance.action = "updating"
         instance.status = InstanceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name="instance.update",
+            task_name=INSTANCE_UPDATE_STEP_01_TASK,
+            resource_type="instance",
+            resource_id=instance.id,
+            step=INSTANCE_UPDATE_STEP_01,
+        )
+        instance.job_id = job.id
+        instance.step = INSTANCE_UPDATE_STEP_01
         await self._session.commit()
         await self._session.refresh(provider)
         return provider
@@ -119,6 +134,16 @@ class InstanceKubernetesRepository:
 
         instance.action = "updating"
         instance.status = InstanceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name="instance.update",
+            task_name=INSTANCE_UPDATE_STEP_01_TASK,
+            resource_type="instance",
+            resource_id=instance.id,
+            step=INSTANCE_UPDATE_STEP_01,
+        )
+        instance.job_id = job.id
+        instance.step = INSTANCE_UPDATE_STEP_01
         await self._session.commit()
         await self._session.refresh(provider)
         return provider

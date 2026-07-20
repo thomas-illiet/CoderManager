@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.database import get_session
 from coder_manager.repositories import (
+    JobExecutionRepository,
     MemberActionConflictError,
     MemberAlreadyExistsError,
     MemberHasWorkspacesError,
@@ -16,8 +17,16 @@ from coder_manager.repositories import (
     MemberNotFoundError,
     MemberRepository,
 )
-from coder_manager.schemas import MemberCreate, MemberPage, MemberRead, MemberRoleUpdate
-from coder_manager.tasks import upsert_instance as upsert_instance_job
+from coder_manager.schemas import (
+    JobRead,
+    JobResourceResponse,
+    MemberCreate,
+    MemberPage,
+    MemberRead,
+    MemberRoleUpdate,
+)
+from coder_manager.tasks import step_01_update_instance
+from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/instances/{instance_id}/members", tags=["members"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -55,7 +64,7 @@ async def create_member(
     instance_id: UUID,
     payload: MemberCreate,
     session: SessionDependency,
-) -> MemberRead:
+) -> JobResourceResponse[MemberRead]:
     """Add a normalized username in the creating/pending state."""
 
     try:
@@ -69,9 +78,10 @@ async def create_member(
             status_code=status.HTTP_409_CONFLICT,
             detail="Member already exists for this instance",
         ) from error
-    if _consume_instance_update_request(session):
-        upsert_instance_job.delay(str(instance_id))
-    return MemberRead.model_validate(member)
+    job = await _consume_instance_update_request(session)
+    if job is not None:
+        dispatch_registered_step(step_01_update_instance.name, job.id)
+    return JobResourceResponse(resource=MemberRead.model_validate(member), job=job)
 
 
 @router.get("/{member_id}", summary="Get an instance member")
@@ -95,7 +105,7 @@ async def update_member_role(
     payload: MemberRoleUpdate,
     session: SessionDependency,
     response: Response,
-) -> MemberRead:
+) -> JobResourceResponse[MemberRead]:
     """Request a role update or return the successful no-op unchanged."""
 
     try:
@@ -114,9 +124,10 @@ async def update_member_role(
         raise _member_conflict() from error
     if changed:
         response.status_code = status.HTTP_202_ACCEPTED
-    if _consume_instance_update_request(session):
-        upsert_instance_job.delay(str(instance_id))
-    return MemberRead.model_validate(member)
+    job = await _consume_instance_update_request(session) if changed else None
+    if job is not None:
+        dispatch_registered_step(step_01_update_instance.name, job.id)
+    return JobResourceResponse(resource=MemberRead.model_validate(member), job=job)
 
 
 @router.delete(
@@ -128,7 +139,7 @@ async def delete_member(
     instance_id: UUID,
     member_id: UUID,
     session: SessionDependency,
-) -> MemberRead:
+) -> JobResourceResponse[MemberRead]:
     """Move a successfully processed member to deleting/pending."""
 
     try:
@@ -146,17 +157,22 @@ async def delete_member(
             status_code=status.HTTP_409_CONFLICT,
             detail="Member still owns workspaces",
         ) from error
-    if _consume_instance_update_request(session):
-        upsert_instance_job.delay(str(instance_id))
-    return MemberRead.model_validate(member)
+    job = await _consume_instance_update_request(session)
+    if job is not None:
+        dispatch_registered_step(step_01_update_instance.name, job.id)
+    return JobResourceResponse(resource=MemberRead.model_validate(member), job=job)
 
 
-def _consume_instance_update_request(session: AsyncSession | None) -> bool:
+async def _consume_instance_update_request(session: AsyncSession | None) -> JobRead | None:
     """Consume the post-commit dispatch signal emitted by the repository."""
 
     if session is None:
-        return False
-    return bool(session.info.pop("enqueue_instance_update", False))
+        return None
+    job_id = session.info.pop("enqueue_job_id", None)
+    if not isinstance(job_id, UUID):
+        return None
+    job = await JobExecutionRepository(session).get(job_id)
+    return JobRead.model_validate(job) if job is not None else None
 
 
 def _instance_not_found() -> HTTPException:

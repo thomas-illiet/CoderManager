@@ -18,13 +18,18 @@ from coder_manager.main import app
 from coder_manager.models import Database, InstanceRegion
 from coder_manager.models.base import Base
 from coder_manager.tasks import (
-    create_workspace,
-    delete_instance,
-    delete_workspace,
-    retry_failed_instances,
-    sync_database,
-    update_workspace,
-    upsert_instance,
+    retry_job_executions,
+    step_01_create_schema,
+    step_01_create_workspace,
+    step_01_delete_workspace,
+    step_01_remove_workspaces,
+    step_01_sync_database,
+    step_01_update_instance,
+    step_01_update_workspace,
+    step_02_create_instance,
+    step_02_remove_instance,
+    step_03_remove_schema,
+    step_04_remove_local_configuration,
 )
 from coder_manager.worker_database import derive_sync_database_url
 
@@ -36,13 +41,18 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep API tests independent from a running Redis broker."""
 
     for task in (
-        upsert_instance,
-        delete_instance,
-        create_workspace,
-        update_workspace,
-        delete_workspace,
-        retry_failed_instances,
-        sync_database,
+        retry_job_executions,
+        step_01_create_schema,
+        step_02_create_instance,
+        step_01_update_instance,
+        step_01_remove_workspaces,
+        step_02_remove_instance,
+        step_03_remove_schema,
+        step_04_remove_local_configuration,
+        step_01_create_workspace,
+        step_01_update_workspace,
+        step_01_delete_workspace,
+        step_01_sync_database,
     ):
         monkeypatch.setattr(task, "delay", MagicMock())
 

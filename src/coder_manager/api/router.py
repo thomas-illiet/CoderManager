@@ -7,6 +7,7 @@ from coder_manager.api.routes import (
     databases,
     health,
     instances,
+    jobs,
     members,
     template_images,
     templates,
@@ -18,6 +19,7 @@ api_router.include_router(health.router)
 api_router.include_router(applications.router)
 api_router.include_router(databases.router)
 api_router.include_router(instances.router)
+api_router.include_router(jobs.router)
 api_router.include_router(members.router)
 api_router.include_router(templates.router)
 api_router.include_router(template_images.router)

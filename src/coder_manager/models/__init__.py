@@ -8,6 +8,7 @@ from coder_manager.models.instance import (
     InstanceStatus,
 )
 from coder_manager.models.instance_kubernetes import InstanceKubernetes
+from coder_manager.models.job_execution import JobExecution, JobStatus
 from coder_manager.models.managed_database import Database, DatabaseAllocation
 from coder_manager.models.member import Member, MemberRole, MemberStatus
 from coder_manager.models.template import Template, TemplateScope
@@ -23,6 +24,8 @@ __all__ = [
     "InstanceKubernetes",
     "InstanceRegion",
     "InstanceStatus",
+    "JobExecution",
+    "JobStatus",
     "Member",
     "MemberRole",
     "MemberStatus",

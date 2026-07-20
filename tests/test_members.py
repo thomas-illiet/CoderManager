@@ -50,7 +50,7 @@ async def create_instance(client: AsyncClient, application_id: object) -> dict[s
         },
     )
     assert response.status_code == 201
-    return response.json()
+    return response.json()["resource"]
 
 
 async def set_instance_status(
@@ -100,7 +100,7 @@ async def create_member(
         json={"username": username, "role": role},
     )
     assert response.status_code == 201
-    return response.json()
+    return response.json()["resource"]
 
 
 async def set_member_status(
@@ -191,7 +191,7 @@ async def test_member_crud_normalization_and_timestamps(
         json={"role": "user"},
     )
     assert no_op.status_code == 200
-    assert no_op.json()["updated_at"] == unchanged_timestamp
+    assert no_op.json()["resource"]["updated_at"] == unchanged_timestamp
 
     async with session_maker() as session:
         member = await session.get(Member, UUID(str(created["id"])))
@@ -204,10 +204,11 @@ async def test_member_crud_normalization_and_timestamps(
         json={"role": "admin"},
     )
     assert updated.status_code == 202
-    assert updated.json()["role"] == "admin"
-    assert updated.json()["action"] == "updating"
-    assert updated.json()["status"] == "pending"
-    updated_at = datetime.fromisoformat(updated.json()["updated_at"]).replace(tzinfo=UTC)
+    updated_resource = updated.json()["resource"]
+    assert updated_resource["role"] == "admin"
+    assert updated_resource["action"] == "updating"
+    assert updated_resource["status"] == "pending"
+    updated_at = datetime.fromisoformat(updated_resource["updated_at"]).replace(tzinfo=UTC)
     assert updated_at > datetime.now(UTC) - timedelta(hours=1)
 
     await set_member_status(
@@ -218,8 +219,8 @@ async def test_member_crud_normalization_and_timestamps(
     )
     deleted = await client.delete(f"/api/v1/instances/{instance['id']}/members/{created['id']}")
     assert deleted.status_code == 202
-    assert deleted.json()["action"] == "deleting"
-    assert deleted.json()["status"] == "pending"
+    assert deleted.json()["resource"]["action"] == "deleting"
+    assert deleted.json()["resource"]["status"] == "pending"
 
 
 async def test_instance_busy_blocks_mutations_but_not_reads(
@@ -592,7 +593,9 @@ async def test_member_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -> 
     deleted = await member_routes.delete_member(record.instance_id, record.id, None)
 
     assert page.total == 1
-    assert created.id == fetched.id == updated.id == deleted.id == record.id
+    assert (
+        created.resource.id == fetched.id == updated.resource.id == deleted.resource.id == record.id
+    )
     assert response.status_code == 202
 
 
@@ -630,7 +633,7 @@ async def test_member_route_no_op_keeps_default_status(
         response,
     )
 
-    assert result.id == record.id
+    assert result.resource.id == record.id
     assert response.status_code == 200
 
 

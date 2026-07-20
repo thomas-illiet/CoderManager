@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.database import get_session
 from coder_manager.repositories import (
+    JobExecutionRepository,
     WorkspaceAlreadyExistsError,
     WorkspaceBusyError,
     WorkspaceConfigurationError,
@@ -23,15 +24,20 @@ from coder_manager.repositories import (
     WorkspaceTemplateUnavailableError,
 )
 from coder_manager.schemas import (
+    JobRead,
+    JobResourceResponse,
     WorkspaceCreate,
     WorkspaceListQuery,
     WorkspacePage,
     WorkspaceRead,
     WorkspaceUpdate,
 )
-from coder_manager.tasks import create_workspace as create_workspace_job
-from coder_manager.tasks import delete_workspace as delete_workspace_job
-from coder_manager.tasks import update_workspace as update_workspace_job
+from coder_manager.tasks import (
+    step_01_create_workspace,
+    step_01_delete_workspace,
+    step_01_update_workspace,
+)
+from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -66,7 +72,10 @@ async def get_workspace(workspace_id: UUID, session: SessionDependency) -> Works
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create a Coder workspace")
-async def create_workspace(payload: WorkspaceCreate, session: SessionDependency) -> WorkspaceRead:
+async def create_workspace(
+    payload: WorkspaceCreate,
+    session: SessionDependency,
+) -> JobResourceResponse[WorkspaceRead]:
     """Create a workspace after validating all parent and template contracts."""
 
     try:
@@ -94,8 +103,10 @@ async def create_workspace(payload: WorkspaceCreate, session: SessionDependency)
         raise _invalid_configuration() from error
     except WorkspaceAlreadyExistsError as error:
         raise _name_conflict() from error
-    create_workspace_job.delay(str(workspace.id))
-    return WorkspaceRead.model_validate(workspace)
+    job = await _job_read(session, workspace.job_id)
+    if job is not None:
+        dispatch_registered_step(step_01_create_workspace.name, job.id)
+    return JobResourceResponse(resource=WorkspaceRead.model_validate(workspace), job=job)
 
 
 @router.put("/{workspace_id}", summary="Replace a workspace's mutable fields")
@@ -104,7 +115,7 @@ async def update_workspace(
     payload: WorkspaceUpdate,
     session: SessionDependency,
     response: Response,
-) -> WorkspaceRead:
+) -> JobResourceResponse[WorkspaceRead]:
     """Update a workspace or return an unchanged successful no-op."""
 
     try:
@@ -127,8 +138,13 @@ async def update_workspace(
         raise _name_conflict() from error
     if changed:
         response.status_code = status.HTTP_202_ACCEPTED
-        update_workspace_job.delay(str(workspace.id))
-    return WorkspaceRead.model_validate(workspace)
+    job = await _dispatch_job(
+        session,
+        workspace.job_id,
+        step_01_update_workspace.name,
+        dispatch=changed,
+    )
+    return JobResourceResponse(resource=WorkspaceRead.model_validate(workspace), job=job)
 
 
 @router.delete(
@@ -136,7 +152,10 @@ async def update_workspace(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Request Coder workspace deletion",
 )
-async def delete_workspace(workspace_id: UUID, session: SessionDependency) -> WorkspaceRead:
+async def delete_workspace(
+    workspace_id: UUID,
+    session: SessionDependency,
+) -> JobResourceResponse[WorkspaceRead]:
     """Move an available workspace to deleting/pending."""
 
     try:
@@ -149,8 +168,36 @@ async def delete_workspace(workspace_id: UUID, session: SessionDependency) -> Wo
         raise _instance_busy() from error
     except WorkspaceBusyError as error:
         raise _workspace_busy() from error
-    delete_workspace_job.delay(str(workspace.id))
-    return WorkspaceRead.model_validate(workspace)
+    job = await _job_read(session, workspace.job_id)
+    if job is not None:
+        dispatch_registered_step(step_01_delete_workspace.name, job.id)
+    return JobResourceResponse(resource=WorkspaceRead.model_validate(workspace), job=job)
+
+
+async def _job_read(session: AsyncSession, job_id: UUID | None) -> JobRead | None:
+    """Load one committed workspace job for its mutation response."""
+
+    if job_id is None:
+        return None
+    job = await JobExecutionRepository(session).get(job_id)
+    return JobRead.model_validate(job) if job is not None else None
+
+
+async def _dispatch_job(
+    session: AsyncSession,
+    job_id: UUID | None,
+    task_name: str,
+    *,
+    dispatch: bool,
+) -> JobRead | None:
+    """Return a job and optionally send its first step."""
+
+    if not dispatch:
+        return None
+    job = await _job_read(session, job_id)
+    if job is not None:
+        dispatch_registered_step(task_name, job.id)
+    return job
 
 
 def _workspace_not_found() -> HTTPException:

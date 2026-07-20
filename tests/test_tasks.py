@@ -1,30 +1,56 @@
-"""Celery lifecycle task tests."""
+"""Durable Celery step and recovery tests."""
 
-# ruff: noqa: EM101, PLR0915, SLF001, TRY003
+# ruff: noqa: EM101, PLR0913, PLR0915, S105, SLF001, TRY003
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from importlib import import_module
+from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from pydantic import SecretStr
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Session, sessionmaker
 
 from coder_manager import tasks, worker_database
 from coder_manager.celery_app import celery_app
-from coder_manager.config import get_settings
-from coder_manager.domains import argocd
+from coder_manager.config import Settings, get_settings
+from coder_manager.crypto import PasswordCipher
+from coder_manager.domains import argocd, postgresql
 from coder_manager.models import (
+    Database,
     DatabaseAllocation,
     Instance,
+    InstanceKubernetes,
     InstanceStatus,
+    JobExecution,
+    JobStatus,
     Member,
     MemberStatus,
     Workspace,
+    WorkspaceStatus,
 )
-from coder_manager.tasks import _common as task_common
-from coder_manager.tasks import healthcheck
+from coder_manager.tasks.common.execution import (
+    claim_execution,
+    complete_execution,
+    prepare_execution_retry,
+)
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_01_TASK,
+    INSTANCE_CREATE_STEP_02,
+    INSTANCE_CREATE_STEP_02_TASK,
+    INSTANCE_DELETE_STEP_04,
+    INSTANCE_DELETE_STEP_04_TASK,
+    INSTANCE_UPDATE_STEP_01,
+    INSTANCE_UPDATE_STEP_01_TASK,
+    REGISTERED_STEP_NAMES,
+    dispatch_registered_step,
+)
+from coder_manager.tasks.instance import _database as database_helpers
+from tests.conftest import TEST_CRYPTO_KEY
 from tests.test_workspaces import (
     create_application,
     create_instance,
@@ -34,6 +60,46 @@ from tests.test_workspaces import (
 )
 
 
+def configure_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Route worker persistence and crypto configuration to test fixtures."""
+
+    monkeypatch.setattr(
+        worker_database,
+        "get_worker_session_maker",
+        lambda: sync_session_maker,
+    )
+    monkeypatch.setattr(
+        database_helpers,
+        "get_settings",
+        lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
+
+
+async def encrypt_allocated_database(
+    session_maker: async_sessionmaker[AsyncSession],
+    instance_id: UUID,
+) -> None:
+    """Replace the fixture password with a valid encrypted envelope."""
+
+    async with session_maker() as session:
+        row = (
+            await session.execute(
+                select(DatabaseAllocation, Database)
+                .join(Database, Database.id == DatabaseAllocation.database_id)
+                .where(DatabaseAllocation.instance_id == instance_id)
+            )
+        ).one()
+        _allocation, database = row
+        database.password_enc = PasswordCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
+            SecretStr("managed-secret"),
+            database.id,
+        )
+        await session.commit()
+
+
 def successful_reconcile(
     instance_id: UUID,
     attached_name: str | None,
@@ -41,710 +107,571 @@ def successful_reconcile(
     _region: str,
     _environment: str,
 ) -> str:
-    """Return a deterministic Argo CD name without making a network request."""
+    """Return a deterministic Argo CD Application name."""
 
     return attached_name or f"coder-{instance_id.hex}"
 
 
-def test_worker_healthcheck_and_registered_names() -> None:
-    """Verify the worker healthcheck and registered names scenario."""
+def test_registered_step_names_and_beat_schedule() -> None:
+    """Register only explicit steps and the generic recovery control task."""
 
-    assert healthcheck.run() == {"status": "ok"}
-    assert tasks.sync_database.run() == {"status": "success"}
     assert {
-        tasks.upsert_instance.name,
-        tasks.delete_instance.name,
-        tasks.retry_failed_instances.name,
-        tasks.create_workspace.name,
-        tasks.update_workspace.name,
-        tasks.delete_workspace.name,
-        tasks.sync_database.name,
-    } == {
-        "coder_manager.upsert_instance",
-        "coder_manager.delete_instance",
-        "coder_manager.retry_failed_instances",
-        "coder_manager.create_workspace",
-        "coder_manager.update_workspace",
-        "coder_manager.delete_workspace",
-        "coder_manager.sync_database",
-    }
+        task.name
+        for task in (
+            tasks.step_01_create_schema,
+            tasks.step_02_create_instance,
+            tasks.step_01_update_instance,
+            tasks.step_01_remove_workspaces,
+            tasks.step_02_remove_instance,
+            tasks.step_03_remove_schema,
+            tasks.step_04_remove_local_configuration,
+            tasks.step_01_create_workspace,
+            tasks.step_01_update_workspace,
+            tasks.step_01_delete_workspace,
+            tasks.step_01_sync_database,
+        )
+    } == REGISTERED_STEP_NAMES
+    assert not hasattr(tasks, "upsert_instance")
+    schedule = celery_app.conf.beat_schedule["retry-job-executions"]
+    assert schedule["task"] == "coder_manager.retry_job_executions"
+    assert schedule["schedule"] == timedelta(seconds=get_settings().job_retry_interval_seconds)
+    task_source = Path(tasks.__file__).parent
+    assert all("chain(" not in path.read_text() for path in task_source.rglob("*.py"))
 
-    retry_schedule = celery_app.conf.beat_schedule["retry-failed-instances"]
-    assert retry_schedule["task"] == "coder_manager.retry_failed_instances"
-    assert retry_schedule["schedule"] == timedelta(
-        seconds=get_settings().instance_retry_interval_seconds
-    )
 
-
-async def test_upsert_instance_creation_success_duplicate_and_error(
+async def test_create_steps_advance_after_commit_and_finish_instance(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the create instance success duplicate and error scenario."""
+    """Create the schema before directly scheduling remote instance creation."""
 
-    application = await create_application(client)
+    configure_worker(monkeypatch, sync_session_maker)
+    application = await create_application(client, suffix="step-create")
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
+    job_id = UUID(str(instance["job_id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    created_targets: list[postgresql.SchemaTarget] = []
+    monkeypatch.setattr(postgresql, "create_schema", created_targets.append)
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    tasks.step_02_create_instance.delay.reset_mock()
 
-    result = tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        successful_reconcile,
-    )
-    duplicate = tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        successful_reconcile,
-    )
-    assert result == {"status": "success"}
-    assert duplicate == {"status": "noop"}
+    assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
+    assert len(created_targets) == 1
+    assert created_targets[0].schema_name == f"coder_{instance_id.hex}"
+    assert created_targets[0].password.get_secret_value() == "managed-secret"
+    tasks.step_02_create_instance.delay.assert_called_once_with(str(job_id))
+
     async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
         stored = await session.get(Instance, instance_id)
+        assert job is not None
         assert stored is not None
+        assert job.task_name == INSTANCE_CREATE_STEP_02_TASK
+        assert job.step == INSTANCE_CREATE_STEP_02
+        assert job.status is JobStatus.PENDING
+        assert stored.step == INSTANCE_CREATE_STEP_02
+        assert stored.status is InstanceStatus.PENDING
+
+    assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "success"}
+    assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "noop"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.status is JobStatus.SUCCESS
+        assert job.attempt == 2
+        assert stored.status is InstanceStatus.SUCCESS
+        assert stored.step is None
         assert stored.argocd_application_name == f"coder-{instance_id.hex}"
 
-    second_application = await create_application(client, suffix="error")
-    failed = await create_instance(client, second_application["id"])
-    failed_id = UUID(str(failed["id"]))
-
-    def failing_reconcile(
-        _instance_id: UUID,
-        _attached_name: str | None,
-        _members: tuple[tuple[str, str], ...],
-        _region: str,
-        _environment: str,
-    ) -> str:
-        """Simulate the expected failing reconcile behavior."""
-
-        raise RuntimeError("Argo CD failed")
-
-    with pytest.raises(RuntimeError, match="Argo CD failed"):
-        tasks._upsert_instance(
-            failed_id,
-            sync_session_maker,
-            failing_reconcile,
-        )
-    async with session_maker() as session:
-        stored = await session.get(Instance, failed_id)
-        assert stored is not None
-        assert stored.status is InstanceStatus.ERROR
-
-    assert tasks._upsert_instance(
-        failed_id,
-        sync_session_maker,
-        successful_reconcile,
-        retry_error=True,
-    ) == {"status": "success"}
-    assert tasks._upsert_instance(
-        failed_id,
-        sync_session_maker,
-        successful_reconcile,
-        retry_error=True,
-    ) == {"status": "noop"}
+    response = await client.get(f"/api/v1/jobs/{job_id}")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert (await client.get(f"/api/v1/jobs/{uuid4()}")).status_code == 404
 
 
-async def test_celery_failure_guard_marks_active_database_states_as_error(
+async def test_create_failure_is_exactly_retryable_and_dispatch_loss_stays_pending(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Persist terminal errors even when a task fails outside its lifecycle helper."""
+    """Persist failures and let Beat recover a next step lost after commit."""
 
-    monkeypatch.setattr(
-        worker_database,
-        "get_worker_session_maker",
-        lambda: sync_session_maker,
-    )
-    application = await create_application(client, suffix="failure-guard")
+    configure_worker(monkeypatch, sync_session_maker)
+    application = await create_application(client, suffix="step-failure")
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
+    job_id = UUID(str(instance["job_id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
 
-    tasks.upsert_instance.on_failure(
-        RuntimeError("worker failed"),
-        "create-task-id",
-        (str(instance_id),),
-        {},
-        None,
-    )
+    def fail_schema(_target: postgresql.SchemaTarget) -> None:
+        """Simulate an unavailable managed PostgreSQL server."""
+
+        raise RuntimeError("schema unavailable")
+
+    monkeypatch.setattr(postgresql, "create_schema", fail_schema)
+    with pytest.raises(RuntimeError, match="schema unavailable"):
+        tasks.step_01_create_schema.run(str(job_id))
     async with session_maker() as session:
-        stored_instance = await session.get(Instance, instance_id)
-        assert stored_instance is not None
-        assert stored_instance.status is InstanceStatus.ERROR
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.status is JobStatus.ERROR
+        assert job.step == "step_01_create_schema"
+        assert stored.status is InstanceStatus.ERROR
 
-        stored_instance.action = "updating"
-        stored_instance.status = InstanceStatus.RUNNING
-        running_member = Member(
-            instance_id=instance_id,
-            username="claimed-member",
-            role="user",
-            action="updating",
-            status=MemberStatus.RUNNING,
-        )
-        session.add(running_member)
-        await session.commit()
-        member_id = running_member.id
-
-    tasks.upsert_instance.on_failure(
-        RuntimeError("Argo CD failed"),
-        "update-task-id",
-        (str(instance_id),),
-        {},
-        None,
-    )
+    monkeypatch.setattr(postgresql, "create_schema", lambda _target: None)
+    tasks.step_02_create_instance.delay.side_effect = RuntimeError("redis unavailable")
+    assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
     async with session_maker() as session:
-        stored_instance = await session.get(Instance, instance_id)
-        stored_member = await session.get(Member, member_id)
-        assert stored_instance is not None
-        assert stored_instance.status is InstanceStatus.ERROR
-        assert stored_member is not None
-        assert stored_member.status is MemberStatus.ERROR
+        job = await session.get(JobExecution, job_id)
+        assert job is not None
+        assert job.status is JobStatus.PENDING
+        assert job.task_name == INSTANCE_CREATE_STEP_02_TASK
 
-    ready_instance, owner, template, image = await create_ready_context(client, session_maker)
-    workspace_response = await client.post(
-        "/api/v1/workspaces",
-        json=workspace_payload(ready_instance, owner, template, image, name="guarded"),
-    )
-    workspace_id = UUID(workspace_response.json()["id"])
-    tasks.create_workspace.on_failure(
-        RuntimeError("workspace worker failed"),
-        "workspace-task-id",
-        (str(workspace_id),),
-        {},
-        None,
-    )
-    async with session_maker() as session:
-        stored_workspace = await session.get(Workspace, workspace_id)
-        assert stored_workspace is not None
-        assert stored_workspace.status.value == "error"
+    tasks.step_02_create_instance.delay.side_effect = None
+    tasks.step_02_create_instance.delay.reset_mock()
+    result = tasks.retry_job_executions.run()
+    assert result["scheduled"] >= 1
+    tasks.step_02_create_instance.delay.assert_any_call(str(job_id))
 
 
-async def test_retry_failed_instances_dispatches_flat_idempotent_jobs(
+async def test_attempt_fencing_rejects_late_worker_completion(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
 ) -> None:
-    """Map failed lifecycle intentions to one upsert or delete job without changing rows."""
+    """Prevent an expired attempt from completing after Beat has reclaimed it."""
 
-    instance_ids: list[UUID] = []
-    for suffix in ("retry-create", "retry-update", "retry-delete", "retry-unsupported"):
-        application = await create_application(client, suffix=suffix)
-        instance = await create_instance(client, application["id"])
-        instance_ids.append(UUID(str(instance["id"])))
-
-    actions = ("creating", "updating", "deleting", "manual-repair")
-    async with session_maker() as session:
-        for instance_id, action in zip(instance_ids, actions, strict=True):
-            stored = await session.get(Instance, instance_id)
-            assert stored is not None
-            stored.action = action
-            stored.status = InstanceStatus.ERROR
-        await session.commit()
-
-    scheduled_upserts: list[tuple[str, bool]] = []
-    scheduled_deletes: list[tuple[str, bool]] = []
-
-    def record_upsert(instance_id: str, *, retry_error: bool) -> None:
-        """Record one retryable upsert dispatch."""
-
-        scheduled_upserts.append((instance_id, retry_error))
-        if instance_id == str(instance_ids[1]):
-            raise RuntimeError("broker unavailable")
-
-    def record_delete(instance_id: str, *, retry_error: bool) -> None:
-        """Record one retryable delete dispatch."""
-
-        scheduled_deletes.append((instance_id, retry_error))
-
-    result = tasks._retry_failed_instances(
-        sync_session_maker,
-        record_upsert,
-        record_delete,
+    application = await create_application(client, suffix="attempt-fence")
+    instance = await create_instance(client, application["id"])
+    job_id = UUID(str(instance["job_id"]))
+    first_claim = claim_execution(job_id, INSTANCE_CREATE_STEP_01_TASK, sync_session_maker)
+    assert first_claim is not None
+    stale_before = datetime.now(UTC) + timedelta(seconds=1)
+    assert (
+        prepare_execution_retry(
+            job_id,
+            stale_before=stale_before,
+            session_factory=sync_session_maker,
+        )
+        == INSTANCE_CREATE_STEP_01_TASK
     )
-
-    assert result == {"status": "success", "scheduled": 2, "skipped": 2}
-    assert set(scheduled_upserts) == {
-        (str(instance_ids[0]), True),
-        (str(instance_ids[1]), True),
-    }
-    assert scheduled_deletes == [(str(instance_ids[2]), True)]
+    second_claim = claim_execution(job_id, INSTANCE_CREATE_STEP_01_TASK, sync_session_maker)
+    assert second_claim is not None
+    assert second_claim.attempt == first_claim.attempt + 1
+    assert complete_execution(first_claim, sync_session_maker) is False
+    assert complete_execution(second_claim, sync_session_maker) is True
     async with session_maker() as session:
-        statuses: list[InstanceStatus] = []
-        for instance_id in instance_ids:
-            stored = await session.get(Instance, instance_id)
-            assert stored is not None
-            statuses.append(stored.status)
-    assert statuses == [InstanceStatus.ERROR] * 4
+        job = await session.get(JobExecution, job_id)
+        assert job is not None
+        assert job.status is JobStatus.SUCCESS
 
 
-async def test_workspace_create_update_delete_duplicate_and_error(
+async def test_retried_update_reclaims_members_from_the_expired_attempt(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the workspace create update delete duplicate and error scenario."""
+    """Let a new update attempt finish members left running by an expired worker."""
 
-    instance, member, template, image = await create_ready_context(client, session_maker)
-    response = await client.post(
-        "/api/v1/workspaces",
-        json=workspace_payload(instance, member, template, image),
-    )
-    workspace_id = UUID(response.json()["id"])
-
-    created = tasks._workspace_lifecycle(
-        workspace_id,
-        expected_action="creating",
-        delete_on_success=False,
-        session_factory=sync_session_maker,
-    )
-    duplicate = tasks._workspace_lifecycle(
-        workspace_id,
-        expected_action="creating",
-        delete_on_success=False,
-        session_factory=sync_session_maker,
-    )
-    assert created == {"status": "success"}
-    assert duplicate == {"status": "noop"}
-
-    updated_response = await client.put(
-        f"/api/v1/workspaces/{workspace_id}",
-        json={
-            "name": "renamed",
-            "image_id": image["id"],
-            "modules": [],
-            "cpu": 3,
-            "ram": 9,
-        },
-    )
-    assert updated_response.status_code == 202
-    updated = tasks._workspace_lifecycle(
-        workspace_id,
-        expected_action="updating",
-        delete_on_success=False,
-        session_factory=sync_session_maker,
-    )
-    assert updated == {"status": "success"}
-
-    deleted_response = await client.delete(f"/api/v1/workspaces/{workspace_id}")
-    assert deleted_response.status_code == 202
-    deleted = tasks._workspace_lifecycle(
-        workspace_id,
-        expected_action="deleting",
-        delete_on_success=True,
-        session_factory=sync_session_maker,
-    )
-    assert deleted == {"status": "deleted"}
-    assert tasks._workspace_lifecycle(
-        workspace_id,
-        expected_action="deleting",
-        delete_on_success=True,
-        session_factory=sync_session_maker,
-    ) == {"status": "noop"}
-
-    failing_response = await client.post(
-        "/api/v1/workspaces",
-        json=workspace_payload(instance, member, template, image, name="failing"),
-    )
-    failing_id = UUID(failing_response.json()["id"])
-
-    def failing_placeholder() -> None:
-        """Simulate the expected failing placeholder behavior."""
-
-        raise RuntimeError("workspace failed")
-
-    monkeypatch.setattr(task_common, "placeholder", failing_placeholder)
-    with pytest.raises(RuntimeError, match="workspace failed"):
-        tasks._workspace_lifecycle(
-            failing_id,
-            expected_action="creating",
-            delete_on_success=False,
-            session_factory=sync_session_maker,
-        )
-    async with session_maker() as session:
-        stored = await session.get(Workspace, failing_id)
-        assert stored is not None
-        assert stored.status.value == "error"
-
-
-async def test_upsert_instance_finalizes_and_coalesces_members(
-    client: AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-    sync_session_maker: sessionmaker[Session],
-) -> None:
-    """Verify the update instance finalizes and coalesces members scenario."""
-
-    application = await create_application(client)
+    configure_worker(monkeypatch, sync_session_maker)
+    application = await create_application(client, suffix="member-attempt-fence")
     instance = await create_instance(client, application["id"])
     instance_id = UUID(str(instance["id"]))
     await set_instance_status(session_maker, instance_id)
-    tasks.upsert_instance.delay.reset_mock()
-    first_response = await client.post(
+    response = await client.post(
+        f"/api/v1/instances/{instance_id}/members",
+        json={"username": "retry-member", "role": "user"},
+    )
+    job_id = UUID(response.json()["job"]["id"])
+    first_claim = claim_execution(job_id, INSTANCE_UPDATE_STEP_01_TASK, sync_session_maker)
+    assert first_claim is not None
+    update_module = import_module("coder_manager.tasks.instance.update.step_01_update_instance")
+    member_ids, *_ = update_module._claim_members(first_claim, sync_session_maker)
+    assert len(member_ids) == 1
+    assert (
+        prepare_execution_retry(
+            job_id,
+            stale_before=datetime.now(UTC) + timedelta(seconds=1),
+            session_factory=sync_session_maker,
+        )
+        == INSTANCE_UPDATE_STEP_01_TASK
+    )
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "success"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        member = await session.scalar(select(Member).where(Member.username == "retry-member"))
+        assert job is not None
+        assert member is not None
+        assert job.attempt == first_claim.attempt + 1
+        assert job.status is JobStatus.SUCCESS
+        assert member.status is MemberStatus.SUCCESS
+
+
+async def test_update_step_coalesces_member_changes_into_a_new_job(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finish one member snapshot and create a new job for changes arriving during it."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    application = await create_application(client, suffix="member-coalesce")
+    instance = await create_instance(client, application["id"])
+    instance_id = UUID(str(instance["id"]))
+    await set_instance_status(session_maker, instance_id)
+    response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
         json={"username": "first", "role": "user"},
     )
-    second_response = await client.post(
-        f"/api/v1/instances/{instance_id}/members",
-        json={"username": "second", "role": "user"},
-    )
-    first = first_response.json()
-    second = second_response.json()
-    tasks.upsert_instance.delay.assert_called_once_with(str(instance_id))
+    assert response.status_code == 201
+    first_job_id = UUID(response.json()["job"]["id"])
 
-    reconciled_members: list[tuple[tuple[str, str], ...]] = []
-
-    def record_reconcile(
-        reconciled_instance_id: UUID,
-        attached_name: str | None,
-        members: tuple[tuple[str, str], ...],
-        region: str,
-        environment: str,
-    ) -> str:
-        """Record the reconcile calls made by this scenario."""
-
-        reconciled_members.append(members)
-        assert region == "emea"
-        assert environment == "development"
-        return attached_name or f"coder-{reconciled_instance_id.hex}"
-
-    first_pass = tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        record_reconcile,
-    )
-    assert first_pass == {"status": "success"}
-    assert reconciled_members[-1] == (("first", "user"), ("second", "user"))
-    async with session_maker() as session:
-        stored_members = list(
-            await session.scalars(
-                select(Member).where(Member.instance_id == instance_id).order_by(Member.username)
-            )
-        )
-        assert [member.status for member in stored_members] == [
-            MemberStatus.SUCCESS,
-            MemberStatus.SUCCESS,
-        ]
-
-    updated = await client.put(
-        f"/api/v1/instances/{instance_id}/members/{first['id']}",
-        json={"role": "admin"},
-    )
-    removed = await client.delete(f"/api/v1/instances/{instance_id}/members/{second['id']}")
-    assert updated.status_code == 202
-    assert removed.status_code == 202
-    assert tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        record_reconcile,
-    ) == {"status": "success"}
-    assert reconciled_members[-1] == (("first", "admin"),)
-    async with session_maker() as session:
-        first_member = await session.get(Member, UUID(str(first["id"])))
-        second_member = await session.get(Member, UUID(str(second["id"])))
-        assert first_member is not None
-        assert first_member.status is MemberStatus.SUCCESS
-        assert second_member is None
-
-    third_response = await client.post(
-        f"/api/v1/instances/{instance_id}/members",
-        json={"username": "third", "role": "user"},
-    )
-    third = third_response.json()
-    tasks.upsert_instance.delay.reset_mock()
-
-    def add_member_during_pass(
-        _instance_id: UUID,
+    def add_late_member(
+        reconciled_id: UUID,
         attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
         _region: str,
         _environment: str,
     ) -> str:
-        """Add member during pass during the test scenario."""
+        """Insert a pending member while the first reconciliation is running."""
 
         with sync_session_maker() as session:
-            session.add(Member(instance_id=instance_id, username="late", role="user"))
+            session.add(Member(instance_id=reconciled_id, username="late", role="user"))
             session.commit()
-        return attached_name or f"coder-{instance_id.hex}"
+        return attached_name or f"coder-{reconciled_id.hex}"
 
-    coalesced = tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        add_member_during_pass,
-    )
-    assert coalesced == {"status": "pending"}
-    tasks.upsert_instance.delay.assert_called_once_with(str(instance_id))
+    monkeypatch.setattr(argocd, "reconcile_instance_application", add_late_member)
+    tasks.step_01_update_instance.delay.reset_mock()
+    assert tasks.step_01_update_instance.run(str(first_job_id)) == {"status": "pending"}
     async with session_maker() as session:
-        third_member = await session.get(Member, UUID(str(third["id"])))
+        instance_record = await session.get(Instance, instance_id)
+        first_job = await session.get(JobExecution, first_job_id)
+        assert instance_record is not None
+        assert first_job is not None
+        assert first_job.status is JobStatus.SUCCESS
+        assert instance_record.job_id != first_job_id
+        next_job_id = instance_record.job_id
+        assert instance_record.step == INSTANCE_UPDATE_STEP_01
+        first_member = await session.scalar(select(Member).where(Member.username == "first"))
         late_member = await session.scalar(select(Member).where(Member.username == "late"))
-        assert third_member is not None
-        assert third_member.status is MemberStatus.SUCCESS
+        assert first_member is not None
         assert late_member is not None
+        assert first_member.status is MemberStatus.SUCCESS
         assert late_member.status is MemberStatus.PENDING
+    assert next_job_id is not None
+    tasks.step_01_update_instance.delay.assert_called_once_with(str(next_job_id))
 
-    assert tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        record_reconcile,
-    ) == {"status": "success"}
-    assert reconciled_members[-1] == (
-        ("first", "admin"),
-        ("late", "user"),
-        ("third", "user"),
-    )
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    assert tasks.step_01_update_instance.run(str(next_job_id)) == {"status": "success"}
+    async with session_maker() as session:
+        late_member = await session.scalar(select(Member).where(Member.username == "late"))
+        instance_record = await session.get(Instance, instance_id)
+        assert late_member is not None
+        assert instance_record is not None
+        assert late_member.status is MemberStatus.SUCCESS
+        assert instance_record.status is InstanceStatus.SUCCESS
 
 
-async def test_upsert_error_and_instance_delete_cascade(
+async def test_delete_steps_keep_local_state_until_step_04(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the update instance error and instance delete cascade scenario."""
+    """Execute workspace, Argo CD, schema, and local deletion in strict order."""
 
-    application = await create_application(client, suffix="failed")
-    instance = await create_instance(client, application["id"])
+    configure_worker(monkeypatch, sync_session_maker)
+    instance, member, template, image = await create_ready_context(client, session_maker)
     instance_id = UUID(str(instance["id"]))
-    await set_instance_status(session_maker, instance_id)
-    member_response = await client.post(
-        f"/api/v1/instances/{instance_id}/members",
-        json={"username": "failing", "role": "user"},
-    )
-    member = member_response.json()
-
-    def failing_reconcile(
-        _instance_id: UUID,
-        _attached_name: str | None,
-        _members: tuple[tuple[str, str], ...],
-        _region: str,
-        _environment: str,
-    ) -> str:
-        """Simulate the expected failing reconcile behavior."""
-
-        raise RuntimeError("reconciliation failed")
-
-    with pytest.raises(RuntimeError, match="reconciliation failed"):
-        tasks._upsert_instance(instance_id, sync_session_maker, failing_reconcile)
-    async with session_maker() as session:
-        stored_instance = await session.get(Instance, instance_id)
-        stored_member = await session.get(Member, UUID(str(member["id"])))
-        assert stored_instance is not None
-        assert stored_instance.status is InstanceStatus.ERROR
-        assert stored_member is not None
-        assert stored_member.status is MemberStatus.ERROR
-
-    managed_instance, owner, template, image = await create_ready_context(client, session_maker)
-    managed_id = UUID(str(managed_instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
     workspace_response = await client.post(
         "/api/v1/workspaces",
-        json=workspace_payload(managed_instance, owner, template, image),
+        json=workspace_payload(instance, member, template, image),
     )
-    assert workspace_response.status_code == 201
+    workspace_id = UUID(workspace_response.json()["resource"]["id"])
     async with session_maker() as session:
-        stored_instance = await session.get(Instance, managed_id)
-        assert stored_instance is not None
-        stored_instance.argocd_application_name = "managed-attached"
+        workspace = await session.get(Workspace, workspace_id)
+        instance_record = await session.get(Instance, instance_id)
+        assert workspace is not None
+        assert instance_record is not None
+        workspace.status = WorkspaceStatus.SUCCESS
+        workspace.step = None
+        instance_record.status = InstanceStatus.SUCCESS
+        instance_record.step = None
+        session.add(
+            InstanceKubernetes(
+                instance_id=instance_id,
+                host="https://kubernetes.validation.invalid",
+                namespace="validation",
+                token_enc=b"encrypted-token",
+                ca="validation-ca",
+            )
+        )
         await session.commit()
-    deletion = await client.delete(f"/api/v1/instances/{managed_id}")
-    assert deletion.status_code == 202
 
-    deleted_applications: list[tuple[UUID, str | None]] = []
-
-    def successful_delete(deleted_id: UUID, attached_name: str | None) -> None:
-        """Record the successful remote Application cleanup."""
-
-        deleted_applications.append((deleted_id, attached_name))
-
-    monkeypatch.setattr(argocd, "delete_instance_application", successful_delete)
-    result = tasks._delete_instance(managed_id, sync_session_maker)
-    assert result == {"status": "deleted"}
-    assert deleted_applications == [(managed_id, "managed-attached")]
-    async with session_maker() as session:
-        assert await session.get(Instance, managed_id) is None
-        member_count = await session.scalar(
-            select(func.count()).select_from(Member).where(Member.instance_id == managed_id)
-        )
-        workspace_count = await session.scalar(
-            select(func.count()).select_from(Workspace).where(Workspace.instance_id == managed_id)
-        )
-        allocation_count = await session.scalar(
-            select(func.count())
-            .select_from(DatabaseAllocation)
-            .where(DatabaseAllocation.instance_id == managed_id)
-        )
-        assert member_count == 0
-        assert workspace_count == 0
-        assert allocation_count == 0
-
-
-async def test_delete_instance_keeps_local_state_when_argocd_fails(
-    client: AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-    sync_session_maker: sessionmaker[Session],
-) -> None:
-    """Retain an errored instance when its Argo CD Application cannot be deleted."""
-
-    application = await create_application(client, suffix="delete-error")
-    instance = await create_instance(client, application["id"])
-    instance_id = UUID(str(instance["id"]))
-    await set_instance_status(session_maker, instance_id)
     deletion = await client.delete(f"/api/v1/instances/{instance_id}")
-    assert deletion.status_code == 202
-
-    def failing_delete(_instance_id: UUID, _attached_name: str | None) -> None:
-        """Simulate a rejected Argo CD deletion."""
-
-        raise RuntimeError("Argo CD deletion failed")
-
-    with pytest.raises(RuntimeError, match="Argo CD deletion failed"):
-        tasks._delete_instance(instance_id, sync_session_maker, failing_delete)
-
-    async with session_maker() as session:
-        stored = await session.get(Instance, instance_id)
-        assert stored is not None
-        assert stored.action == "deleting"
-        assert stored.status is InstanceStatus.ERROR
-
-    assert tasks._delete_instance(
-        instance_id,
-        sync_session_maker,
-        lambda _instance_id, _attached_name: None,
-        retry_error=True,
-    ) == {"status": "deleted"}
-
-
-async def test_missing_upsert_instance_is_a_noop(
-    sync_session_maker: sessionmaker[Session],
-) -> None:
-    """Keep a missing upsert delivery as a harmless no-op."""
-
-    assert tasks._upsert_instance(uuid4(), sync_session_maker) == {"status": "noop"}
-
-
-async def test_sync_accepts_idle_instances_and_rejects_concurrent_or_missing(
-    client: AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-) -> None:
-    """Schedule one upsert and reject concurrent reconciliation attempts."""
-
-    application = await create_application(client, suffix="force-sync")
-    instance = await create_instance(client, application["id"])
-    instance_id = UUID(str(instance["id"]))
-
-    busy = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    repeated_creation = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    assert busy.status_code == 409
-    assert repeated_creation.status_code == 409
-    assert busy.json() == {"detail": "Instance has an action in progress"}
-
-    await set_instance_status(session_maker, instance_id)
-    tasks.upsert_instance.delay.reset_mock()
-    accepted = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    repeated = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    concurrent = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    missing = await client.post(f"/api/v1/instances/{uuid4()}/sync")
-
-    assert accepted.status_code == 202
-    assert accepted.json()["action"] == "updating"
-    assert accepted.json()["status"] == "pending"
-    assert repeated.status_code == 409
-    assert concurrent.status_code == 409
-    assert missing.status_code == 404
-    tasks.upsert_instance.delay.assert_called_once_with(str(instance_id))
-
-    async with session_maker() as session:
-        stored = await session.get(Instance, instance_id)
-        assert stored is not None
-        stored.action = "deleting"
-        stored.status = InstanceStatus.ERROR
-        await session.commit()
-    deleting_error = await client.post(f"/api/v1/instances/{instance_id}/sync")
-    assert deleting_error.status_code == 409
-
-
-async def test_automatic_upsert_retries_failed_member_deletion(
-    client: AsyncClient,
-    session_maker: async_sessionmaker[AsyncSession],
-    sync_session_maker: sessionmaker[Session],
-) -> None:
-    """Let a Beat-triggered upsert retry a failed member deletion."""
-
-    application = await create_application(client, suffix="force-sync-error")
-    instance = await create_instance(client, application["id"])
-    instance_id = UUID(str(instance["id"]))
-    await set_instance_status(session_maker, instance_id)
-    member_response = await client.post(
-        f"/api/v1/instances/{instance_id}/members",
-        json={"username": "failed-admin", "role": "admin"},
+    job_id = UUID(deletion.json()["job"]["id"])
+    deleted_remote: list[UUID] = []
+    dropped_targets: list[postgresql.SchemaTarget] = []
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda remote_id, _name: deleted_remote.append(remote_id),
     )
-    member_id = UUID(member_response.json()["id"])
+    monkeypatch.setattr(postgresql, "drop_schema", dropped_targets.append)
+
+    assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "pending"}
+    assert deleted_remote == [instance_id]
+    assert tasks.step_03_remove_schema.run(str(job_id)) == {"status": "pending"}
+    assert dropped_targets[0].schema_name == f"coder_{instance_id.hex}"
     async with session_maker() as session:
-        stored_instance = await session.get(Instance, instance_id)
-        stored_member = await session.get(Member, member_id)
-        assert stored_instance is not None
-        assert stored_member is not None
-        stored_instance.action = "updating"
-        stored_instance.status = InstanceStatus.ERROR
-        stored_member.action = "deleting"
-        stored_member.status = MemberStatus.ERROR
-        await session.commit()
+        assert await session.get(Instance, instance_id) is not None
+        assert await session.get(Workspace, workspace_id) is not None
+        job = await session.get(JobExecution, job_id)
+        assert job is not None
+        assert job.step == INSTANCE_DELETE_STEP_04
+        assert job.task_name == INSTANCE_DELETE_STEP_04_TASK
 
-    observed_members: tuple[tuple[str, str], ...] | None = None
-
-    def capture_reconcile(
-        _instance_id: UUID,
-        _attached_name: str | None,
-        members: tuple[tuple[str, str], ...],
-        _region: str,
-        _environment: str,
-    ) -> str:
-        """Record the reconcile calls made by this scenario."""
-
-        nonlocal observed_members
-        observed_members = members
-        return f"coder-{instance_id.hex}"
-
-    assert tasks._upsert_instance(
-        instance_id,
-        sync_session_maker,
-        capture_reconcile,
-        retry_error=True,
-    ) == {"status": "success"}
-    assert observed_members == ()
+    assert tasks.step_04_remove_local_configuration.run(str(job_id)) == {"status": "deleted"}
     async with session_maker() as session:
-        stored_instance = await session.get(Instance, instance_id)
-        assert stored_instance is not None
-        assert stored_instance.status is InstanceStatus.SUCCESS
-        assert stored_instance.argocd_application_name == f"coder-{instance_id.hex}"
-        assert await session.get(Member, member_id) is None
+        assert await session.get(Instance, instance_id) is None
+        assert await session.get(Workspace, workspace_id) is None
+        assert await session.get(InstanceKubernetes, instance_id) is None
+        job = await session.get(JobExecution, job_id)
+        assert job is not None
+        assert job.status is JobStatus.SUCCESS
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DatabaseAllocation)
+                .where(DatabaseAllocation.instance_id == instance_id)
+            )
+            == 0
+        )
 
 
-async def test_public_tasks_run_sequentially_inside_an_active_event_loop(
+@pytest.mark.parametrize(
+    ("failed_step", "expected_step"),
+    [
+        (1, "step_01_remove_workspaces"),
+        (2, "step_02_remove_instance"),
+        (3, "step_03_remove_schema"),
+        (4, "step_04_remove_local_configuration"),
+    ],
+)
+async def test_each_delete_step_failure_preserves_local_configuration(
+    failed_step: int,
+    expected_step: str,
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify the public tasks run sequentially inside an active event loop scenario."""
+    """Keep every local dependent until all remote deletion steps have succeeded."""
 
-    first_application = await create_application(client, suffix="sequential-first")
-    second_application = await create_application(client, suffix="sequential-second")
-    first = await create_instance(client, first_application["id"])
-    second = await create_instance(client, second_application["id"])
-    monkeypatch.setattr(
-        worker_database,
-        "get_worker_session_maker",
-        lambda: sync_session_maker,
+    configure_worker(monkeypatch, sync_session_maker)
+    instance, member, template, image = await create_ready_context(client, session_maker)
+    instance_id = UUID(str(instance["id"]))
+    member_id = UUID(str(member["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    workspace_response = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(instance, member, template, image),
     )
-    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
-
-    assert tasks.upsert_instance.run(str(first["id"])) == {"status": "success"}
-    assert tasks.upsert_instance.run(str(second["id"])) == {"status": "success"}
-
+    workspace_id = UUID(workspace_response.json()["resource"]["id"])
     async with session_maker() as session:
-        first_stored = await session.get(Instance, UUID(str(first["id"])))
-        second_stored = await session.get(Instance, UUID(str(second["id"])))
-        assert first_stored is not None
-        assert second_stored is not None
-        assert first_stored.status is InstanceStatus.SUCCESS
-        assert second_stored.status is InstanceStatus.SUCCESS
+        workspace = await session.get(Workspace, workspace_id)
+        instance_record = await session.get(Instance, instance_id)
+        assert workspace is not None
+        assert instance_record is not None
+        workspace.status = WorkspaceStatus.SUCCESS
+        workspace.step = None
+        instance_record.status = InstanceStatus.SUCCESS
+        instance_record.step = None
+        session.add(
+            InstanceKubernetes(
+                instance_id=instance_id,
+                host="https://kubernetes.failure.invalid",
+                namespace="failure-validation",
+                token_enc=b"encrypted-token",
+                ca="validation-ca",
+            )
+        )
+        await session.commit()
+
+    deletion = await client.delete(f"/api/v1/instances/{instance_id}")
+    job_id = UUID(deletion.json()["job"]["id"])
+    monkeypatch.setattr(argocd, "delete_instance_application", lambda *_args: None)
+    monkeypatch.setattr(postgresql, "drop_schema", lambda _target: None)
+    deletion_tasks = (
+        tasks.step_01_remove_workspaces,
+        tasks.step_02_remove_instance,
+        tasks.step_03_remove_schema,
+        tasks.step_04_remove_local_configuration,
+    )
+    for task in deletion_tasks[: failed_step - 1]:
+        task.run(str(job_id))
+
+    failed_module = import_module(deletion_tasks[failed_step - 1].run.__module__)
+
+    def fail_step(*_args: object, **_kwargs: object) -> None:
+        """Raise at the selected deletion boundary."""
+
+        raise RuntimeError("selected deletion failure")
+
+    if failed_step == 1:
+        monkeypatch.setattr(failed_module, "placeholder", fail_step)
+    elif failed_step == 2:
+        monkeypatch.setattr(failed_module.argocd, "delete_instance_application", fail_step)
+    elif failed_step == 3:
+        monkeypatch.setattr(failed_module.postgresql, "drop_schema", fail_step)
+    else:
+        monkeypatch.setattr(failed_module, "owned_execution", fail_step)
+
+    with pytest.raises(RuntimeError, match="selected deletion failure"):
+        deletion_tasks[failed_step - 1].run(str(job_id))
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        instance_record = await session.get(Instance, instance_id)
+        assert job is not None
+        assert instance_record is not None
+        assert job.status is JobStatus.ERROR
+        assert job.step == expected_step
+        assert instance_record.status is InstanceStatus.ERROR
+        assert await session.get(Workspace, workspace_id) is not None
+        assert await session.get(Member, member_id) is not None
+        assert await session.get(InstanceKubernetes, instance_id) is not None
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DatabaseAllocation)
+                .where(DatabaseAllocation.instance_id == instance_id)
+            )
+            == 1
+        )
+
+
+async def test_workspace_steps_and_database_sync_are_durable(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run each one-step workflow through its persisted job identifier."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance, member, template, image = await create_ready_context(client, session_maker)
+    created = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(instance, member, template, image),
+    )
+    workspace = created.json()["resource"]
+    create_job_id = UUID(created.json()["job"]["id"])
+    assert tasks.step_01_create_workspace.run(str(create_job_id)) == {"status": "success"}
+
+    updated = await client.put(
+        f"/api/v1/workspaces/{workspace['id']}",
+        json={
+            "name": "updated",
+            "image_id": image["id"],
+            "modules": [],
+            "cpu": 2,
+            "ram": 8,
+        },
+    )
+    update_job_id = UUID(updated.json()["job"]["id"])
+    assert tasks.step_01_update_workspace.run(str(update_job_id)) == {"status": "success"}
+
+    deleted = await client.delete(f"/api/v1/workspaces/{workspace['id']}")
+    delete_job_id = UUID(deleted.json()["job"]["id"])
+    assert tasks.step_01_delete_workspace.run(str(delete_job_id)) == {"status": "deleted"}
+    async with session_maker() as session:
+        assert await session.get(Workspace, UUID(str(workspace["id"]))) is None
+
+    synced = await client.post("/api/v1/databases/sync")
+    sync_job_id = UUID(synced.json()["job"]["id"])
+    assert tasks.step_01_sync_database.run(str(sync_job_id)) == {"status": "success"}
+    response = await client.get(f"/api/v1/jobs/{sync_job_id}")
+    assert response.json()["status"] == "success"
+    assert response.json()["resource_id"] is None
+
+
+async def test_retry_scanner_handles_error_pending_stale_and_unknown_jobs(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recover exact known steps and safely skip an unknown persisted task name."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    job_ids = []
+    for suffix in ("retry-error", "retry-stale", "retry-unknown"):
+        application = await create_application(client, suffix=suffix)
+        instance = await create_instance(client, application["id"])
+        job_ids.append(UUID(str(instance["job_id"])))
+    async with session_maker() as session:
+        error_job = await session.get(JobExecution, job_ids[0])
+        stale_job = await session.get(JobExecution, job_ids[1])
+        unknown_job = await session.get(JobExecution, job_ids[2])
+        assert error_job is not None
+        assert stale_job is not None
+        assert unknown_job is not None
+        error_job.status = JobStatus.ERROR
+        stale_job.status = JobStatus.RUNNING
+        stale_job.claimed_at = datetime.now(UTC) - timedelta(hours=1)
+        unknown_job.task_name = "coder_manager.unknown.step"
+        await session.commit()
+
+    tasks.step_01_create_schema.delay.reset_mock()
+    result = tasks.retry_job_executions.run()
+    assert result == {"status": "success", "scheduled": 2, "skipped": 1}
+    assert tasks.step_01_create_schema.delay.call_count == 2
+    assert dispatch_registered_step("coder_manager.unknown.step", uuid4()) is False
+
+
+def test_postgresql_service_uses_quoted_idempotent_schema_statements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pass secrets only to psycopg and quote CREATE/DROP schema identifiers."""
+
+    connection = MagicMock()
+    cursor = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value.__enter__.return_value = cursor
+    connect = MagicMock(return_value=connection)
+    service = import_module("coder_manager.domains.postgresql.service")
+    monkeypatch.setattr(service.psycopg, "connect", connect)
+    target = postgresql.SchemaTarget(
+        host="postgres.internal",
+        port=5432,
+        database_name="coder",
+        username="manager",
+        password=SecretStr("secret"),
+        schema_name='coder_"quoted',
+    )
+
+    postgresql.create_schema(target)
+    create_query = repr(cursor.execute.call_args.args[0])
+    postgresql.drop_schema(target)
+    drop_query = repr(cursor.execute.call_args.args[0])
+
+    assert "CREATE SCHEMA IF NOT EXISTS" in create_query
+    assert "Identifier" in create_query
+    assert "DROP SCHEMA IF EXISTS" in drop_query
+    assert "CASCADE" in drop_query
+    assert connect.call_args.kwargs["password"] == "secret"
+    assert connect.call_args.kwargs["connect_timeout"] == 5

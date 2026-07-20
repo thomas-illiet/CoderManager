@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -19,10 +20,18 @@ from coder_manager.models import (
     Workspace,
     WorkspaceStatus,
 )
+from coder_manager.repositories.job_executions import add_job_execution
+from coder_manager.tasks.common.registry import (
+    WORKSPACE_CREATE_STEP_01,
+    WORKSPACE_CREATE_STEP_01_TASK,
+    WORKSPACE_DELETE_STEP_01,
+    WORKSPACE_DELETE_STEP_01_TASK,
+    WORKSPACE_UPDATE_STEP_01,
+    WORKSPACE_UPDATE_STEP_01_TASK,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -152,7 +161,9 @@ class WorkspaceRepository:
         )
 
         # Persist the validated configuration as one pending lifecycle operation.
+        workspace_id = uuid4()
         workspace = Workspace(
+            id=workspace_id,
             name=payload.name,
             instance_id=instance.id,
             template_id=template.id,
@@ -164,7 +175,17 @@ class WorkspaceRepository:
             disk=payload.disk,
             action="creating",
             status=WorkspaceStatus.PENDING,
+            step=WORKSPACE_CREATE_STEP_01,
         )
+        job = add_job_execution(
+            self._session,
+            name="workspace.create",
+            task_name=WORKSPACE_CREATE_STEP_01_TASK,
+            resource_type="workspace",
+            resource_id=workspace_id,
+            step=WORKSPACE_CREATE_STEP_01,
+        )
+        workspace.job_id = job.id
         self._session.add(workspace)
         try:
             await self._session.commit()
@@ -211,6 +232,16 @@ class WorkspaceRepository:
         workspace.ram = payload.ram
         workspace.action = "updating"
         workspace.status = WorkspaceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name="workspace.update",
+            task_name=WORKSPACE_UPDATE_STEP_01_TASK,
+            resource_type="workspace",
+            resource_id=workspace.id,
+            step=WORKSPACE_UPDATE_STEP_01,
+        )
+        workspace.job_id = job.id
+        workspace.step = WORKSPACE_UPDATE_STEP_01
         workspace.updated_at = datetime.now(UTC)
         try:
             await self._session.commit()
@@ -228,6 +259,16 @@ class WorkspaceRepository:
         await self._lock_available_instance(workspace.instance_id)
         workspace.action = "deleting"
         workspace.status = WorkspaceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name="workspace.delete",
+            task_name=WORKSPACE_DELETE_STEP_01_TASK,
+            resource_type="workspace",
+            resource_id=workspace.id,
+            step=WORKSPACE_DELETE_STEP_01,
+        )
+        workspace.job_id = job.id
+        workspace.step = WORKSPACE_DELETE_STEP_01
         workspace.updated_at = datetime.now(UTC)
         await self._session.commit()
         await self._session.refresh(workspace)

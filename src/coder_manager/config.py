@@ -21,7 +21,8 @@ class Settings(BaseSettings):
     )
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
-    instance_retry_interval_seconds: int = Field(default=60, ge=1)
+    job_retry_interval_seconds: int = Field(default=60, ge=1)
+    job_stale_after_seconds: int = Field(default=300, ge=1)
     global_whitelist: bool = False
     crypto_key: SecretStr | None = None
     argocd_url: str | None = None

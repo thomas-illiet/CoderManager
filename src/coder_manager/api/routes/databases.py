@@ -26,6 +26,7 @@ from coder_manager.repositories import (
     DatabaseRepository,
     DatabaseUsage,
     InstanceRepository,
+    JobExecutionRepository,
 )
 from coder_manager.schemas import (
     DatabaseCreate,
@@ -38,8 +39,11 @@ from coder_manager.schemas import (
     DatabaseUpdate,
     InstancePage,
     InstanceRead,
+    JobRead,
+    JobResponse,
 )
-from coder_manager.tasks import sync_database as sync_database_job
+from coder_manager.tasks import step_01_sync_database
+from coder_manager.tasks.common.registry import DATABASE_SYNC_STEP_01, dispatch_registered_step
 
 router = APIRouter(prefix="/databases", tags=["databases"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -202,11 +206,16 @@ async def get_database_statistics(session: SessionDependency) -> DatabaseStatist
     status_code=status.HTTP_202_ACCEPTED,
     summary="Synchronize managed databases",
 )
-async def sync_databases() -> dict[str, str]:
+async def sync_databases(session: SessionDependency) -> JobResponse:
     """Enqueue the managed database synchronization placeholder job."""
 
-    sync_database_job.delay()
-    return {"status": "accepted"}
+    job = await JobExecutionRepository(session).create_system_job(
+        name="database.sync",
+        task_name=step_01_sync_database.name,
+        step=DATABASE_SYNC_STEP_01,
+    )
+    dispatch_registered_step(job.task_name, job.id)
+    return JobResponse(job=JobRead.model_validate(job))
 
 
 @router.get("/{database_id}/instances", summary="List a managed database's Coder instances")
