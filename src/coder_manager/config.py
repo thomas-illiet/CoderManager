@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     job_retry_interval_seconds: int = Field(default=60, ge=1)
     job_stale_after_seconds: int = Field(default=300, ge=1)
     global_whitelist: bool = False
+    instance_domain: str = Field(
+        default="code-studio",
+        pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+    )
     crypto_key: SecretStr | None = None
     argocd_url: str | None = None
     argocd_token: SecretStr | None = None

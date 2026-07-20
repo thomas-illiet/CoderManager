@@ -211,7 +211,8 @@ moves the instance to `updating/pending` and creates an `instance.update` job.
 The API generates an immutable HTTPS URL from the application name, region, and environment. For
 example, application `My App` in `emea` and `development` receives
 `https://my-app.emea.code-studio.dev.echonet`. Environment DNS labels are `dev`, `staging`, and
-`cib` for development, staging, and production respectively.
+`cib` for development, staging, and production respectively. The `code-studio` DNS label defaults
+from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
 
 Deletion is asynchronous. It is accepted after `creating/success` or `updating/success`, returns
 HTTP 202, and changes the state to `deleting/pending`. Its four steps reserve workspace cleanup,

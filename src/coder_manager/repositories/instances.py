@@ -83,12 +83,16 @@ def application_slug(name: str) -> str:
     return slug
 
 
-def instance_url(application_name: str, payload: InstanceCreate) -> str:
+def instance_url(
+    application_name: str,
+    payload: InstanceCreate,
+    instance_domain: str,
+) -> str:
     """Build the immutable public URL for a new instance."""
 
     slug = application_slug(application_name)
     environment = ENVIRONMENT_DNS_LABELS[payload.environment]
-    return f"https://{slug}.{payload.region.value}.code-studio.{environment}.echonet"
+    return f"https://{slug}.{payload.region.value}.{instance_domain}.{environment}.echonet"
 
 
 class InstanceRepository:
@@ -148,6 +152,7 @@ class InstanceRepository:
         self,
         payload: InstanceCreate,
         *,
+        instance_domain: str,
         global_whitelist: bool = False,
     ) -> Instance:
         """Create an instance and reserve capacity on the least utilized regional database."""
@@ -207,7 +212,7 @@ class InstanceRepository:
             environment=payload.environment,
             action="creating",
             status=InstanceStatus.PENDING,
-            instance_url=instance_url(application.name, payload),
+            instance_url=instance_url(application.name, payload, instance_domain),
             step=INSTANCE_CREATE_STEP_01,
         )
         job = add_job_execution(

@@ -283,6 +283,7 @@ async def create_instance(
     try:
         instance = await InstanceRepository(session).create(
             payload,
+            instance_domain=settings.instance_domain,
             global_whitelist=settings.global_whitelist,
         )
     except InstanceApplicationNotFoundError as error:

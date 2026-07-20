@@ -185,6 +185,17 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
     )
 
 
+async def test_instance_domain_is_configurable(client: AsyncClient) -> None:
+    """Build new instance URLs with the configured domain label."""
+
+    app.dependency_overrides[get_settings] = lambda: Settings(instance_domain="coder-studio")
+    application = await create_application(client)
+
+    instance = await create_instance(client, application["id"])
+
+    assert instance["instance_url"] == ("https://mon-equipe-portail.emea.coder-studio.dev.echonet")
+
+
 async def test_create_rejects_unknown_application_and_extra_name(client: AsyncClient) -> None:
     """Verify the create rejects unknown application and extra name scenario."""
 
@@ -495,10 +506,12 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
             self,
             _payload: InstanceCreate,
             *,
+            instance_domain: str,
             global_whitelist: bool = False,
         ) -> SimpleNamespace:
             """Simulate the repository create operation."""
 
+            assert instance_domain == "code-studio"
             assert global_whitelist is False
             return record
 
@@ -552,10 +565,12 @@ async def test_create_instance_route_error_mapping(
             self,
             _payload: InstanceCreate,
             *,
+            instance_domain: str,
             global_whitelist: bool = False,
         ) -> None:
             """Simulate the repository create operation."""
 
+            assert instance_domain == "code-studio"
             assert global_whitelist is False
             raise repository_error
 
