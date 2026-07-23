@@ -42,7 +42,7 @@ def application_payload(
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(helm_values.region, helm_values.environment)
-    helm_arguments = " ".join(
+    helm_arguments = "\n".join(
         (
             "--namespace app-argo-system",
             f"--set policy.config.allowedUsernames={','.join(users)}",
@@ -70,6 +70,7 @@ def application_payload(
             ),
         )
     )
+    helm_arguments += "\n"
     return {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Application",
