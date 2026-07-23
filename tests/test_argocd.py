@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from pydantic import SecretStr
 
 from coder_manager.config import Settings
 from coder_manager.domains.argocd import (
@@ -14,9 +15,20 @@ from coder_manager.domains.argocd import (
     ArgoCdConfig,
     ArgoCdConfigurationError,
     ArgoCdRequestError,
+    InstanceHelmValues,
 )
 from coder_manager.domains.argocd import client as argocd_client
 from coder_manager.domains.argocd import service as argocd_service
+
+EXPECTED_INSTANCE_HELM_ARGS = (
+    "--set global.config.publicURL=https://coder.emea.code-studio.dev.echonet "
+    "--set 'global.wildcardAccessHost=*.coder.emea.code-studio.dev.echonet' "
+    "--set server.config.database.username=db-user "
+    "--set 'server.config.database.password=managed\\, secret' "
+    "--set server.config.database.host=postgres.internal "
+    "--set server.config.database.database=coder "
+    "--set server.config.database.schema=coder_instance"
+)
 
 
 def configured_settings(**overrides: object) -> Settings:
@@ -48,6 +60,23 @@ def configured_settings(**overrides: object) -> Settings:
     return Settings.model_validate(values)
 
 
+def instance_helm_values(**overrides: object) -> InstanceHelmValues:
+    """Build complete instance-specific Helm values with optional overrides."""
+
+    values: dict[str, object] = {
+        "region": "emea",
+        "environment": "development",
+        "public_url": "https://coder.emea.code-studio.dev.echonet",
+        "database_username": "db-user",
+        "database_password": SecretStr("managed, secret"),
+        "database_host": "postgres.internal",
+        "database_name": "coder",
+        "database_schema": "coder_instance",
+    }
+    values.update(overrides)
+    return InstanceHelmValues(**values)  # type: ignore[arg-type]
+
+
 def test_create_application_and_sync_contract() -> None:
     """Verify the create application and sync contract scenario."""
 
@@ -68,8 +97,7 @@ def test_create_application_and_sync_contract() -> None:
             instance_id,
             None,
             (("zoe", "user"), ("alice", "admin")),
-            "emea",
-            "development",
+            instance_helm_values(),
         )
 
     assert name == "managed-12345678123456781234567812345678"
@@ -101,7 +129,7 @@ def test_create_application_and_sync_contract() -> None:
                     "value": (
                         "-f values-global.yaml -f values-dev.yaml "
                         "--set users=alice,root.admin,zoe "
-                        "--set admins=alice,root.admin"
+                        f"--set admins=alice,root.admin {EXPECTED_INSTANCE_HELM_ARGS}"
                     ),
                 }
             ],
@@ -159,7 +187,12 @@ def test_existing_application_is_attached_and_overwritten() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        returned_name = client.ensure_application(uuid4(), attached_name, (), "apac", "staging")
+        returned_name = client.ensure_application(
+            uuid4(),
+            attached_name,
+            (),
+            instance_helm_values(region="apac", environment="staging"),
+        )
 
     assert returned_name == attached_name
     assert [request.method for request in requests] == ["GET", "PUT", "POST"]
@@ -172,7 +205,10 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert update["spec"]["source"]["plugin"]["env"] == [
         {
             "name": "HELM_ARGS",
-            "value": ("-f values-global.yaml -f values-stg.yaml --set users= --set admins="),
+            "value": (
+                "-f values-global.yaml -f values-stg.yaml --set users= --set admins= "
+                f"{EXPECTED_INSTANCE_HELM_ARGS}"
+            ),
         }
     ]
     assert update["spec"]["source"]["plugin"]["parameters"][0]["map"] == {
@@ -207,7 +243,12 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        client.ensure_application(uuid4(), "attached", (), "amer", "production")
+        client.ensure_application(
+            uuid4(),
+            "attached",
+            (),
+            instance_helm_values(region="amer", environment="production"),
+        )
 
     assert [request.method for request in requests] == ["GET", "POST", "GET", "PUT", "POST"]
     update = json.loads(requests[3].content)
@@ -216,7 +257,8 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "-f values-global.yaml -f values-prd.yaml "
-                "--set users=alice,root.admin --set admins=alice,root.admin"
+                "--set users=alice,root.admin --set admins=alice,root.admin "
+                f"{EXPECTED_INSTANCE_HELM_ARGS}"
             ),
         }
     ]
@@ -383,7 +425,12 @@ def test_invalid_existing_application_response_is_rejected(response: httpx.Respo
         ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
         pytest.raises(ArgoCdRequestError),
     ):
-        client.ensure_application(uuid4(), "attached", (), "emea", "development")
+        client.ensure_application(
+            uuid4(),
+            "attached",
+            (),
+            instance_helm_values(),
+        )
 
 
 def test_request_errors_do_not_include_token_or_response_body() -> None:
@@ -399,7 +446,12 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
         ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
         pytest.raises(ArgoCdRequestError) as caught,
     ):
-        client.ensure_application(uuid4(), None, (), "emea", "development")
+        client.ensure_application(
+            uuid4(),
+            None,
+            (),
+            instance_helm_values(),
+        )
 
     message = str(caught.value)
     assert "HTTP 500" in message

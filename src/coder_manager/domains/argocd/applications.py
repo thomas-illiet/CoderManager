@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from coder_manager.domains.argocd.errors import ArgoCdRequestError
-from coder_manager.domains.argocd.models import ArgoCdApplicationStatus
+from coder_manager.domains.argocd.models import (
+    ArgoCdApplicationStatus,
+    InstanceHelmValues,
+)
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -28,7 +32,7 @@ def application_payload(
     name: str,
     instance_id: UUID,
     members: Iterable[tuple[str, str]],
-    target: tuple[str, str],
+    helm_values: InstanceHelmValues,
 ) -> dict[str, Any]:
     """Build the desired Argo CD Application for one managed instance.
 
@@ -38,12 +42,45 @@ def application_payload(
     """
 
     users, admins = _member_values(config.default_admins, members)
-    cyberark = config.cyberark_for(*target)
+    cyberark = config.cyberark_for(helm_values.region, helm_values.environment)
     values_environment = {
         "development": "dev",
         "staging": "stg",
         "production": "prd",
-    }[target[1]]
+    }[helm_values.environment]
+    helm_arguments = " ".join(
+        (
+            "-f values-global.yaml",
+            f"-f values-{values_environment}.yaml",
+            f"--set policy.config.allowedUsernames={','.join(users)}",
+            f"--set policy.config.adminUsernames={','.join(admins)}",
+            _helm_scalar_argument("global.config.publicURL", helm_values.public_url),
+            _helm_scalar_argument(
+                "global.wildcardAccessHost",
+                helm_values.wildcard_access_host,
+            ),
+            _helm_scalar_argument(
+                "server.config.database.username",
+                helm_values.database_username,
+            ),
+            _helm_scalar_argument(
+                "server.config.database.password",
+                helm_values.database_password.get_secret_value(),
+            ),
+            _helm_scalar_argument(
+                "server.config.database.host",
+                helm_values.database_host,
+            ),
+            _helm_scalar_argument(
+                "server.config.database.database",
+                helm_values.database_name,
+            ),
+            _helm_scalar_argument(
+                "server.config.database.schema",
+                helm_values.database_schema,
+            ),
+        )
+    )
     return {
         "apiVersion": "argoproj.io/v1alpha1",
         "kind": "Application",
@@ -65,10 +102,7 @@ def application_payload(
                     "env": [
                         {
                             "name": "HELM_ARGS",
-                            "value": (
-                                f"-f values-global.yaml -f values-{values_environment}.yaml "
-                                f"--set users={','.join(users)} --set admins={','.join(admins)}"
-                            ),
+                            "value": helm_arguments,
                         }
                     ],
                     "parameters": [
@@ -78,7 +112,7 @@ def application_payload(
                                 "appId": cyberark.app_id,
                                 "certName": cyberark.cert_name,
                                 "keyName": cyberark.key_name,
-                                "region": target[0].upper(),
+                                "region": helm_values.region.upper(),
                                 "safe": cyberark.safe,
                             },
                         }
@@ -97,6 +131,13 @@ def application_payload(
             },
         },
     }
+
+
+def _helm_scalar_argument(name: str, value: str) -> str:
+    """Build one shell-safe Helm scalar assignment."""
+
+    escaped_value = value.replace("\\", "\\\\").replace(",", "\\,")
+    return f"--set {shlex.quote(f'{name}={escaped_value}')}"
 
 
 def application_update_payload(

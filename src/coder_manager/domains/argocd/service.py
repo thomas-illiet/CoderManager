@@ -12,15 +12,17 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from uuid import UUID
 
-    from coder_manager.domains.argocd.models import ArgoCdApplicationStatus
+    from coder_manager.domains.argocd.models import (
+        ArgoCdApplicationStatus,
+        InstanceHelmValues,
+    )
 
 
 def reconcile_instance_application(
     instance_id: UUID,
     attached_name: str | None,
     members: Iterable[tuple[str, str]],
-    region: str,
-    environment: str,
+    helm_values: InstanceHelmValues,
 ) -> str:
     """Reconcile one instance using the process-wide Argo CD configuration."""
 
@@ -30,8 +32,7 @@ def reconcile_instance_application(
             instance_id,
             attached_name,
             members,
-            region,
-            environment,
+            helm_values,
         )
 
 

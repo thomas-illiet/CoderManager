@@ -30,6 +30,7 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_UPDATE_STEP_01_TASK,
     dispatch_registered_step,
 )
+from coder_manager.tasks.instance._database import instance_helm_values
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -46,17 +47,23 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Claim members, reconcile Argo CD, and finalize the pass."""
 
-        member_ids, members, attached_name, region, environment = _claim_members(
+        member_ids, members, attached_name, region, environment, public_url = _claim_members(
             claim,
             session_factory,
         )
         try:
+            helm_values = instance_helm_values(
+                required_resource_id(claim),
+                region,
+                environment,
+                public_url,
+                session_factory,
+            )
             application_name = argocd.reconcile_instance_application(
                 required_resource_id(claim),
                 attached_name,
                 members,
-                region,
-                environment,
+                helm_values,
             )
         except Exception:
             fail_execution(
@@ -73,7 +80,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
 def _claim_members(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
-) -> tuple[tuple[UUID, ...], tuple[tuple[str, str], ...], str | None, str, str]:
+) -> tuple[tuple[UUID, ...], tuple[tuple[str, str], ...], str | None, str, str, str]:
     """Claim the currently pending or failed member changes."""
 
     with session_factory() as session:
@@ -110,6 +117,7 @@ def _claim_members(
             instance.argocd_application_name,
             instance.region.value,
             instance.environment.value,
+            instance.instance_url,
         )
 
 

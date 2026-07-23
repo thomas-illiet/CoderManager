@@ -7,7 +7,7 @@ from coder_manager.domains.argocd.errors import (
     ArgoCdConfigurationError,
     ArgoCdRequestError,
 )
-from coder_manager.domains.argocd.models import ArgoCdApplicationStatus
+from coder_manager.domains.argocd.models import ArgoCdApplicationStatus, InstanceHelmValues
 from coder_manager.domains.argocd.service import (
     delete_instance_application,
     read_instance_application_status,
@@ -21,6 +21,7 @@ __all__ = [
     "ArgoCdConfig",
     "ArgoCdConfigurationError",
     "ArgoCdRequestError",
+    "InstanceHelmValues",
     "delete_instance_application",
     "read_instance_application_status",
     "reconcile_instance_application",

@@ -23,7 +23,10 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from coder_manager.domains.argocd.config import ArgoCdConfig
-    from coder_manager.domains.argocd.models import ArgoCdApplicationStatus
+    from coder_manager.domains.argocd.models import (
+        ArgoCdApplicationStatus,
+        InstanceHelmValues,
+    )
 
 HTTP_SUCCESS_MIN = 200
 HTTP_SUCCESS_MAX = 300
@@ -77,8 +80,7 @@ class ArgoCdClient:
         instance_id: UUID,
         attached_name: str | None,
         members: Iterable[tuple[str, str]],
-        region: str,
-        environment: str,
+        helm_values: InstanceHelmValues,
     ) -> str:
         """Create or overwrite an Application and request one synchronization."""
 
@@ -88,7 +90,7 @@ class ArgoCdClient:
             name,
             instance_id,
             members,
-            (region, environment),
+            helm_values,
         )
         existing = self._get_application(name)
 

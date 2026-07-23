@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from coder_manager.config import get_settings
 from coder_manager.crypto import PasswordCipher
+from coder_manager.domains.argocd import InstanceHelmValues
 from coder_manager.domains.postgresql import SchemaTarget
 from coder_manager.models import Database, DatabaseAllocation
 
@@ -44,3 +45,28 @@ def database_target(
             password=password,
             schema_name=allocation.schema_name,
         )
+
+
+def instance_helm_values(
+    instance_id: UUID,
+    region: str,
+    environment: str,
+    public_url: str,
+    session_factory: sessionmaker[Session],
+) -> InstanceHelmValues:
+    """Load one instance's public URL and decrypted database Helm values."""
+
+    target = database_target(instance_id, session_factory)
+    if target is None:
+        msg = "Instance database allocation is missing"
+        raise RuntimeError(msg)
+    return InstanceHelmValues(
+        region=region,
+        environment=environment,
+        public_url=public_url,
+        database_username=target.username,
+        database_password=target.password,
+        database_host=target.host,
+        database_name=target.database_name,
+        database_schema=target.schema_name,
+    )

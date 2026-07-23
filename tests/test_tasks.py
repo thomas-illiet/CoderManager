@@ -103,8 +103,7 @@ def successful_reconcile(
     instance_id: UUID,
     attached_name: str | None,
     _members: tuple[tuple[str, str], ...],
-    _region: str,
-    _environment: str,
+    _helm_values: argocd.InstanceHelmValues,
 ) -> str:
     """Return a deterministic Argo CD Application name."""
 
@@ -152,8 +151,26 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     job_id = UUID(str(instance["job_id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     created_targets: list[postgresql.SchemaTarget] = []
+    reconciled_values: list[argocd.InstanceHelmValues] = []
+
+    def capture_reconcile(
+        remote_id: UUID,
+        attached_name: str | None,
+        members: tuple[tuple[str, str], ...],
+        helm_values: argocd.InstanceHelmValues,
+    ) -> str:
+        """Capture the dynamic Helm values passed to Argo CD."""
+
+        reconciled_values.append(helm_values)
+        return successful_reconcile(
+            remote_id,
+            attached_name,
+            members,
+            helm_values,
+        )
+
     monkeypatch.setattr(postgresql, "create_schema", created_targets.append)
-    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
     tasks.step_02_create_instance.delay.reset_mock()
 
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
@@ -174,6 +191,16 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert stored.status is InstanceStatus.PENDING
 
     assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "success"}
+    assert len(reconciled_values) == 1
+    assert reconciled_values[0].public_url == instance["instance_url"]
+    assert reconciled_values[0].wildcard_access_host == (
+        f"*.{str(instance['instance_url']).removeprefix('https://')}"
+    )
+    assert reconciled_values[0].database_username == "coder_manager"
+    assert reconciled_values[0].database_password.get_secret_value() == "managed-secret"
+    assert reconciled_values[0].database_host == "postgres-emea.internal"
+    assert reconciled_values[0].database_name == "coder"
+    assert reconciled_values[0].database_schema == f"coder_{instance_id.hex}"
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "noop"}
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
@@ -281,6 +308,7 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "MEMBER ATTEMPT FENCE")
     instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
     response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
@@ -324,6 +352,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "MEMBER COALESCE")
     instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
     response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
@@ -336,8 +365,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         reconciled_id: UUID,
         attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
-        _region: str,
-        _environment: str,
+        _helm_values: argocd.InstanceHelmValues,
     ) -> str:
         """Insert a pending member while the first reconciliation is running."""
 

@@ -16,6 +16,7 @@ from coder_manager.tasks.common.execution import (
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import INSTANCE_CREATE_STEP_02_TASK
+from coder_manager.tasks.instance._database import instance_helm_values
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -42,13 +43,25 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
                     .order_by(Member.username, Member.id)
                 ).all()
             )
-            application_name = argocd.reconcile_instance_application(
-                instance.id,
-                instance.argocd_application_name,
-                tuple((username, role.value) for username, role in members),
-                instance.region.value,
-                instance.environment.value,
-            )
+            instance_id = instance.id
+            attached_name = instance.argocd_application_name
+            region = instance.region.value
+            environment = instance.environment.value
+            public_url = instance.instance_url
+
+        helm_values = instance_helm_values(
+            instance_id,
+            region,
+            environment,
+            public_url,
+            session_factory,
+        )
+        application_name = argocd.reconcile_instance_application(
+            instance_id,
+            attached_name,
+            tuple((username, role.value) for username, role in members),
+            helm_values,
+        )
 
         def store_name(_session: Session, resource: object | None) -> None:
             """Persist the deterministic Argo CD Application name."""
