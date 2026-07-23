@@ -10,6 +10,7 @@ from coder_manager.domains.argocd.models import (
     ArgoCdApplicationStatus,
     InstanceHelmValues,
 )
+from coder_manager.domains.coder import ADMIN_USERNAME
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -197,7 +198,7 @@ def _member_values(
 ) -> tuple[list[str], list[str]]:
     """Build deterministic user and administrator lists for Helm values."""
 
-    admins = set(default_admins)
+    admins = {ADMIN_USERNAME, *default_admins}
     users = set(admins)
     for username, role in members:
         users.add(username)

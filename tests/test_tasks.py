@@ -18,8 +18,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from coder_manager import tasks, worker_database
 from coder_manager.celery_app import celery_app
 from coder_manager.config import Settings, get_settings
-from coder_manager.crypto import PasswordCipher
-from coder_manager.domains import argocd, postgresql
+from coder_manager.crypto import InstancePasswordCipher, PasswordCipher
+from coder_manager.domains import argocd, coder, postgresql
 from coder_manager.models import (
     Database,
     DatabaseAllocation,
@@ -42,6 +42,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_01_TASK,
     INSTANCE_CREATE_STEP_02,
     INSTANCE_CREATE_STEP_02_TASK,
+    INSTANCE_CREATE_STEP_03,
+    INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_DELETE_STEP_04,
     INSTANCE_DELETE_STEP_04_TASK,
     INSTANCE_UPDATE_STEP_01,
@@ -49,6 +51,7 @@ from coder_manager.tasks.common.registry import (
     REGISTERED_STEP_NAMES,
     dispatch_registered_step,
 )
+from coder_manager.tasks.instance import _bootstrap as bootstrap_helpers
 from coder_manager.tasks.instance import _database as database_helpers
 from tests.conftest import TEST_CRYPTO_KEY
 from tests.test_workspaces import (
@@ -72,6 +75,11 @@ def configure_worker(
     )
     monkeypatch.setattr(
         database_helpers,
+        "get_settings",
+        lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
+    monkeypatch.setattr(
+        bootstrap_helpers,
         "get_settings",
         lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
     )
@@ -99,6 +107,26 @@ async def encrypt_allocated_database(
         await session.commit()
 
 
+async def mark_bootstrap_succeeded(
+    session_maker: async_sessionmaker[AsyncSession],
+    instance_id: UUID,
+) -> None:
+    """Persist the historical successful bootstrap expected by normal updates."""
+
+    async with session_maker() as session:
+        session.add(
+            JobExecution(
+                name="instance.create",
+                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                resource_type="instance",
+                resource_id=instance_id,
+                step=INSTANCE_CREATE_STEP_03,
+                status=JobStatus.SUCCESS,
+            )
+        )
+        await session.commit()
+
+
 def successful_reconcile(
     instance_id: UUID,
     slug: str | None,
@@ -120,6 +148,7 @@ def test_registered_step_names_and_beat_schedule() -> None:
         for task in (
             tasks.step_01_create_schema,
             tasks.step_02_create_instance,
+            tasks.step_03_bootstrap_admin,
             tasks.step_01_update_instance,
             tasks.step_01_remove_workspaces,
             tasks.step_02_remove_instance,
@@ -145,7 +174,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Create the schema before directly scheduling remote instance creation."""
+    """Create the schema and Argo CD resource before bootstrapping Coder."""
 
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "STEP CREATE")
@@ -154,6 +183,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     await encrypt_allocated_database(session_maker, instance_id)
     created_targets: list[postgresql.SchemaTarget] = []
     reconciled_values: list[argocd.InstanceHelmValues] = []
+    bootstrapped: list[tuple[str, SecretStr]] = []
 
     def capture_reconcile(
         remote_id: UUID,
@@ -175,7 +205,13 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
 
     monkeypatch.setattr(postgresql, "create_schema", created_targets.append)
     monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
+    monkeypatch.setattr(
+        coder,
+        "bootstrap_admin_account",
+        lambda url, password: bootstrapped.append((url, password)),
+    )
     tasks.step_02_create_instance.delay.reset_mock()
+    tasks.step_03_bootstrap_admin.delay.reset_mock()
 
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
     assert len(created_targets) == 1
@@ -194,7 +230,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert stored.step == INSTANCE_CREATE_STEP_02
         assert stored.status is InstanceStatus.PENDING
 
-    assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "success"}
+    assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "pending"}
     assert len(reconciled_values) == 1
     assert reconciled_values[0].public_url == instance["instance_url"]
     assert reconciled_values[0].base_domain == str(instance["instance_url"]).removeprefix(
@@ -208,6 +244,23 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     assert reconciled_values[0].database_host == "postgres-emea.internal"
     assert reconciled_values[0].database_name == "coder"
     assert reconciled_values[0].database_schema == f"coder_{instance_id.hex}"
+    tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_CREATE_STEP_03_TASK
+        assert job.step == INSTANCE_CREATE_STEP_03
+        assert job.status is JobStatus.PENDING
+        assert stored.step == INSTANCE_CREATE_STEP_03
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.argocd_application_name == f"coder-{instance['slug']}"
+
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
+    assert len(bootstrapped) == 1
+    assert bootstrapped[0][0] == instance["instance_url"]
+    assert len(bootstrapped[0][1].get_secret_value()) == 43
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "noop"}
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
@@ -215,10 +268,18 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert job is not None
         assert stored is not None
         assert job.status is JobStatus.SUCCESS
-        assert job.attempt == 2
+        assert job.attempt == 3
         assert stored.status is InstanceStatus.SUCCESS
         assert stored.step is None
         assert stored.argocd_application_name == f"coder-{instance['slug']}"
+        assert stored.password_enc is not None
+        assert bootstrapped[0][1].get_secret_value().encode() not in stored.password_enc
+        assert (
+            InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY))
+            .decrypt(stored.password_enc, instance_id)
+            .get_secret_value()
+            == bootstrapped[0][1].get_secret_value()
+        )
 
     response = await client.get(f"/api/v1/jobs/{job_id}")
     assert response.status_code == 200
@@ -273,6 +334,86 @@ async def test_create_failure_is_exactly_retryable_and_dispatch_loss_stays_pendi
     tasks.step_02_create_instance.delay.assert_any_call(str(job_id))
 
 
+async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse prepared credentials after failure and short-circuit redundant jobs."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "BOOTSTRAP RETRY")
+    instance_id = UUID(str(instance["id"]))
+    job_id = UUID(str(instance["job_id"]))
+    with sync_session_maker() as session:
+        job = session.get(JobExecution, job_id)
+        stored = session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        job.task_name = INSTANCE_CREATE_STEP_03_TASK
+        job.step = INSTANCE_CREATE_STEP_03
+        stored.step = INSTANCE_CREATE_STEP_03
+        session.commit()
+
+    observed_passwords: list[str] = []
+
+    def fail_once(_url: str, password: SecretStr) -> None:
+        """Capture the prepared password and simulate one remote failure."""
+
+        observed_passwords.append(password.get_secret_value())
+        if len(observed_passwords) == 1:
+            raise RuntimeError("Coder unavailable")
+
+    monkeypatch.setattr(coder, "bootstrap_admin_account", fail_once)
+    with pytest.raises(RuntimeError, match="Coder unavailable"):
+        tasks.step_03_bootstrap_admin.run(str(job_id))
+    async with session_maker() as session:
+        failed_job = await session.get(JobExecution, job_id)
+        failed_instance = await session.get(Instance, instance_id)
+        assert failed_job is not None
+        assert failed_instance is not None
+        assert failed_job.status is JobStatus.ERROR
+        assert failed_instance.status is InstanceStatus.ERROR
+        assert failed_instance.password_enc is not None
+        prepared_envelope = failed_instance.password_enc
+
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
+    assert observed_passwords == [observed_passwords[0], observed_passwords[0]]
+    async with session_maker() as session:
+        completed_instance = await session.get(Instance, instance_id)
+        assert completed_instance is not None
+        assert completed_instance.password_enc == prepared_envelope
+
+    redundant_job_id = uuid4()
+    with sync_session_maker() as session:
+        stored = session.get(Instance, instance_id)
+        assert stored is not None
+        session.add(
+            JobExecution(
+                id=redundant_job_id,
+                name="instance.update",
+                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                resource_type="instance",
+                resource_id=instance_id,
+                step=INSTANCE_CREATE_STEP_03,
+                status=JobStatus.PENDING,
+            )
+        )
+        stored.action = "updating"
+        stored.status = InstanceStatus.PENDING
+        stored.job_id = redundant_job_id
+        stored.step = INSTANCE_CREATE_STEP_03
+        session.commit()
+
+    monkeypatch.setattr(
+        coder,
+        "bootstrap_admin_account",
+        lambda _url, _password: pytest.fail("remote bootstrap must not be called"),
+    )
+    assert tasks.step_03_bootstrap_admin.run(str(redundant_job_id)) == {"status": "success"}
+
+
 async def test_attempt_fencing_rejects_late_worker_completion(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
@@ -317,6 +458,7 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
+    await mark_bootstrap_succeeded(session_maker, instance_id)
     response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
         json={"username": "retry-member", "role": "user"},
@@ -348,6 +490,39 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
         assert member.status is MemberStatus.SUCCESS
 
 
+async def test_update_advances_to_bootstrap_when_admin_is_missing(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconcile an existing instance before scheduling its missing administrator."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "EXISTING ADMIN BACKFILL")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    response = await client.post(f"/api/v1/instances/{instance_id}/sync")
+    job_id = UUID(response.json()["job"]["id"])
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    tasks.step_03_bootstrap_admin.delay.reset_mock()
+
+    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "pending"}
+    tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_CREATE_STEP_03_TASK
+        assert job.step == INSTANCE_CREATE_STEP_03
+        assert job.status is JobStatus.PENDING
+        assert stored.job_id == job_id
+        assert stored.step == INSTANCE_CREATE_STEP_03
+        assert stored.status is InstanceStatus.PENDING
+
+
 async def test_update_step_coalesces_member_changes_into_a_new_job(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
@@ -361,6 +536,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
+    await mark_bootstrap_succeeded(session_maker, instance_id)
     response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
         json={"username": "first", "role": "user"},

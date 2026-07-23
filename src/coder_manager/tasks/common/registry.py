@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 INSTANCE_CREATE_STEP_01 = "step_01_create_schema"
 INSTANCE_CREATE_STEP_02 = "step_02_create_instance"
+INSTANCE_CREATE_STEP_03 = "step_03_bootstrap_admin"
 INSTANCE_UPDATE_STEP_01 = "step_01_update_instance"
 INSTANCE_DELETE_STEP_01 = "step_01_remove_workspaces"
 INSTANCE_DELETE_STEP_02 = "step_02_remove_instance"
@@ -26,6 +27,7 @@ DATABASE_SYNC_STEP_01 = "step_01_sync_database"
 
 INSTANCE_CREATE_STEP_01_TASK = "coder_manager.instance.create.step_01_create_schema"
 INSTANCE_CREATE_STEP_02_TASK = "coder_manager.instance.create.step_02_create_instance"
+INSTANCE_CREATE_STEP_03_TASK = "coder_manager.instance.create.step_03_bootstrap_admin"
 INSTANCE_UPDATE_STEP_01_TASK = "coder_manager.instance.update.step_01_update_instance"
 INSTANCE_DELETE_STEP_01_TASK = "coder_manager.instance.delete.step_01_remove_workspaces"
 INSTANCE_DELETE_STEP_02_TASK = "coder_manager.instance.delete.step_02_remove_instance"
@@ -40,6 +42,7 @@ REGISTERED_STEP_NAMES = frozenset(
     {
         INSTANCE_CREATE_STEP_01_TASK,
         INSTANCE_CREATE_STEP_02_TASK,
+        INSTANCE_CREATE_STEP_03_TASK,
         INSTANCE_UPDATE_STEP_01_TASK,
         INSTANCE_DELETE_STEP_01_TASK,
         INSTANCE_DELETE_STEP_02_TASK,

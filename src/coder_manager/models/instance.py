@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    LargeBinary,
     String,
     UniqueConstraint,
     Uuid,
@@ -125,6 +126,7 @@ class Instance(Base):
         server_default=InstanceStatus.PENDING.value,
     )
     instance_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    password_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     argocd_application_name: Mapped[str | None] = mapped_column(
         String(63),
         nullable=True,

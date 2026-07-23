@@ -4,14 +4,20 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from coder_manager.config import Settings, get_settings
-from coder_manager.crypto import CryptoConfigurationError, KubernetesTokenCipher
+from coder_manager.crypto import (
+    CryptoConfigurationError,
+    InstancePasswordCipher,
+    InstancePasswordDecryptionError,
+    KubernetesTokenCipher,
+)
 from coder_manager.database import get_session
 from coder_manager.domains import argocd
+from coder_manager.domains.coder import ADMIN_EMAIL, ADMIN_USERNAME
 from coder_manager.models import InstanceKubernetes
 from coder_manager.repositories import (
     InstanceActionConflictError,
@@ -27,6 +33,7 @@ from coder_manager.repositories import (
 )
 from coder_manager.schemas import (
     ApplicationIdentifier,
+    InstanceAdminCredentialsRead,
     InstanceArgoCdStatusRead,
     InstanceCreate,
     InstanceKubernetesCreate,
@@ -42,11 +49,15 @@ from coder_manager.tasks import (
     step_01_remove_workspaces,
     step_01_update_instance,
 )
-from coder_manager.tasks.common.registry import dispatch_registered_step
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_03,
+    dispatch_registered_step,
+)
 
 router = APIRouter(prefix="/instances", tags=["instances"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 SettingsDependency = Annotated[Settings, Depends(get_settings)]
+NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 
 def kubernetes_token_cipher(settings: Settings) -> KubernetesTokenCipher:
@@ -58,6 +69,19 @@ def kubernetes_token_cipher(settings: Settings) -> KubernetesTokenCipher:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Kubernetes token encryption is not configured",
+        ) from error
+
+
+def instance_password_cipher(settings: Settings) -> InstancePasswordCipher:
+    """Build the instance password cipher or return a redacted configuration error."""
+
+    try:
+        return InstancePasswordCipher(settings.crypto_key)
+    except CryptoConfigurationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Instance password encryption is not configured",
+            headers=NO_STORE_HEADERS,
         ) from error
 
 
@@ -107,6 +131,55 @@ async def get_instance(instance_id: UUID, session: SessionDependency) -> Instanc
     if instance is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instance not found")
     return InstanceRead.model_validate(instance)
+
+
+@router.get(
+    "/{instance_id}/admin",
+    summary="Get an instance administrator account",
+)
+async def get_instance_admin(
+    instance_id: UUID,
+    response: Response,
+    session: SessionDependency,
+    settings: SettingsDependency,
+) -> InstanceAdminCredentialsRead:
+    """Return the static administrator identity and decrypted stored password."""
+
+    instance = await InstanceRepository(session).get(instance_id)
+    if instance is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+            headers=NO_STORE_HEADERS,
+        )
+    bootstrap_succeeded = await JobExecutionRepository(session).has_successful_resource_step(
+        resource_type="instance",
+        resource_id=instance_id,
+        step=INSTANCE_CREATE_STEP_03,
+    )
+    if instance.password_enc is None or not bootstrap_succeeded:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance admin account not initialized",
+            headers=NO_STORE_HEADERS,
+        )
+    try:
+        password = instance_password_cipher(settings).decrypt(
+            instance.password_enc,
+            instance.id,
+        )
+    except InstancePasswordDecryptionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Instance admin password cannot be decrypted",
+            headers=NO_STORE_HEADERS,
+        ) from error
+    response.headers.update(NO_STORE_HEADERS)
+    return InstanceAdminCredentialsRead(
+        username=ADMIN_USERNAME,
+        email=ADMIN_EMAIL,
+        password=password.get_secret_value(),
+    )
 
 
 @router.get(

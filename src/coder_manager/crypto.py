@@ -27,6 +27,10 @@ class KubernetesTokenDecryptionError(Exception):
     """Raised when an encrypted Kubernetes token cannot be authenticated."""
 
 
+class InstancePasswordDecryptionError(Exception):
+    """Raised when an encrypted instance administrator password cannot be authenticated."""
+
+
 class PasswordCipher:
     """Encrypt and decrypt database passwords with a versioned AES-GCM envelope."""
 
@@ -133,3 +137,57 @@ class KubernetesTokenCipher:
             return SecretStr(plaintext.decode())
         except UnicodeDecodeError as error:
             raise KubernetesTokenDecryptionError from error
+
+
+class InstancePasswordCipher:
+    """Encrypt Coder administrator passwords with an instance-bound AES-GCM envelope."""
+
+    def __init__(self, encoded_key: SecretStr | None) -> None:
+        """Initialize the cipher from a validated base64-encoded AES-256 key."""
+
+        if encoded_key is None:
+            raise CryptoConfigurationError
+        try:
+            key = b64decode(encoded_key.get_secret_value(), validate=True)
+        except (Base64Error, ValueError) as error:
+            raise CryptoConfigurationError from error
+        if len(key) != KEY_LENGTH:
+            raise CryptoConfigurationError
+        self._cipher = AESGCM(key)
+
+    @staticmethod
+    def _associated_data(instance_id: UUID) -> bytes:
+        """Bind an encrypted password to its owning Coder instance."""
+
+        return b"coder-manager:instance-password:" + instance_id.bytes
+
+    def encrypt(self, password: SecretStr, instance_id: UUID) -> bytes:
+        """Return a versioned authenticated envelope for one administrator password."""
+
+        nonce = urandom(NONCE_LENGTH)
+        ciphertext = self._cipher.encrypt(
+            nonce,
+            password.get_secret_value().encode(),
+            self._associated_data(instance_id),
+        )
+        return bytes((ENVELOPE_VERSION,)) + nonce + ciphertext
+
+    def decrypt(self, envelope: bytes, instance_id: UUID) -> SecretStr:
+        """Authenticate and decrypt one administrator password envelope."""
+
+        if len(envelope) <= 1 + NONCE_LENGTH or envelope[0] != ENVELOPE_VERSION:
+            raise InstancePasswordDecryptionError
+        nonce = envelope[1 : 1 + NONCE_LENGTH]
+        ciphertext = envelope[1 + NONCE_LENGTH :]
+        try:
+            plaintext = self._cipher.decrypt(
+                nonce,
+                ciphertext,
+                self._associated_data(instance_id),
+            )
+        except (InvalidTag, ValueError) as error:
+            raise InstancePasswordDecryptionError from error
+        try:
+            return SecretStr(plaintext.decode())
+        except UnicodeDecodeError as error:
+            raise InstancePasswordDecryptionError from error

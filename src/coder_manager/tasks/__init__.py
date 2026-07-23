@@ -2,7 +2,11 @@
 
 from coder_manager.tasks.database.sync import step_01_sync_database
 from coder_manager.tasks.healthcheck import healthcheck
-from coder_manager.tasks.instance.create import step_01_create_schema, step_02_create_instance
+from coder_manager.tasks.instance.create import (
+    step_01_create_schema,
+    step_02_create_instance,
+    step_03_bootstrap_admin,
+)
 from coder_manager.tasks.instance.delete import (
     step_01_remove_workspaces,
     step_02_remove_instance,
@@ -27,6 +31,7 @@ __all__ = [
     "step_01_update_workspace",
     "step_02_create_instance",
     "step_02_remove_instance",
+    "step_03_bootstrap_admin",
     "step_03_remove_schema",
     "step_04_remove_local_configuration",
 ]

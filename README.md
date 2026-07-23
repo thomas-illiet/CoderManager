@@ -52,6 +52,7 @@ All endpoints are under `/api/v1`:
 | `DELETE` | `/databases/{id}` | Delete an unused database |
 | `GET` | `/instances?page=1&page_size=20` | Paginated instance list |
 | `GET` | `/instances/{id}` | Get one instance |
+| `GET` | `/instances/{id}/admin` | Get the initialized Coder administrator credentials |
 | `GET` | `/instances/{id}/status` | Get the live Argo CD status |
 | `POST` | `/instances` | Request instance creation |
 | `POST` | `/instances/{id}/sync` | Force Argo CD reconciliation |
@@ -139,13 +140,14 @@ statuses are limited to `pending`, `running`, `success`, and `error`.
 and limited to 255 characters. Coder Manager does not verify it against an internal catalog. The
 combination of application, region, and environment remains unique.
 
-Instance creation is split into two durable steps. The first opens a short-lived PostgreSQL
+Instance creation is split into three durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
 `metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. Existing attached
 Application names are retained; the instance UUID without dashes replaces the slug only for a
 historical instance with neither a slug nor an attached name. The Application uses a Helm chart
-from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
+from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin. The third
+creates or recovers Coder's first administrator account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
 Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.
@@ -156,7 +158,8 @@ The slug names the Argo CD Application metadata; Coder Manager does not add Helm
 `--name-template`, `nameOverride`, or `fullnameOverride` arguments.
 The database password is decrypted only inside the worker while constructing the Argo CD payload.
 `CODER_MANAGER_DEFAULT_ADMINS` is a comma-separated list that is always included in both Helm
-values without creating API member records.
+values without creating API member records. The static bootstrap username `admin` is always
+included in the allowed-user and administrator values.
 
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
 `CODER_MANAGER_ARGOCD_PROJECT`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
@@ -177,6 +180,14 @@ at a time; there is no parallel force mode.
 
 `GET /api/v1/instances/{id}/status` reads Argo CD directly and returns the Application name, sync
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.
+
+The bootstrap account has the static username `admin`, email `admin@coder.local`, and display name
+`Coder Admin`. Coder Manager generates a unique password, encrypts it in
+`instances.password_enc` with `CODER_MANAGER_CRYPTO_KEY`, and binds the ciphertext to the instance
+UUID. `GET /api/v1/instances/{id}/admin` returns the static username and email with the decrypted
+password only after a successful `step_03_bootstrap_admin`; prepared credentials from a failed or
+running attempt remain unavailable. The response uses `Cache-Control: no-store`. This is a
+breaking migration: existing instances are not reconciled or bootstrapped automatically.
 
 `POST /api/v1/instances/{id}/provider` creates the Kubernetes provider with `host`, `namespace`,
 `ca`, and the write-only `token`. `PUT` updates `ca` and optionally rotates `token`; `host` and

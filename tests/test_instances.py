@@ -9,13 +9,25 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coder_manager.api.routes import instances as instance_routes
 from coder_manager.config import Settings, get_settings
+from coder_manager.crypto import (
+    InstancePasswordCipher,
+    InstancePasswordDecryptionError,
+)
 from coder_manager.domains import argocd
 from coder_manager.main import app
-from coder_manager.models import Instance, InstanceEnvironment, InstanceRegion, InstanceStatus
+from coder_manager.models import (
+    Instance,
+    InstanceEnvironment,
+    InstanceRegion,
+    InstanceStatus,
+    JobExecution,
+    JobStatus,
+)
 from coder_manager.repositories import (
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
@@ -26,6 +38,11 @@ from coder_manager.repositories import (
 )
 from coder_manager.repositories import instances as instance_repositories
 from coder_manager.schemas import InstanceCreate
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_03,
+    INSTANCE_CREATE_STEP_03_TASK,
+)
+from tests.conftest import TEST_CRYPTO_KEY
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 SECOND_INSTANCE_SLUG = "m8n5q3y0r4bc"
@@ -100,6 +117,126 @@ async def test_create_instance_get_and_missing(
     missing = await client.get(f"/api/v1/instances/{uuid4()}")
     assert missing.status_code == 404
     assert missing.json() == {"detail": "Instance not found"}
+
+
+async def test_instance_admin_endpoint_returns_static_identity_and_stored_password(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Expose credentials only after a successful durable bootstrap step."""
+
+    created = await create_instance(client, "ADMIN ENDPOINT")
+    instance_id = UUID(created["id"])
+    password = SecretStr("stored-instance-password")
+    async with session_maker() as session:
+        instance = await session.get(Instance, instance_id)
+        assert instance is not None
+        instance.password_enc = InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
+            password,
+            instance_id,
+        )
+        session.add(
+            JobExecution(
+                name="instance.create",
+                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                resource_type="instance",
+                resource_id=instance_id,
+                step=INSTANCE_CREATE_STEP_03,
+                status=JobStatus.SUCCESS,
+            )
+        )
+        await session.commit()
+
+    response = await client.get(f"/api/v1/instances/{instance_id}/admin")
+    regular = await client.get(f"/api/v1/instances/{instance_id}")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "username": "admin",
+        "email": "admin@coder.local",
+        "password": password.get_secret_value(),
+    }
+    assert "password" not in regular.json()
+    assert "password_enc" not in regular.json()
+
+
+async def test_instance_admin_endpoint_requires_completed_bootstrap(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Keep prepared passwords unavailable until the bootstrap job succeeds."""
+
+    created = await create_instance(client, "ADMIN PENDING")
+    instance_id = UUID(created["id"])
+    async with session_maker() as session:
+        instance = await session.get(Instance, instance_id)
+        assert instance is not None
+        instance.password_enc = InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
+            SecretStr("prepared-but-not-created"),
+            instance_id,
+        )
+        await session.commit()
+
+    pending = await client.get(f"/api/v1/instances/{instance_id}/admin")
+    missing = await client.get(f"/api/v1/instances/{uuid4()}/admin")
+
+    assert pending.status_code == 404
+    assert pending.headers["cache-control"] == "no-store"
+    assert pending.json() == {"detail": "Instance admin account not initialized"}
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Instance not found"}
+
+
+async def test_instance_admin_endpoint_redacts_crypto_failures(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Return sanitized service errors for missing or invalid cryptographic material."""
+
+    created = await create_instance(client, "ADMIN CRYPTO")
+    instance_id = UUID(created["id"])
+    async with session_maker() as session:
+        instance = await session.get(Instance, instance_id)
+        assert instance is not None
+        instance.password_enc = b"invalid-envelope"
+        session.add(
+            JobExecution(
+                name="instance.create",
+                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                resource_type="instance",
+                resource_id=instance_id,
+                step=INSTANCE_CREATE_STEP_03,
+                status=JobStatus.SUCCESS,
+            )
+        )
+        await session.commit()
+
+    invalid = await client.get(f"/api/v1/instances/{instance_id}/admin")
+    app.dependency_overrides[get_settings] = lambda: Settings(crypto_key=None)
+    unavailable = await client.get(f"/api/v1/instances/{instance_id}/admin")
+
+    assert invalid.status_code == 503
+    assert invalid.json() == {"detail": "Instance admin password cannot be decrypted"}
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"detail": "Instance password encryption is not configured"}
+
+
+def test_instance_password_cipher_is_random_and_instance_bound() -> None:
+    """Encrypt nondeterministically and reject another instance or damaged envelope."""
+
+    cipher = InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY))
+    password = SecretStr("instance-secret")
+    instance_id = uuid4()
+    first = cipher.encrypt(password, instance_id)
+    second = cipher.encrypt(password, instance_id)
+
+    assert first != second
+    assert cipher.decrypt(first, instance_id).get_secret_value() == password.get_secret_value()
+    with pytest.raises(InstancePasswordDecryptionError):
+        cipher.decrypt(first, uuid4())
+    with pytest.raises(InstancePasswordDecryptionError):
+        cipher.decrypt(b"invalid", instance_id)
 
 
 async def test_removed_application_contract_is_rejected(client: AsyncClient) -> None:

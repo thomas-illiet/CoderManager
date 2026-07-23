@@ -12,10 +12,14 @@ from coder_manager.domains import argocd
 from coder_manager.models import Instance, Member
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
-    complete_execution,
+    advance_execution,
     run_claimed_step,
 )
-from coder_manager.tasks.common.registry import INSTANCE_CREATE_STEP_02_TASK
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_02_TASK,
+    INSTANCE_CREATE_STEP_03,
+    INSTANCE_CREATE_STEP_03_TASK,
+)
 from coder_manager.tasks.instance._database import instance_helm_values
 
 if TYPE_CHECKING:
@@ -73,7 +77,13 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
                 raise TypeError(msg)
             resource.argocd_application_name = application_name
 
-        completed = complete_execution(claim, session_factory, mutate=store_name)
-        return {"status": "success" if completed else "noop"}
+        advanced = advance_execution(
+            claim,
+            next_task_name=INSTANCE_CREATE_STEP_03_TASK,
+            next_step=INSTANCE_CREATE_STEP_03,
+            session_factory=session_factory,
+            mutate=store_name,
+        )
+        return {"status": "pending" if advanced else "noop"}
 
     return run_claimed_step(job_id, INSTANCE_CREATE_STEP_02_TASK, session_factory, operation)

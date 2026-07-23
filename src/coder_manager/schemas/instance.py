@@ -63,3 +63,11 @@ class InstanceArgoCdStatusRead(BaseModel):
     operation_phase: str | None = None
     revision: str | None = None
     reconciled_at: datetime | None = None
+
+
+class InstanceAdminCredentialsRead(BaseModel):
+    """Static administrator identity and decrypted instance password."""
+
+    username: str
+    email: str
+    password: str

@@ -2,6 +2,7 @@
 
 from coder_manager.schemas.application_identifier import ApplicationIdentifier
 from coder_manager.schemas.instance import (
+    InstanceAdminCredentialsRead,
     InstanceArgoCdStatusRead,
     InstanceCreate,
     InstancePage,
@@ -56,6 +57,7 @@ __all__ = [
     "DatabaseStatistics",
     "DatabaseUpdate",
     "DatabaseUsageStatistics",
+    "InstanceAdminCredentialsRead",
     "InstanceArgoCdStatusRead",
     "InstanceCreate",
     "InstanceKubernetesCreate",

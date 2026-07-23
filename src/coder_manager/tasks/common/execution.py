@@ -153,6 +153,7 @@ def advance_execution(
     next_task_name: str,
     next_step: str,
     session_factory: sessionmaker[Session],
+    mutate: Callable[[Session, Instance | Workspace | None], None] | None = None,
 ) -> bool:
     """Persist a next pending step, then ask Celery to execute it."""
 
@@ -161,6 +162,8 @@ def advance_execution(
         if owned is None:
             return False
         job, resource = owned
+        if mutate is not None:
+            mutate(session, resource)
         job.task_name = next_task_name
         job.step = next_step
         job.status = JobStatus.PENDING

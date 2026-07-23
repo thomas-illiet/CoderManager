@@ -131,8 +131,8 @@ def test_create_application_and_sync_contract() -> None:
                     "name": "HELM_ARGS",
                     "value": (
                         "--namespace app-coder-system\n"
-                        "--set policy.config.allowedUsernames=alice,root.admin,zoe\n"
-                        "--set policy.config.adminUsernames=alice,root.admin\n"
+                        "--set policy.config.allowedUsernames=admin,alice,root.admin,zoe\n"
+                        "--set policy.config.adminUsernames=admin,alice,root.admin\n"
                         f"{EXPECTED_INSTANCE_HELM_ARGS}"
                     ),
                 }
@@ -213,8 +213,8 @@ def test_existing_application_is_attached_and_overwritten() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--namespace app-coder-system\n"
-                "--set policy.config.allowedUsernames=\n"
-                "--set policy.config.adminUsernames=\n"
+                "--set policy.config.allowedUsernames=admin\n"
+                "--set policy.config.adminUsernames=admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
             ),
         }
@@ -266,8 +266,8 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--namespace app-coder-system\n"
-                "--set policy.config.allowedUsernames=alice,root.admin\n"
-                "--set policy.config.adminUsernames=alice,root.admin\n"
+                "--set policy.config.allowedUsernames=admin,alice,root.admin\n"
+                "--set policy.config.adminUsernames=admin,alice,root.admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
             ),
         }

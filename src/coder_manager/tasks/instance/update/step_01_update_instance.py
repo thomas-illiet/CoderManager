@@ -26,10 +26,13 @@ from coder_manager.tasks.common.execution import (
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_03,
+    INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_UPDATE_STEP_01,
     INSTANCE_UPDATE_STEP_01_TASK,
     dispatch_registered_step,
 )
+from coder_manager.tasks.instance._bootstrap import bootstrap_succeeded
 from coder_manager.tasks.instance._database import instance_helm_values
 
 if TYPE_CHECKING:
@@ -154,7 +157,7 @@ def _finalize_update(
 ) -> dict[str, str]:
     """Finalize the snapshot and create a new job when later changes are pending."""
 
-    next_job_id = None
+    dispatch: tuple[str, UUID] | None = None
     with session_factory() as session:
         owned = owned_execution(session, claim)
         if owned is None:
@@ -187,13 +190,24 @@ def _finalize_update(
             )
             .limit(1)
         )
-        job.status = JobStatus.SUCCESS
-        job.claimed_at = None
-        if pending_member is None:
+        if pending_member is None and not bootstrap_succeeded(session, instance.id):
+            job.task_name = INSTANCE_CREATE_STEP_03_TASK
+            job.step = INSTANCE_CREATE_STEP_03
+            job.status = JobStatus.PENDING
+            job.claimed_at = None
+            instance.step = INSTANCE_CREATE_STEP_03
+            instance.status = InstanceStatus.PENDING
+            dispatch = (INSTANCE_CREATE_STEP_03_TASK, job.id)
+            result = {"status": "pending"}
+        elif pending_member is None:
+            job.status = JobStatus.SUCCESS
+            job.claimed_at = None
             instance.status = InstanceStatus.SUCCESS
             instance.step = None
             result = {"status": "success"}
         else:
+            job.status = JobStatus.SUCCESS
+            job.claimed_at = None
             next_job_id = uuid4()
             next_job = JobExecution(
                 id=next_job_id,
@@ -208,8 +222,9 @@ def _finalize_update(
             instance.job_id = next_job_id
             instance.step = INSTANCE_UPDATE_STEP_01
             instance.status = InstanceStatus.PENDING
+            dispatch = (INSTANCE_UPDATE_STEP_01_TASK, next_job_id)
             result = {"status": "pending"}
         session.commit()
-    if next_job_id is not None:
-        dispatch_registered_step(INSTANCE_UPDATE_STEP_01_TASK, next_job_id)
+    if dispatch is not None:
+        dispatch_registered_step(*dispatch)
     return result

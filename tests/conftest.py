@@ -28,6 +28,7 @@ from coder_manager.tasks import (
     step_01_update_workspace,
     step_02_create_instance,
     step_02_remove_instance,
+    step_03_bootstrap_admin,
     step_03_remove_schema,
     step_04_remove_local_configuration,
 )
@@ -44,6 +45,7 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         retry_job_executions,
         step_01_create_schema,
         step_02_create_instance,
+        step_03_bootstrap_admin,
         step_01_update_instance,
         step_01_remove_workspaces,
         step_02_remove_instance,
