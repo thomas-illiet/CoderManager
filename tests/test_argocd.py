@@ -22,6 +22,7 @@ from coder_manager.domains.argocd import service as argocd_service
 from coder_manager.domains.argocd.applications import application_name
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
+TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 EXPECTED_INSTANCE_HELM_ARGS = (
     f"--set global.baseDomain={TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet\n"
     "--set server.config.database.username=db-user\n"
@@ -102,7 +103,7 @@ def test_create_application_and_sync_contract() -> None:
             instance_helm_values(),
         )
 
-    assert name == TEST_INSTANCE_SLUG
+    assert name == TEST_APPLICATION_NAME
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", f"/root/api/v1/applications/{name}"),
         ("POST", "/root/api/v1/applications"),
@@ -330,7 +331,7 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
         with pytest.raises(ArgoCdApplicationNotFoundError):
             client.get_application_status(uuid4(), TEST_INSTANCE_SLUG, "missing")
 
-    assert partial.application_name == TEST_INSTANCE_SLUG
+    assert partial.application_name == TEST_APPLICATION_NAME
     assert partial.sync_status is None
     assert partial.health_status is None
     assert partial.operation_phase is None
@@ -484,7 +485,7 @@ def test_application_name_prefers_attachment_then_slug_then_legacy_fallback() ->
     instance_id = UUID("12345678-1234-5678-1234-567812345678")
 
     assert application_name(config, instance_id, TEST_INSTANCE_SLUG, "attached") == "attached"
-    assert application_name(config, instance_id, TEST_INSTANCE_SLUG, None) == TEST_INSTANCE_SLUG
+    assert application_name(config, instance_id, TEST_INSTANCE_SLUG, None) == TEST_APPLICATION_NAME
     assert (
         application_name(config, instance_id, None, None)
         == "managed-12345678123456781234567812345678"

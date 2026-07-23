@@ -29,7 +29,10 @@ def application_name(
 ) -> str:
     """Return an attached, slug-based, or legacy deterministic Application name."""
 
-    return attached_name or slug or f"{config.application_prefix}-{instance_id.hex}"
+    if attached_name:
+        return attached_name
+    suffix = slug or instance_id.hex
+    return f"{config.application_prefix}-{suffix}"
 
 
 def application_payload(

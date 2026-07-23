@@ -142,11 +142,10 @@ combination of application, region, and environment remains unique.
 Instance creation is split into two durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
-`metadata.name` is the instance's generated slug. Existing attached Application names are retained;
-the legacy
-`<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance UUID without dashes>` name is used only when a
-historical instance has neither a slug nor an attached name. The Application uses a Helm chart from
-the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
+`metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. Existing attached
+Application names are retained; the instance UUID without dashes replaces the slug only for a
+historical instance with neither a slug nor an attached name. The Application uses a Helm chart
+from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
 Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.

@@ -587,7 +587,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
         assert slug == instance["slug"]
         assert attached_name is None
         return argocd.ArgoCdApplicationStatus(
-            application_name=str(instance["slug"]),
+            application_name=f"coder-{instance['slug']}",
             sync_status="OutOfSync",
             health_status="Progressing",
             operation_phase="Running",
@@ -602,7 +602,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     assert response.status_code == 200
     assert response.json() == {
         "instance_id": str(instance_id),
-        "application_name": instance["slug"],
+        "application_name": f"coder-{instance['slug']}",
         "sync_status": "OutOfSync",
         "health_status": "Progressing",
         "operation_phase": "Running",

@@ -108,7 +108,8 @@ def successful_reconcile(
 ) -> str:
     """Return a deterministic Argo CD Application name."""
 
-    return attached_name or slug or f"coder-{instance_id.hex}"
+    suffix = slug or instance_id.hex
+    return attached_name or f"coder-{suffix}"
 
 
 def test_registered_step_names_and_beat_schedule() -> None:
@@ -217,7 +218,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert job.attempt == 2
         assert stored.status is InstanceStatus.SUCCESS
         assert stored.step is None
-        assert stored.argocd_application_name == instance["slug"]
+        assert stored.argocd_application_name == f"coder-{instance['slug']}"
 
     response = await client.get(f"/api/v1/jobs/{job_id}")
     assert response.status_code == 200
@@ -379,7 +380,8 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         with sync_session_maker() as session:
             session.add(Member(instance_id=reconciled_id, username="late", role="user"))
             session.commit()
-        return attached_name or slug or f"coder-{reconciled_id.hex}"
+        suffix = slug or reconciled_id.hex
+        return attached_name or f"coder-{suffix}"
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", add_late_member)
     tasks.step_01_update_instance.delay.reset_mock()
