@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 MANAGED_LABEL = "coder-manager/managed"
 INSTANCE_ID_LABEL = "coder-manager/instance-id"
+APPLICATION_NAMESPACE = "app-coder-system"
 
 
 def application_name(config: ArgoCdConfig, instance_id: UUID, attached_name: str | None) -> str:
@@ -37,14 +38,14 @@ def application_payload(
 
     The payload maps active members into deterministic plugin Helm arguments,
     supplies the CyberArk lookup parameters, and pins the destination namespace
-    to the managed Application name.
+    to the shared Coder application namespace.
     """
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(helm_values.region, helm_values.environment)
     helm_arguments = "\n".join(
         (
-            "--namespace app-argo-system",
+            f"--namespace {APPLICATION_NAMESPACE}",
             f"--set policy.config.allowedUsernames={','.join(users)}",
             f"--set policy.config.adminUsernames={','.join(admins)}",
             _helm_scalar_argument("global.publicURL", helm_values.public_url),
@@ -111,7 +112,7 @@ def application_payload(
             },
             "destination": {
                 "name": config.destination_name,
-                "namespace": name,
+                "namespace": APPLICATION_NAMESPACE,
             },
             "syncPolicy": {
                 "automated": {

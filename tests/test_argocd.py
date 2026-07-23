@@ -126,7 +126,7 @@ def test_create_application_and_sync_contract() -> None:
                 {
                     "name": "HELM_ARGS",
                     "value": (
-                        "--namespace app-argo-system\n"
+                        "--namespace app-coder-system\n"
                         "--set policy.config.allowedUsernames=alice,root.admin,zoe\n"
                         "--set policy.config.adminUsernames=alice,root.admin\n"
                         f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -150,7 +150,7 @@ def test_create_application_and_sync_contract() -> None:
     assert "'" not in payload["spec"]["source"]["plugin"]["env"][0]["value"]
     assert payload["spec"]["destination"] == {
         "name": "in-cluster",
-        "namespace": name,
+        "namespace": "app-coder-system",
     }
     assert payload["spec"]["syncPolicy"] == {
         "automated": {
@@ -207,7 +207,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
-                "--namespace app-argo-system\n"
+                "--namespace app-coder-system\n"
                 "--set policy.config.allowedUsernames=\n"
                 "--set policy.config.adminUsernames=\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -259,7 +259,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
-                "--namespace app-argo-system\n"
+                "--namespace app-coder-system\n"
                 "--set policy.config.allowedUsernames=alice,root.admin\n"
                 "--set policy.config.adminUsernames=alice,root.admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
