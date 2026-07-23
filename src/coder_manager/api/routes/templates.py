@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coder_manager.database import get_session
 from coder_manager.repositories import (
     TemplateAlreadyExistsError,
-    TemplateApplicationNotFoundError,
     TemplateHasWorkspacesError,
     TemplateNotFoundError,
     TemplateRepository,
@@ -38,7 +37,7 @@ async def list_templates(
         page=query.page,
         page_size=query.page_size,
         scope=query.scope,
-        application_id=query.application_id,
+        application=query.application,
         name=query.name,
     )
     pages = (total + query.page_size - 1) // query.page_size
@@ -81,11 +80,6 @@ async def create_template(payload: TemplateCreate, session: SessionDependency) -
 
     try:
         template = await TemplateRepository(session).create(payload)
-    except TemplateApplicationNotFoundError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Application not found",
-        ) from error
     except TemplateAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

@@ -1,7 +1,7 @@
 [project]
 name = "coder-manager"
 version = "0.1.0"
-description = "API and background workers for managing business applications and Coder infrastructure"
+description = "API and background workers for managing Coder infrastructure"
 readme = "README.md"
 authors = [
     { name = "Thomas ILLIET", email = "contact@thomas-illiet.fr" }

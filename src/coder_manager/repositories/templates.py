@@ -7,16 +7,12 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coder_manager.models import Application, Template, TemplateScope, Workspace
+from coder_manager.models import Template, TemplateScope, Workspace
 from coder_manager.schemas import TemplateCreate, TemplateUpdate
 
 
 class TemplateAlreadyExistsError(Exception):
     """Raised when a template name already exists in the target scope."""
-
-
-class TemplateApplicationNotFoundError(Exception):
-    """Raised when an application-scoped template references an unknown application."""
 
 
 class TemplateNotFoundError(Exception):
@@ -45,25 +41,20 @@ class TemplateRepository:
         page: int,
         page_size: int,
         scope: TemplateScope | None = None,
-        application_id: UUID | None = None,
+        application: str | None = None,
         name: str | None = None,
     ) -> tuple[list[Template], int]:
         """Return one deterministic filtered page and its matching total."""
 
-        if application_id is not None:
-            application = await self._session.get(Application, application_id)
-            if application is None:
-                return [], 0
-
         count_statement = select(func.count()).select_from(Template)
         list_statement = select(Template)
 
-        if application_id is not None:
+        if application is not None:
             available_to_application = or_(
                 Template.scope == TemplateScope.GLOBAL,
                 and_(
                     Template.scope == TemplateScope.APPLICATION,
-                    Template.application_id == application_id,
+                    Template.application == application,
                 ),
             )
             count_statement = count_statement.where(available_to_application)
@@ -83,7 +74,7 @@ class TemplateRepository:
                 func.lower(Template.name),
                 Template.name,
                 Template.scope,
-                Template.application_id,
+                Template.application,
                 Template.id,
             )
             .offset((page - 1) * page_size)
@@ -99,15 +90,10 @@ class TemplateRepository:
     async def create(self, payload: TemplateCreate) -> Template:
         """Create a validated global or application-scoped template."""
 
-        if payload.application_id is not None:
-            application = await self._session.get(Application, payload.application_id)
-            if application is None:
-                raise TemplateApplicationNotFoundError
-
         template = Template(
             name=payload.name,
             scope=payload.scope,
-            application_id=payload.application_id,
+            application=payload.application,
             git_url=payload.git_url,
             modules=list(payload.modules),
             version=payload.version,
@@ -123,10 +109,6 @@ class TemplateRepository:
             await self._session.commit()
         except IntegrityError as error:
             await self._session.rollback()
-            if payload.application_id is not None:
-                application = await self._session.get(Application, payload.application_id)
-                if application is None:
-                    raise TemplateApplicationNotFoundError from error
             raise TemplateAlreadyExistsError from error
         await self._session.refresh(template)
         return template

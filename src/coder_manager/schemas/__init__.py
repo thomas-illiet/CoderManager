@@ -1,11 +1,6 @@
 """API schemas."""
 
-from coder_manager.schemas.application import (
-    ApplicationCreate,
-    ApplicationListQuery,
-    ApplicationPage,
-    ApplicationRead,
-)
+from coder_manager.schemas.application_identifier import ApplicationIdentifier
 from coder_manager.schemas.instance import (
     InstanceArgoCdStatusRead,
     InstanceCreate,
@@ -51,10 +46,7 @@ from coder_manager.schemas.workspace import (
 )
 
 __all__ = [
-    "ApplicationCreate",
-    "ApplicationListQuery",
-    "ApplicationPage",
-    "ApplicationRead",
+    "ApplicationIdentifier",
     "DatabaseCreate",
     "DatabaseItemStatistics",
     "DatabaseListQuery",

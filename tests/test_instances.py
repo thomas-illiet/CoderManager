@@ -10,18 +10,14 @@ from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coder_manager.api.routes import applications as application_routes
 from coder_manager.api.routes import instances as instance_routes
 from coder_manager.config import Settings, get_settings
 from coder_manager.domains import argocd
 from coder_manager.main import app
 from coder_manager.models import InstanceEnvironment, InstanceRegion, InstanceStatus
 from coder_manager.repositories import (
-    ApplicationHasInstancesError,
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
-    InstanceApplicationNotFoundError,
-    InstanceApplicationNotWhitelistedError,
     InstanceDatabaseUnavailableError,
     InstanceNotFoundError,
     InstanceRepository,
@@ -31,32 +27,9 @@ from coder_manager.repositories import (
 from coder_manager.schemas import InstanceCreate
 
 
-async def create_application(
-    client: AsyncClient,
-    *,
-    external_id: str = "business-app-1",
-    name: str = "Mon Équipe / Portail",
-    whitelist: bool = True,
-) -> dict[str, object]:
-    """Create and return one business application through the API."""
-
-    response = await client.post(
-        "/api/v1/applications",
-        json={"external_id": external_id, "name": name},
-    )
-    assert response.status_code == 201
-    application = response.json()
-    if whitelist:
-        whitelist_response = await client.post(
-            f"/api/v1/applications/{application['id']}/whitelist"
-        )
-        assert whitelist_response.status_code == 204
-    return application
-
-
 async def create_instance(
     client: AsyncClient,
-    application_id: str,
+    application: str,
     *,
     region: str = "emea",
     environment: str = "development",
@@ -66,7 +39,7 @@ async def create_instance(
     response = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application_id,
+            "application": application,
             "region": region,
             "environment": environment,
         },
@@ -78,12 +51,11 @@ async def create_instance(
 async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
     """Verify the create instance get and missing scenario."""
 
-    application = await create_application(client)
-    created = await create_instance(client, application["id"])
+    created = await create_instance(client, " mon équipe / portail ")
 
     assert set(created) == {
         "id",
-        "application_id",
+        "application",
         "region",
         "environment",
         "action",
@@ -97,7 +69,7 @@ async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
         "created_at",
         "updated_at",
     }
-    assert created["application_id"] == application["id"]
+    assert created["application"] == "MON ÉQUIPE / PORTAIL"
     assert created["action"] == "creating"
     assert created["status"] == "pending"
     assert created["argocd_application_name"] is None
@@ -116,44 +88,28 @@ async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
     assert missing.json() == {"detail": "Instance not found"}
 
 
-async def test_instance_creation_requires_whitelisted_application(client: AsyncClient) -> None:
-    """Verify the instance creation requires whitelisted application scenario."""
+async def test_removed_application_contract_is_rejected(client: AsyncClient) -> None:
+    """Reject the removed resource and legacy instance payload without compatibility aliases."""
 
-    application = await create_application(client, whitelist=False)
-
-    response = await client.post(
+    endpoint = await client.get("/api/v1/applications")
+    legacy_payload = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application["id"],
+            "application_id": str(uuid4()),
             "region": "emea",
             "environment": "development",
         },
     )
 
-    assert response.status_code == 403
-    assert response.json() == {"detail": "Application is not whitelisted"}
-
-
-async def test_global_whitelist_allows_instance_creation(client: AsyncClient) -> None:
-    """Verify the global whitelist allows instance creation scenario."""
-
-    application = await create_application(client, whitelist=False)
-    app.dependency_overrides[get_settings] = lambda: Settings(global_whitelist=True)
-
-    created = await create_instance(client, application["id"])
-
-    assert created["application_id"] == application["id"]
+    assert endpoint.status_code == 404
+    assert legacy_payload.status_code == 422
 
 
 async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> None:
     """Verify the environment url mapping and list filter scenario."""
 
-    first_application = await create_application(client)
-    second_application = await create_application(
-        client,
-        external_id="business-app-2",
-        name="Other App",
-    )
+    first_application = "FIRST APP"
+    second_application = "OTHER APP"
     expected_labels = {
         "development": "dev",
         "staging": "staging",
@@ -162,11 +118,11 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
     for environment, dns_label in expected_labels.items():
         instance = await create_instance(
             client,
-            first_application["id"],
+            first_application,
             environment=environment,
         )
         assert instance["instance_url"].endswith(f"code-studio.{dns_label}.echonet")
-    await create_instance(client, second_application["id"])
+    await create_instance(client, second_application)
 
     first_page = await client.get("/api/v1/instances", params={"page": 1, "page_size": 2})
     assert first_page.status_code == 200
@@ -176,30 +132,26 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
 
     filtered = await client.get(
         "/api/v1/instances",
-        params={"application_id": first_application["id"]},
+        params={"application": " first app "},
     )
     assert filtered.status_code == 200
     assert filtered.json()["total"] == 3
-    assert all(
-        item["application_id"] == first_application["id"] for item in filtered.json()["items"]
-    )
+    assert all(item["application"] == first_application for item in filtered.json()["items"])
 
 
 async def test_instance_domain_is_configurable(client: AsyncClient) -> None:
     """Build new instance URLs with the configured domain label."""
 
     app.dependency_overrides[get_settings] = lambda: Settings(instance_domain="coder-studio")
-    application = await create_application(client)
-
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "Mon Équipe / Portail")
 
     assert instance["instance_url"] == ("https://mon-equipe-portail.emea.coder-studio.dev.echonet")
 
 
-async def test_create_rejects_unknown_application_and_extra_name(client: AsyncClient) -> None:
-    """Verify the create rejects unknown application and extra name scenario."""
+async def test_create_rejects_legacy_application_id_and_extra_name(client: AsyncClient) -> None:
+    """Reject the removed application_id field and unrelated instance names."""
 
-    missing = await client.post(
+    legacy = await client.post(
         "/api/v1/instances",
         json={
             "application_id": str(uuid4()),
@@ -207,18 +159,17 @@ async def test_create_rejects_unknown_application_and_extra_name(client: AsyncCl
             "environment": "development",
         },
     )
-    application = await create_application(client)
     with_name = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application["id"],
+            "application": "APP",
             "region": "emea",
             "environment": "development",
             "name": "Instances do not have names",
         },
     )
 
-    assert missing.status_code == 404
+    assert legacy.status_code == 422
     assert with_name.status_code == 422
 
 
@@ -227,11 +178,10 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
 ) -> None:
     """Verify the invalid enums pagination and application slugs are rejected scenario."""
 
-    application = await create_application(client)
     invalid_region = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application["id"],
+            "application": "APP",
             "region": "antarctica",
             "environment": "development",
         },
@@ -239,35 +189,41 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
     invalid_environment = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application["id"],
+            "application": "APP",
             "region": "emea",
             "environment": "testing",
         },
     )
     invalid_page = await client.get("/api/v1/instances", params={"page": 0, "page_size": 101})
-
-    symbol_application = await create_application(
-        client,
-        external_id="symbol-app",
-        name="!!!",
-    )
-    invalid_slug = await client.post(
+    empty_application = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": symbol_application["id"],
+            "application": "   ",
             "region": "emea",
             "environment": "development",
         },
     )
-    long_application = await create_application(
-        client,
-        external_id="long-app",
-        name="a" * 64,
+    oversized_application = await client.post(
+        "/api/v1/instances",
+        json={
+            "application": "a" * 256,
+            "region": "emea",
+            "environment": "development",
+        },
+    )
+
+    invalid_slug = await client.post(
+        "/api/v1/instances",
+        json={
+            "application": "!!!",
+            "region": "emea",
+            "environment": "development",
+        },
     )
     long_slug = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": long_application["id"],
+            "application": "a" * 64,
             "region": "emea",
             "environment": "development",
         },
@@ -276,6 +232,8 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
     assert invalid_region.status_code == 422
     assert invalid_environment.status_code == 422
     assert invalid_page.status_code == 422
+    assert empty_application.status_code == 422
+    assert oversized_application.status_code == 422
     assert invalid_slug.status_code == 422
     assert long_slug.status_code == 422
 
@@ -283,26 +241,20 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
 async def test_placement_and_url_collisions_return_conflict(client: AsyncClient) -> None:
     """Verify the placement and url collisions return conflict scenario."""
 
-    first_application = await create_application(client, name="My App")
-    await create_instance(client, first_application["id"])
+    await create_instance(client, "My App")
 
     duplicate_placement = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": first_application["id"],
+            "application": "my app",
             "region": "emea",
             "environment": "development",
         },
     )
-    second_application = await create_application(
-        client,
-        external_id="business-app-2",
-        name="my-app",
-    )
     duplicate_url = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": second_application["id"],
+            "application": "my-app",
             "region": "emea",
             "environment": "development",
         },
@@ -315,15 +267,8 @@ async def test_placement_and_url_collisions_return_conflict(client: AsyncClient)
 async def test_same_placement_is_allowed_for_different_applications(client: AsyncClient) -> None:
     """Verify the same placement is allowed for different applications scenario."""
 
-    first_application = await create_application(client, name="First App")
-    second_application = await create_application(
-        client,
-        external_id="business-app-2",
-        name="Second App",
-    )
-
-    first = await create_instance(client, first_application["id"])
-    second = await create_instance(client, second_application["id"])
+    first = await create_instance(client, "First App")
+    second = await create_instance(client, "Second App")
 
     assert first["region"] == second["region"] == "emea"
     assert first["environment"] == second["environment"] == "development"
@@ -335,8 +280,7 @@ async def test_delete_requires_creation_success_and_marks_deleting(
 ) -> None:
     """Verify the delete requires creation success and marks deleting scenario."""
 
-    application = await create_application(client)
-    created = await create_instance(client, application["id"])
+    created = await create_instance(client, "APP")
 
     premature = await client.delete(f"/api/v1/instances/{created['id']}")
     assert premature.status_code == 409
@@ -377,8 +321,7 @@ async def test_internal_actions_are_free_form_and_stale_updates_are_rejected(
 ) -> None:
     """Verify the internal actions are free form and stale updates are rejected scenario."""
 
-    application = await create_application(client)
-    created = await create_instance(client, application["id"])
+    created = await create_instance(client, "APP")
     instance_id = UUID(created["id"])
 
     async with session_maker() as session:
@@ -420,56 +363,13 @@ async def test_internal_actions_are_free_form_and_stale_updates_are_rejected(
     assert fetched.json()["status"] == "running"
 
 
-async def test_application_with_instances_cannot_be_deleted(client: AsyncClient) -> None:
-    """Verify the application with instances cannot be deleted scenario."""
-
-    application = await create_application(client)
-    await create_instance(client, application["id"])
-
-    response = await client.delete(f"/api/v1/applications/{application['id']}")
-
-    assert response.status_code == 409
-    assert response.json() == {"detail": "Application still has instances"}
-
-
-async def test_application_delete_conflict_route_mapping(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify the application delete conflict route mapping scenario."""
-
-    class ProtectedApplicationRepository:
-        """Provide the protected application repository test double for this scenario."""
-
-        def __init__(self, _session: object) -> None:
-            """Initialize the test double used by this scenario."""
-
-        async def get(self, _application_id: UUID) -> SimpleNamespace:
-            """Simulate the repository get operation."""
-
-            return SimpleNamespace(id=_application_id)
-
-        async def delete(self, _application: SimpleNamespace) -> None:
-            """Simulate the repository delete operation."""
-
-            raise ApplicationHasInstancesError
-
-    monkeypatch.setattr(
-        application_routes,
-        "ApplicationRepository",
-        ProtectedApplicationRepository,
-    )
-
-    with pytest.raises(HTTPException) as caught:
-        await application_routes.delete_application(uuid4(), None)
-
-    assert caught.value.status_code == 409
-
-
 def instance_record() -> SimpleNamespace:
     """Build an ORM-shaped instance for isolated route tests."""
 
     now = datetime.now(UTC)
     return SimpleNamespace(
         id=uuid4(),
-        application_id=uuid4(),
+        application="APP",
         region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
         action="creating",
@@ -507,12 +407,10 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
             _payload: InstanceCreate,
             *,
             instance_domain: str,
-            global_whitelist: bool = False,
         ) -> SimpleNamespace:
             """Simulate the repository create operation."""
 
             assert instance_domain == "code-studio"
-            assert global_whitelist is False
             return record
 
         async def request_deletion(self, _instance_id: UUID) -> SimpleNamespace:
@@ -522,7 +420,7 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(instance_routes, "InstanceRepository", SuccessfulRepository)
     payload = InstanceCreate(
-        application_id=record.application_id,
+        application=record.application,
         region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
     )
@@ -541,8 +439,6 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.parametrize(
     ("repository_error", "expected_status"),
     [
-        (InstanceApplicationNotFoundError, 404),
-        (InstanceApplicationNotWhitelistedError, 403),
         (InvalidApplicationSlugError, 422),
         (InstanceAlreadyExistsError, 409),
         (InstanceDatabaseUnavailableError, 409),
@@ -566,17 +462,15 @@ async def test_create_instance_route_error_mapping(
             _payload: InstanceCreate,
             *,
             instance_domain: str,
-            global_whitelist: bool = False,
         ) -> None:
             """Simulate the repository create operation."""
 
             assert instance_domain == "code-studio"
-            assert global_whitelist is False
             raise repository_error
 
     monkeypatch.setattr(instance_routes, "InstanceRepository", FailingRepository)
     payload = InstanceCreate(
-        application_id=uuid4(),
+        application="APP",
         region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
     )
@@ -615,8 +509,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
 ) -> None:
     """Verify the instance status endpoint returns remote argocd state scenario."""
 
-    application = await create_application(client, external_id="status-app", name="Status App")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "STATUS APP")
     instance_id = UUID(instance["id"])
 
     def remote_status(

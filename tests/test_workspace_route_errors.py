@@ -10,7 +10,6 @@ from coder_manager.api.routes import templates as template_routes
 from coder_manager.api.routes import workspaces as workspace_routes
 from coder_manager.repositories import (
     TemplateAlreadyExistsError,
-    TemplateApplicationNotFoundError,
     TemplateHasWorkspacesError,
     TemplateImageAlreadyExistsError,
     TemplateImageInUseError,
@@ -46,7 +45,7 @@ def template_create_payload() -> TemplateCreate:
     return TemplateCreate(
         name="Python",
         scope="global",
-        application_id=None,
+        application=None,
         git_url="https://git.example.com/template.git",
         modules=["code-server"],
         version="v1",
@@ -63,7 +62,7 @@ def template_update_payload() -> TemplateUpdate:
     """Build a valid template update schema."""
 
     create = template_create_payload()
-    return TemplateUpdate.model_validate(create.model_dump(exclude={"scope", "application_id"}))
+    return TemplateUpdate.model_validate(create.model_dump(exclude={"scope", "application"}))
 
 
 def workspace_create_payload() -> WorkspaceCreate:
@@ -267,7 +266,6 @@ async def test_template_image_error_mapping(
 @pytest.mark.parametrize(
     ("method", "repository_error", "expected_status"),
     [
-        ("create", TemplateApplicationNotFoundError, 404),
         ("create", TemplateAlreadyExistsError, 409),
         ("update", TemplateNotFoundError, 404),
         ("update", TemplateAlreadyExistsError, 409),

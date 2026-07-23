@@ -3,7 +3,7 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from coder_manager.models import Application, Database, DatabaseAllocation
+from coder_manager.models import Database, DatabaseAllocation
 from coder_manager.models.base import Base
 from coder_manager.repositories import InstanceDatabaseUnavailableError, InstanceRepository
 from coder_manager.schemas import InstanceCreate
@@ -57,7 +57,7 @@ async def test_concurrent_reservations_never_exceed_instance_max(
 ) -> None:
     """Serialize regional placement so two requests cannot claim the final slot."""
 
-    application_ids = [uuid4(), uuid4()]
+    applications = ["APP-1", "APP-2"]
     async with postgres_session_maker() as session:
         session.add(
             Database(
@@ -71,25 +71,16 @@ async def test_concurrent_reservations_never_exceed_instance_max(
                 password_enc=b"test-only",
             )
         )
-        session.add_all(
-            Application(
-                id=application_id,
-                external_id=f"app-{index}",
-                name=f"App {index}",
-                whitelist=True,
-            )
-            for index, application_id in enumerate(application_ids)
-        )
         await session.commit()
 
-    async def reserve(application_id: UUID) -> str:
+    async def reserve(application: str) -> str:
         """Provide the reserve helper used by this test scenario."""
 
         async with postgres_session_maker() as session:
             try:
                 await InstanceRepository(session).create(
                     InstanceCreate(
-                        application_id=application_id,
+                        application=application,
                         region="emea",
                         environment="development",
                     ),
@@ -99,7 +90,7 @@ async def test_concurrent_reservations_never_exceed_instance_max(
                 return "full"
             return "created"
 
-    results = await asyncio.gather(*(reserve(application_id) for application_id in application_ids))
+    results = await asyncio.gather(*(reserve(application) for application in applications))
 
     assert sorted(results) == ["created", "full"]
     async with postgres_session_maker() as session:

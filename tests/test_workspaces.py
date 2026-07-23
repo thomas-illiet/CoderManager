@@ -42,27 +42,9 @@ LIMITS = {
 }
 
 
-async def create_application(
-    client: AsyncClient,
-    *,
-    suffix: str = "1",
-) -> dict[str, object]:
-    """Create and whitelist a business application."""
-
-    response = await client.post(
-        "/api/v1/applications",
-        json={"external_id": f"app-{suffix}", "name": f"Application {suffix}"},
-    )
-    assert response.status_code == 201
-    application = response.json()
-    whitelisted = await client.post(f"/api/v1/applications/{application['id']}/whitelist")
-    assert whitelisted.status_code == 204
-    return application
-
-
 async def create_instance(
     client: AsyncClient,
-    application_id: object,
+    application: str,
     *,
     environment: str = "development",
 ) -> dict[str, object]:
@@ -71,7 +53,7 @@ async def create_instance(
     response = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": str(application_id),
+            "application": application,
             "region": "emea",
             "environment": environment,
         },
@@ -135,7 +117,7 @@ async def create_template(
     *,
     name: str = "Python",
     scope: str = "global",
-    application_id: object | None = None,
+    application: str | None = None,
     modules: list[str] | None = None,
 ) -> dict[str, object]:
     """Create a resource-bounded template."""
@@ -145,7 +127,7 @@ async def create_template(
         json={
             "name": name,
             "scope": scope,
-            "application_id": str(application_id) if application_id is not None else None,
+            "application": application,
             "git_url": "https://git.example.com/template.git",
             "modules": modules or ["code-server", "git-config"],
             "version": "v1",
@@ -179,8 +161,7 @@ async def create_ready_context(
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object], dict[str, object]]:
     """Create a ready instance, owner, template, and image."""
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "APPLICATION 1")
     await set_instance_status(session_maker, instance["id"])
     member = await create_member(client, session_maker, instance["id"])
     template = await create_template(client)
@@ -682,12 +663,11 @@ async def test_workspace_missing_resources_and_cross_scope_template(
         response = await client.post("/api/v1/workspaces", json=payload)
         assert response.status_code == 404
 
-    other_application = await create_application(client, suffix="2")
     scoped = await create_template(
         client,
         name="Scoped",
         scope="application",
-        application_id=other_application["id"],
+        application="APPLICATION 2",
     )
     scoped_image = await create_image(client, scoped["id"])
     unavailable = await client.post(
@@ -803,7 +783,7 @@ async def test_repositories_exercise_direct_successful_lifecycle(
         templates, total = await template_repository.list(
             page=1,
             page_size=20,
-            application_id=None,
+            application=None,
             scope=None,
             name="Python",
         )

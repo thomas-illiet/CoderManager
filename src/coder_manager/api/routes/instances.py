@@ -16,8 +16,6 @@ from coder_manager.models import InstanceKubernetes
 from coder_manager.repositories import (
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
-    InstanceApplicationNotFoundError,
-    InstanceApplicationNotWhitelistedError,
     InstanceDatabaseUnavailableError,
     InstanceKubernetesAlreadyConfiguredError,
     InstanceKubernetesImmutableFieldError,
@@ -29,6 +27,7 @@ from coder_manager.repositories import (
     JobExecutionRepository,
 )
 from coder_manager.schemas import (
+    ApplicationIdentifier,
     InstanceArgoCdStatusRead,
     InstanceCreate,
     InstanceKubernetesCreate,
@@ -82,14 +81,14 @@ async def list_instances(
     session: SessionDependency,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
-    application_id: UUID | None = None,
+    application: ApplicationIdentifier | None = None,
 ) -> InstancePage:
     """Return a page of instances, optionally filtered by application."""
 
     instances, total = await InstanceRepository(session).list(
         page=page,
         page_size=page_size,
-        application_id=application_id,
+        application=application,
     )
     pages = (total + page_size - 1) // page_size
     return InstancePage(
@@ -284,22 +283,11 @@ async def create_instance(
         instance = await InstanceRepository(session).create(
             payload,
             instance_domain=settings.instance_domain,
-            global_whitelist=settings.global_whitelist,
         )
-    except InstanceApplicationNotFoundError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Application not found",
-        ) from error
-    except InstanceApplicationNotWhitelistedError as error:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Application is not whitelisted",
-        ) from error
     except InvalidApplicationSlugError as error:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Application name cannot produce a valid DNS label",
+            detail="Application cannot produce a valid DNS label",
         ) from error
     except InstanceAlreadyExistsError as error:
         raise HTTPException(

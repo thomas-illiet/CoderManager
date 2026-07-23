@@ -86,23 +86,15 @@ async def create_database(client: AsyncClient, **overrides: object) -> dict[str,
     return response.json()
 
 
-async def create_application(client: AsyncClient, suffix: str) -> dict[str, object]:
-    """Create and whitelist an application for instance allocation tests."""
+def application_identifier(suffix: str) -> str:
+    """Return a distinct external application identifier for allocation tests."""
 
-    response = await client.post(
-        "/api/v1/applications",
-        json={"external_id": f"app-{suffix}", "name": f"App {suffix}"},
-    )
-    assert response.status_code == 201
-    application = response.json()
-    whitelist = await client.post(f"/api/v1/applications/{application['id']}/whitelist")
-    assert whitelist.status_code == 204
-    return application
+    return f"APP-{suffix}".upper()
 
 
 async def create_coder_instance(
     client: AsyncClient,
-    application_id: object,
+    application: str,
     *,
     region: str = "emea",
 ) -> dict[str, object]:
@@ -111,7 +103,7 @@ async def create_coder_instance(
     response = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application_id,
+            "application": application,
             "region": region,
             "environment": "development",
         },
@@ -444,10 +436,10 @@ async def test_allocation_balances_by_utilization_and_statistics(
     beta = await create_database(client, name="Beta", instance_max=4)
     await create_database(client, name="APAC", region="apac", instance_max=3)
 
-    instances = []
-    for suffix in range(4):
-        application = await create_application(client, str(suffix))
-        instances.append(await create_coder_instance(client, application["id"]))
+    instances = [
+        await create_coder_instance(client, application_identifier(str(suffix)))
+        for suffix in range(4)
+    ]
 
     assert [instance["database_id"] for instance in instances] == [
         alpha["id"],
@@ -506,14 +498,13 @@ async def test_database_instances_are_paginated_and_scoped(
         instance_max=1,
     )
 
-    expected_instances = []
-    for suffix in ("database-list-one", "database-list-two"):
-        application = await create_application(client, suffix)
-        expected_instances.append(await create_coder_instance(client, application["id"]))
-    other_application = await create_application(client, "database-list-other")
+    expected_instances = [
+        await create_coder_instance(client, application_identifier(suffix))
+        for suffix in ("database-list-one", "database-list-two")
+    ]
     other_instance = await create_coder_instance(
         client,
-        other_application["id"],
+        application_identifier("database-list-other"),
         region="apac",
     )
 
@@ -591,13 +582,11 @@ async def test_empty_statistics_and_no_capacity_are_atomic(
     }
 
     database = await create_database(client, name="Only", instance_max=1)
-    first_application = await create_application(client, "first")
-    second_application = await create_application(client, "second")
-    await create_coder_instance(client, first_application["id"])
+    await create_coder_instance(client, application_identifier("first"))
     rejected = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": second_application["id"],
+            "application": application_identifier("second"),
             "region": "emea",
             "environment": "development",
         },
@@ -621,8 +610,7 @@ async def test_in_use_database_rejects_capacity_region_and_deletion(
     await clear_database_pool(session_maker)
     database = await create_database(client, name="Busy", instance_max=2)
     for suffix in ("one", "two"):
-        application = await create_application(client, suffix)
-        await create_coder_instance(client, application["id"])
+        await create_coder_instance(client, application_identifier(suffix))
 
     payload = database_payload("Busy", instance_max=1)
     capacity = await client.put(f"/api/v1/databases/{database['id']}", json=payload)
@@ -645,8 +633,7 @@ async def test_instance_deletion_releases_database_slot(
 
     await clear_database_pool(session_maker)
     database = await create_database(client, name="Reusable", instance_max=1)
-    first_application = await create_application(client, "delete-first")
-    instance = await create_coder_instance(client, first_application["id"])
+    instance = await create_coder_instance(client, application_identifier("delete-first"))
     instance_id = UUID(str(instance["id"]))
 
     async with session_maker() as session:
@@ -677,6 +664,8 @@ async def test_instance_deletion_releases_database_slot(
     result = tasks.step_04_remove_local_configuration.run(str(job_id))
     assert result == {"status": "deleted"}
 
-    second_application = await create_application(client, "delete-second")
-    replacement = await create_coder_instance(client, second_application["id"])
+    replacement = await create_coder_instance(
+        client,
+        application_identifier("delete-second"),
+    )
     assert replacement["database_id"] == database["id"]

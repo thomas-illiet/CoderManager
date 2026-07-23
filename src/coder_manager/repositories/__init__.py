@@ -1,10 +1,5 @@
 """Persistence repositories."""
 
-from coder_manager.repositories.applications import (
-    ApplicationAlreadyExistsError,
-    ApplicationHasInstancesError,
-    ApplicationRepository,
-)
 from coder_manager.repositories.instance_kubernetes import (
     InstanceKubernetesAlreadyConfiguredError,
     InstanceKubernetesImmutableFieldError,
@@ -14,8 +9,6 @@ from coder_manager.repositories.instance_kubernetes import (
 from coder_manager.repositories.instances import (
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
-    InstanceApplicationNotFoundError,
-    InstanceApplicationNotWhitelistedError,
     InstanceDatabaseUnavailableError,
     InstanceNotFoundError,
     InstanceRepository,
@@ -55,7 +48,6 @@ from coder_manager.repositories.template_images import (
 )
 from coder_manager.repositories.templates import (
     TemplateAlreadyExistsError,
-    TemplateApplicationNotFoundError,
     TemplateHasWorkspacesError,
     TemplateNotFoundError,
     TemplateRepository,
@@ -80,9 +72,6 @@ from coder_manager.repositories.workspaces import (
 )
 
 __all__ = [
-    "ApplicationAlreadyExistsError",
-    "ApplicationHasInstancesError",
-    "ApplicationRepository",
     "DatabaseAlreadyExistsError",
     "DatabaseCapacityConflictError",
     "DatabaseInUseError",
@@ -92,8 +81,6 @@ __all__ = [
     "DatabaseUsage",
     "InstanceActionConflictError",
     "InstanceAlreadyExistsError",
-    "InstanceApplicationNotFoundError",
-    "InstanceApplicationNotWhitelistedError",
     "InstanceDatabaseUnavailableError",
     "InstanceKubernetesAlreadyConfiguredError",
     "InstanceKubernetesImmutableFieldError",
@@ -115,7 +102,6 @@ __all__ = [
     "MemberNotFoundError",
     "MemberRepository",
     "TemplateAlreadyExistsError",
-    "TemplateApplicationNotFoundError",
     "TemplateHasWorkspacesError",
     "TemplateImageAlreadyExistsError",
     "TemplateImageInUseError",

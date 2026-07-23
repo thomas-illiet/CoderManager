@@ -377,7 +377,7 @@ class WorkspaceRepository:
 
         if (
             template.scope is TemplateScope.APPLICATION
-            and template.application_id != instance.application_id
+            and template.application != instance.application
         ):
             await self._session.rollback()
             raise WorkspaceTemplateUnavailableError

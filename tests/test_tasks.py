@@ -52,7 +52,6 @@ from coder_manager.tasks.common.registry import (
 from coder_manager.tasks.instance import _database as database_helpers
 from tests.conftest import TEST_CRYPTO_KEY
 from tests.test_workspaces import (
-    create_application,
     create_instance,
     create_ready_context,
     set_instance_status,
@@ -148,8 +147,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     """Create the schema before directly scheduling remote instance creation."""
 
     configure_worker(monkeypatch, sync_session_maker)
-    application = await create_application(client, suffix="step-create")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "STEP CREATE")
     instance_id = UUID(str(instance["id"]))
     job_id = UUID(str(instance["job_id"]))
     await encrypt_allocated_database(session_maker, instance_id)
@@ -203,8 +201,7 @@ async def test_create_failure_is_exactly_retryable_and_dispatch_loss_stays_pendi
     """Persist failures and let Beat recover a next step lost after commit."""
 
     configure_worker(monkeypatch, sync_session_maker)
-    application = await create_application(client, suffix="step-failure")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "STEP FAILURE")
     instance_id = UUID(str(instance["id"]))
     job_id = UUID(str(instance["job_id"]))
     await encrypt_allocated_database(session_maker, instance_id)
@@ -249,8 +246,7 @@ async def test_attempt_fencing_rejects_late_worker_completion(
 ) -> None:
     """Prevent an expired attempt from completing after Beat has reclaimed it."""
 
-    application = await create_application(client, suffix="attempt-fence")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "ATTEMPT FENCE")
     job_id = UUID(str(instance["job_id"]))
     first_claim = claim_execution(job_id, INSTANCE_CREATE_STEP_01_TASK, sync_session_maker)
     assert first_claim is not None
@@ -283,8 +279,7 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     """Let a new update attempt finish members left running by an expired worker."""
 
     configure_worker(monkeypatch, sync_session_maker)
-    application = await create_application(client, suffix="member-attempt-fence")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "MEMBER ATTEMPT FENCE")
     instance_id = UUID(str(instance["id"]))
     await set_instance_status(session_maker, instance_id)
     response = await client.post(
@@ -327,8 +322,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
     """Finish one member snapshot and create a new job for changes arriving during it."""
 
     configure_worker(monkeypatch, sync_session_maker)
-    application = await create_application(client, suffix="member-coalesce")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "MEMBER COALESCE")
     instance_id = UUID(str(instance["id"]))
     await set_instance_status(session_maker, instance_id)
     response = await client.post(
@@ -620,8 +614,7 @@ async def test_retry_scanner_handles_error_pending_stale_and_unknown_jobs(
     configure_worker(monkeypatch, sync_session_maker)
     job_ids = []
     for suffix in ("retry-error", "retry-stale", "retry-unknown"):
-        application = await create_application(client, suffix=suffix)
-        instance = await create_instance(client, application["id"])
+        instance = await create_instance(client, suffix)
         job_ids.append(UUID(str(instance["job_id"])))
     async with session_maker() as session:
         error_job = await session.get(JobExecution, job_ids[0])

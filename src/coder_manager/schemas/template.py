@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from coder_manager.models import TemplateScope
+from coder_manager.schemas.application_identifier import ApplicationIdentifier
 
 NonEmptyString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
@@ -82,17 +83,17 @@ class TemplateCreate(TemplateMutableFields):
     """Payload accepted when creating a Coder template."""
 
     scope: TemplateScope
-    application_id: UUID | None = None
+    application: ApplicationIdentifier | None = None
 
     @model_validator(mode="after")
     def validate_scope(self) -> Self:
         """Ensure the application reference agrees with the selected scope."""
 
-        if self.scope is TemplateScope.GLOBAL and self.application_id is not None:
-            msg = "application_id must be null for a global template"
+        if self.scope is TemplateScope.GLOBAL and self.application is not None:
+            msg = "application must be null for a global template"
             raise ValueError(msg)
-        if self.scope is TemplateScope.APPLICATION and self.application_id is None:
-            msg = "application_id is required for an application template"
+        if self.scope is TemplateScope.APPLICATION and self.application is None:
+            msg = "application is required for an application template"
             raise ValueError(msg)
         return self
 
@@ -109,7 +110,7 @@ class TemplateRead(BaseModel):
     id: UUID
     name: str
     scope: TemplateScope
-    application_id: UUID | None
+    application: str | None
     git_url: str
     modules: list[str]
     version: str
@@ -131,7 +132,7 @@ class TemplateListQuery(BaseModel):
     page: Annotated[int, Field(ge=1)] = 1
     page_size: Annotated[int, Field(ge=1, le=100)] = 20
     scope: TemplateScope | None = None
-    application_id: UUID | None = None
+    application: ApplicationIdentifier | None = None
     name: Annotated[
         str | None,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=255),

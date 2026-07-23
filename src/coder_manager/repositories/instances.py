@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from coder_manager.models import (
-    Application,
     Database,
     DatabaseAllocation,
     Instance,
@@ -43,16 +42,8 @@ class InstanceAlreadyExistsError(Exception):
     """Raised when an instance conflicts with an existing placement or URL."""
 
 
-class InstanceApplicationNotFoundError(Exception):
-    """Raised when an instance references an unknown application."""
-
-
-class InstanceApplicationNotWhitelistedError(Exception):
-    """Raised when an instance references an application that is not allowed."""
-
-
 class InvalidApplicationSlugError(Exception):
-    """Raised when an application name cannot produce a valid DNS label."""
+    """Raised when an application identifier cannot produce a valid DNS label."""
 
 
 class InstanceNotFoundError(Exception):
@@ -108,16 +99,16 @@ class InstanceRepository:
         *,
         page: int,
         page_size: int,
-        application_id: UUID | None = None,
+        application: str | None = None,
         database_id: UUID | None = None,
     ) -> tuple[list[Instance], int]:
         """Return one deterministic page and the matching instance count."""
 
         count_statement = select(func.count()).select_from(Instance)
         list_statement = select(Instance).options(selectinload(Instance.database_allocation))
-        if application_id is not None:
-            count_statement = count_statement.where(Instance.application_id == application_id)
-            list_statement = list_statement.where(Instance.application_id == application_id)
+        if application is not None:
+            count_statement = count_statement.where(Instance.application == application)
+            list_statement = list_statement.where(Instance.application == application)
         if database_id is not None:
             count_statement = count_statement.join(DatabaseAllocation).where(
                 DatabaseAllocation.database_id == database_id
@@ -129,7 +120,7 @@ class InstanceRepository:
         total = await self._session.scalar(count_statement)
         result = await self._session.scalars(
             list_statement.order_by(
-                Instance.application_id,
+                Instance.application,
                 Instance.region,
                 Instance.environment,
                 Instance.id,
@@ -153,16 +144,8 @@ class InstanceRepository:
         payload: InstanceCreate,
         *,
         instance_domain: str,
-        global_whitelist: bool = False,
     ) -> Instance:
         """Create an instance and reserve capacity on the least utilized regional database."""
-
-        # Validate the application boundary before locking regional capacity.
-        application = await self._session.get(Application, payload.application_id)
-        if application is None:
-            raise InstanceApplicationNotFoundError
-        if not global_whitelist and not application.whitelist:
-            raise InstanceApplicationNotWhitelistedError
 
         # Lock every regional candidate so concurrent requests cannot overbook a database.
         databases = list(
@@ -207,12 +190,12 @@ class InstanceRepository:
         instance_id = uuid4()
         instance = Instance(
             id=instance_id,
-            application_id=application.id,
+            application=payload.application,
             region=payload.region,
             environment=payload.environment,
             action="creating",
             status=InstanceStatus.PENDING,
-            instance_url=instance_url(application.name, payload, instance_domain),
+            instance_url=instance_url(payload.application, payload, instance_domain),
             step=INSTANCE_CREATE_STEP_01,
         )
         job = add_job_execution(

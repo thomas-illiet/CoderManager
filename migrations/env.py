@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from coder_manager.config import get_settings
 from coder_manager.models import (  # noqa: F401
-    Application,
     Database,
     DatabaseAllocation,
     Instance,

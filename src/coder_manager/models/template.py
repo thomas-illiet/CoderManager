@@ -5,13 +5,12 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, Enum, ForeignKey, Index, String, Uuid, func
+from sqlalchemy import JSON, CheckConstraint, DateTime, Enum, Index, String, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
-    from coder_manager.models.application import Application
     from coder_manager.models.template_image import TemplateImage
     from coder_manager.models.workspace import Workspace
 
@@ -30,7 +29,7 @@ def enum_values(enum_type: type[StrEnum]) -> list[str]:
 
 
 class Template(Base):
-    """A versioned Coder template available globally or to one application."""
+    """A versioned Coder template available globally or to one external application."""
 
     __tablename__ = "templates"
 
@@ -40,8 +39,8 @@ class Template(Base):
         Enum(TemplateScope, name="template_scope", values_callable=enum_values),
         nullable=False,
     )
-    application_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("applications.id", ondelete="CASCADE"),
+    application: Mapped[str | None] = mapped_column(
+        String(255),
         nullable=True,
         index=True,
     )
@@ -65,7 +64,6 @@ class Template(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
-    application: Mapped["Application | None"] = relationship(back_populates="templates")
     images: Mapped[list["TemplateImage"]] = relationship(
         back_populates="template",
         cascade="all, delete-orphan",
@@ -90,9 +88,14 @@ class Template(Base):
         CheckConstraint("max_disk_gb > 0", name="max_disk_gb_positive"),
         CheckConstraint("min_disk_gb <= max_disk_gb", name="disk_range_valid"),
         CheckConstraint(
-            "(scope = 'global' AND application_id IS NULL) OR "
-            "(scope = 'application' AND application_id IS NOT NULL)",
+            "(scope = 'global' AND application IS NULL) OR "
+            "(scope = 'application' AND application IS NOT NULL)",
             name="scope_application_consistent",
+        ),
+        CheckConstraint(
+            "application IS NULL OR (length(trim(application)) > 0 "
+            "AND application = upper(trim(application)))",
+            name="application_normalized",
         ),
         Index(
             "uq_templates_global_name_ci",
@@ -103,7 +106,7 @@ class Template(Base):
         ),
         Index(
             "uq_templates_application_name_ci",
-            application_id,
+            application,
             func.lower(name),
             unique=True,
             postgresql_where=scope == TemplateScope.APPLICATION,

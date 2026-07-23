@@ -24,27 +24,13 @@ from coder_manager.repositories import (
 from coder_manager.schemas import MemberCreate, MemberRoleUpdate
 
 
-async def create_application(client: AsyncClient, suffix: str = "1") -> dict[str, object]:
-    """Create and whitelist one application."""
-
-    response = await client.post(
-        "/api/v1/applications",
-        json={"external_id": f"member-app-{suffix}", "name": f"Member App {suffix}"},
-    )
-    assert response.status_code == 201
-    application = response.json()
-    enabled = await client.post(f"/api/v1/applications/{application['id']}/whitelist")
-    assert enabled.status_code == 204
-    return application
-
-
-async def create_instance(client: AsyncClient, application_id: object) -> dict[str, object]:
+async def create_instance(client: AsyncClient, application: str) -> dict[str, object]:
     """Create one pending instance."""
 
     response = await client.post(
         "/api/v1/instances",
         json={
-            "application_id": application_id,
+            "application": application,
             "region": "emea",
             "environment": "development",
         },
@@ -80,8 +66,7 @@ async def create_ready_instance(
 ) -> dict[str, object]:
     """Create an instance whose initial action has succeeded."""
 
-    application = await create_application(client, suffix)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, f"MEMBER APP {suffix}")
     await set_instance_status(session_maker, str(instance["id"]))
     return instance
 
@@ -229,8 +214,7 @@ async def test_instance_busy_blocks_mutations_but_not_reads(
 ) -> None:
     """Verify the instance busy blocks mutations but not reads scenario."""
 
-    application = await create_application(client)
-    pending_instance = await create_instance(client, application["id"])
+    pending_instance = await create_instance(client, "MEMBER APP")
 
     blocked_create = await client.post(
         f"/api/v1/instances/{pending_instance['id']}/members",
@@ -274,8 +258,7 @@ async def test_instance_error_blocks_member_creation_until_retry(
 ) -> None:
     """Preserve a failed lifecycle intention until Beat retries it."""
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "MEMBER APP")
     await set_instance_status(
         session_maker,
         str(instance["id"]),
@@ -485,8 +468,7 @@ async def test_instance_updated_at_changes_on_real_transition(
 ) -> None:
     """Verify the instance updated at changes on real transition scenario."""
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "MEMBER APP")
     instance_id = UUID(str(instance["id"]))
     old_timestamp = datetime.now(UTC) - timedelta(days=1)
     async with session_maker() as session:
@@ -855,8 +837,7 @@ async def test_member_repository_rejects_missing_and_busy_parents(
                 MemberCreate(username="alice", role=MemberRole.USER),
             )
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "MEMBER APP")
     async with session_maker() as session:
         repository = MemberRepository(session)
         with pytest.raises(MemberInstanceBusyError):

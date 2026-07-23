@@ -1,6 +1,5 @@
 """ORM models."""
 
-from coder_manager.models.application import Application
 from coder_manager.models.instance import (
     Instance,
     InstanceEnvironment,
@@ -16,7 +15,6 @@ from coder_manager.models.template_image import TemplateImage
 from coder_manager.models.workspace import Workspace, WorkspaceStatus
 
 __all__ = [
-    "Application",
     "Database",
     "DatabaseAllocation",
     "Instance",

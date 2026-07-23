@@ -16,22 +16,6 @@ RESOURCE_LIMITS = {
 }
 
 
-async def create_application(
-    client: AsyncClient,
-    *,
-    external_id: str,
-    name: str,
-) -> dict[str, object]:
-    """Create an application used to scope templates in a test."""
-
-    response = await client.post(
-        "/api/v1/applications",
-        json={"external_id": external_id, "name": name},
-    )
-    assert response.status_code == 201
-    return response.json()
-
-
 async def create_template(
     client: AsyncClient,
     **overrides: object,
@@ -41,7 +25,7 @@ async def create_template(
     payload: dict[str, object] = {
         "name": "Python",
         "scope": "global",
-        "application_id": None,
+        "application": None,
         "git_url": "https://git.example.com/templates/python.git",
         "modules": ["code-server", "git-config"],
         "version": "v1.0.0",
@@ -65,7 +49,7 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
         version="main",
     )
     assert created["scope"] == "global"
-    assert created["application_id"] is None
+    assert created["application"] is None
     assert created["modules"] == ["code-server", "git-config"]
     assert datetime.fromisoformat(str(created["created_at"]))
     assert datetime.fromisoformat(str(created["updated_at"]))
@@ -90,7 +74,7 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
     assert updated.status_code == 200
     assert updated.json()["name"] == "Python Updated"
     assert updated.json()["scope"] == "global"
-    assert updated.json()["application_id"] is None
+    assert updated.json()["application"] is None
     assert updated.json()["modules"] == ["jetbrains-gateway"]
     assert updated.json()["created_at"] == created["created_at"]
     assert updated.json()["updated_at"] != created["updated_at"]
@@ -125,8 +109,8 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
 ) -> None:
     """Verify the template name is unique case insensitively per scope scenario."""
 
-    first = await create_application(client, external_id="first", name="First")
-    second = await create_application(client, external_id="second", name="Second")
+    first = "FIRST"
+    second = "SECOND"
     await create_template(client, name="Python")
 
     duplicate_global = await client.post(
@@ -134,7 +118,7 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
         json={
             "name": "python",
             "scope": "global",
-            "application_id": None,
+            "application": None,
             "git_url": "https://git.example.com/duplicate.git",
             "modules": ["module"],
             "version": "main",
@@ -147,14 +131,14 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
         client,
         name="Python",
         scope="application",
-        application_id=first["id"],
+        application=first,
     )
     duplicate_application = await client.post(
         "/api/v1/templates",
         json={
             "name": "PYTHON",
             "scope": "application",
-            "application_id": first["id"],
+            "application": " first ",
             "git_url": "https://git.example.com/duplicate.git",
             "modules": ["module"],
             "version": "main",
@@ -167,7 +151,7 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
         client,
         name="python",
         scope="application",
-        application_id=second["id"],
+        application=second,
     )
     assert separate_application["name"] == "python"
 
@@ -175,25 +159,25 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
 async def test_template_list_filters_available_templates(client: AsyncClient) -> None:
     """Verify the template list filters available templates scenario."""
 
-    first = await create_application(client, external_id="first", name="First")
-    second = await create_application(client, external_id="second", name="Second")
+    first = "FIRST"
+    second = "SECOND"
     await create_template(client, name="Zulu Global")
     await create_template(
         client,
         name="Alpha First",
         scope="application",
-        application_id=first["id"],
+        application=first,
     )
     await create_template(
         client,
         name="Beta Second",
         scope="application",
-        application_id=second["id"],
+        application=second,
     )
 
     available = await client.get(
         "/api/v1/templates",
-        params={"application_id": first["id"]},
+        params={"application": " first "},
     )
     assert available.status_code == 200
     assert [item["name"] for item in available.json()["items"]] == [
@@ -203,7 +187,7 @@ async def test_template_list_filters_available_templates(client: AsyncClient) ->
 
     specific = await client.get(
         "/api/v1/templates",
-        params={"application_id": first["id"], "scope": "application"},
+        params={"application": first, "scope": "application"},
     )
     assert specific.json()["total"] == 1
     assert specific.json()["items"][0]["name"] == "Alpha First"
@@ -212,17 +196,11 @@ async def test_template_list_filters_available_templates(client: AsyncClient) ->
     assert named.json()["total"] == 1
     assert named.json()["items"][0]["name"] == "Zulu Global"
 
-    unknown = await client.get(
+    external = await client.get(
         "/api/v1/templates",
-        params={"application_id": uuid4()},
+        params={"application": "UNKNOWN"},
     )
-    assert unknown.json() == {
-        "items": [],
-        "page": 1,
-        "page_size": 20,
-        "total": 0,
-        "pages": 0,
-    }
+    assert [item["name"] for item in external.json()["items"]] == ["Zulu Global"]
 
 
 async def test_template_list_is_paginated_and_escapes_name_wildcards(
@@ -255,8 +233,9 @@ async def test_template_list_is_paginated_and_escapes_name_wildcards(
         ({"modules": []}, 422),
         ({"modules": ["module", " module "]}, 422),
         ({"modules": ["   "]}, 422),
-        ({"scope": "global", "application_id": str(uuid4())}, 422),
-        ({"scope": "application", "application_id": None}, 422),
+        ({"scope": "global", "application": "APP"}, 422),
+        ({"scope": "application", "application": None}, 422),
+        ({"scope": "application", "application": "   "}, 422),
     ],
 )
 async def test_invalid_template_payloads_are_rejected(
@@ -269,7 +248,7 @@ async def test_invalid_template_payloads_are_rejected(
     payload: dict[str, object] = {
         "name": "Python",
         "scope": "global",
-        "application_id": None,
+        "application": None,
         "git_url": "https://git.example.com/template.git",
         "modules": ["module"],
         "version": "main",
@@ -280,25 +259,17 @@ async def test_invalid_template_payloads_are_rejected(
     assert response.status_code == expected_status
 
 
-async def test_unknown_application_and_immutable_scope_are_rejected(
+async def test_external_application_is_normalized_and_update_scope_is_rejected(
     client: AsyncClient,
 ) -> None:
-    """Verify the unknown application and immutable scope are rejected scenario."""
+    """Normalize external identifiers while keeping template scope immutable."""
 
-    missing_application = await client.post(
-        "/api/v1/templates",
-        json={
-            "name": "Python",
-            "scope": "application",
-            "application_id": str(uuid4()),
-            "git_url": "https://git.example.com/template.git",
-            "modules": ["module"],
-            "version": "main",
-            **RESOURCE_LIMITS,
-        },
+    scoped = await create_template(
+        client,
+        scope="application",
+        application=" external-app ",
     )
-    assert missing_application.status_code == 404
-    assert missing_application.json() == {"detail": "Application not found"}
+    assert scoped["application"] == "EXTERNAL-APP"
 
     created = await create_template(client)
     immutable_scope = await client.put(
@@ -306,7 +277,7 @@ async def test_unknown_application_and_immutable_scope_are_rejected(
         json={
             "name": "Python",
             "scope": "application",
-            "application_id": str(uuid4()),
+            "application": "APP",
             "git_url": created["git_url"],
             "modules": created["modules"],
             "version": created["version"],
@@ -332,22 +303,6 @@ async def test_update_name_conflict_returns_409(client: AsyncClient) -> None:
         },
     )
     assert conflict.status_code == 409
-
-
-async def test_deleting_application_cascades_to_its_templates(client: AsyncClient) -> None:
-    """Verify the deleting application cascades to its templates scenario."""
-
-    application = await create_application(client, external_id="owned", name="Owned")
-    template = await create_template(
-        client,
-        scope="application",
-        application_id=application["id"],
-    )
-
-    deleted = await client.delete(f"/api/v1/applications/{application['id']}")
-    assert deleted.status_code == 204
-    missing = await client.get(f"/api/v1/templates/{template['id']}")
-    assert missing.status_code == 404
 
 
 async def test_missing_template_endpoints_return_404(client: AsyncClient) -> None:

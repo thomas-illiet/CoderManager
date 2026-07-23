@@ -20,7 +20,6 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
-    from coder_manager.models.application import Application
     from coder_manager.models.instance_kubernetes import InstanceKubernetes
     from coder_manager.models.job_execution import JobExecution
     from coder_manager.models.managed_database import DatabaseAllocation
@@ -60,13 +59,18 @@ def enum_values(enum_type: type[StrEnum]) -> list[str]:
 
 
 class Instance(Base):
-    """A regional Coder instance attached to a business application."""
+    """A regional Coder instance labeled with an external application identifier."""
 
     __tablename__ = "instances"
     __table_args__ = (
         CheckConstraint("length(trim(action)) > 0", name="action_not_empty"),
+        CheckConstraint("length(trim(application)) > 0", name="application_not_empty"),
+        CheckConstraint(
+            "application = upper(trim(application))",
+            name="application_normalized",
+        ),
         UniqueConstraint(
-            "application_id",
+            "application",
             "region",
             "environment",
             name="uq_instances_application_region_environment",
@@ -75,8 +79,8 @@ class Instance(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    application_id: Mapped[UUID] = mapped_column(
-        ForeignKey("applications.id", ondelete="RESTRICT"),
+    application: Mapped[str] = mapped_column(
+        String(255),
         nullable=False,
         index=True,
     )
@@ -135,7 +139,6 @@ class Instance(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
-    application: Mapped["Application"] = relationship(back_populates="instances")
     members: Mapped[list["Member"]] = relationship(
         back_populates="instance",
         passive_deletes=True,

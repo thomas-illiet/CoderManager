@@ -27,7 +27,7 @@ from coder_manager.repositories import (
 )
 from coder_manager.schemas import InstanceKubernetesCreate, InstanceKubernetesUpdate
 from coder_manager.tasks import step_01_update_instance
-from tests.test_instances import create_application, create_instance
+from tests.test_instances import create_instance
 
 CRYPTO_KEY = "MDAxMTIyMzM0NDU1NjY3Nzg4ODlhYWJiY2NkZGVlZmY="
 OTHER_CRYPTO_KEY = b64encode(b"x" * 32).decode()
@@ -112,8 +112,7 @@ async def test_provider_get_distinguishes_missing_instance_and_configuration(
 ) -> None:
     """Return stable not-found responses for both missing resource levels."""
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "PROVIDER APP")
 
     unconfigured = await client.get(f"/api/v1/instances/{instance['id']}/provider")
     missing = await client.get(f"/api/v1/instances/{uuid4()}/provider")
@@ -130,8 +129,7 @@ async def test_provider_create_and_update_encrypt_token_and_request_instance_upd
 ) -> None:
     """Protect token storage, preserve omitted tokens, and enqueue POST and PUT updates."""
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "PROVIDER APP")
     instance_id = UUID(instance["id"])
 
     busy = await client.post(
@@ -204,8 +202,7 @@ async def test_provider_requires_initial_token_and_valid_crypto_without_leaks(
 ) -> None:
     """Reject unusable initial configurations while redacting token values."""
 
-    application = await create_application(client)
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "PROVIDER APP")
     instance_id = UUID(instance["id"])
     await mark_instance_idle(session_maker, instance_id, expected_action="creating")
 
@@ -240,8 +237,7 @@ async def test_provider_put_rejects_missing_busy_and_immutable_changes(
 ) -> None:
     """Keep host and namespace immutable and preserve create/update resource boundaries."""
 
-    application = await create_application(client, external_id="immutable-provider")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "IMMUTABLE PROVIDER")
     instance_id = UUID(instance["id"])
     await mark_instance_idle(session_maker, instance_id, expected_action="creating")
 
@@ -298,8 +294,7 @@ async def test_provider_repository_covers_resource_and_rotation_boundaries(
 ) -> None:
     """Exercise repository-level create, immutable, and rotation transitions."""
 
-    application = await create_application(client, external_id="repository-provider")
-    instance = await create_instance(client, application["id"])
+    instance = await create_instance(client, "REPOSITORY PROVIDER")
     instance_id = UUID(instance["id"])
     cipher = KubernetesTokenCipher(SecretStr(CRYPTO_KEY))
     initial_payload = InstanceKubernetesCreate.model_validate(provider_payload())
