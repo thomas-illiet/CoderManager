@@ -42,22 +42,12 @@ def application_payload(
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(helm_values.region, helm_values.environment)
-    values_environment = {
-        "development": "dev",
-        "staging": "stg",
-        "production": "prd",
-    }[helm_values.environment]
     helm_arguments = " ".join(
         (
-            "-f values-global.yaml",
-            f"-f values-{values_environment}.yaml",
+            "--namespace app-argo-system",
             f"--set policy.config.allowedUsernames={','.join(users)}",
             f"--set policy.config.adminUsernames={','.join(admins)}",
-            _helm_scalar_argument("global.config.publicURL", helm_values.public_url),
-            _helm_scalar_argument(
-                "global.wildcardAccessHost",
-                helm_values.wildcard_access_host,
-            ),
+            _helm_scalar_argument("global.publicURL", helm_values.public_url),
             _helm_scalar_argument(
                 "server.config.database.username",
                 helm_values.database_username,

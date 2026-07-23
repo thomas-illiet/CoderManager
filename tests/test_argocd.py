@@ -21,8 +21,7 @@ from coder_manager.domains.argocd import client as argocd_client
 from coder_manager.domains.argocd import service as argocd_service
 
 EXPECTED_INSTANCE_HELM_ARGS = (
-    "--set global.config.publicURL=https://coder.emea.code-studio.dev.echonet "
-    "--set global.wildcardAccessHost=*.coder.emea.code-studio.dev.echonet "
+    "--set global.publicURL=https://coder.emea.code-studio.dev.echonet "
     "--set server.config.database.username=db-user "
     "--set server.config.database.password=managed\\, secret "
     "--set server.config.database.host=postgres.internal "
@@ -127,7 +126,7 @@ def test_create_application_and_sync_contract() -> None:
                 {
                     "name": "HELM_ARGS",
                     "value": (
-                        "-f values-global.yaml -f values-dev.yaml "
+                        "--namespace app-argo-system "
                         "--set policy.config.allowedUsernames=alice,root.admin,zoe "
                         "--set policy.config.adminUsernames=alice,root.admin "
                         f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -208,7 +207,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
-                "-f values-global.yaml -f values-stg.yaml "
+                "--namespace app-argo-system "
                 "--set policy.config.allowedUsernames= "
                 "--set policy.config.adminUsernames= "
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -260,7 +259,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
-                "-f values-global.yaml -f values-prd.yaml "
+                "--namespace app-argo-system "
                 "--set policy.config.allowedUsernames=alice,root.admin "
                 "--set policy.config.adminUsernames=alice,root.admin "
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"

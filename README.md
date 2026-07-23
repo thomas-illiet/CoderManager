@@ -146,11 +146,9 @@ name passed as a quoted identifier. The second creates or attaches an Argo CD Ap
 Helm chart from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
-`HELM_ARGS` loads `values-global.yaml` first, then `values-dev.yaml`, `values-stg.yaml`, or
-`values-prd.yaml` according to the instance environment so environment-specific values take
-precedence. It also sets `global.config.publicURL` to the immutable instance URL,
-`global.wildcardAccessHost` to the corresponding wildcard hostname, and the allocated managed
-database's `server.config.database.username`, `password`, `host`, `database`, and `schema` values.
+`HELM_ARGS` targets the `app-argo-system` namespace, sets `global.publicURL` to the immutable
+instance URL, and supplies the allocated managed database's `server.config.database.username`,
+`password`, `host`, `database`, and `schema` values.
 The database password is decrypted only inside the worker while constructing the Argo CD payload.
 `CODER_MANAGER_DEFAULT_ADMINS` is a comma-separated list that is always included in both Helm
 values without creating API member records.
