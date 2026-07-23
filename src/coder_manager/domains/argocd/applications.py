@@ -21,10 +21,15 @@ INSTANCE_ID_LABEL = "coder-manager/instance-id"
 APPLICATION_NAMESPACE = "app-coder-system"
 
 
-def application_name(config: ArgoCdConfig, instance_id: UUID, attached_name: str | None) -> str:
-    """Return an attached Application name or derive the deterministic managed name."""
+def application_name(
+    config: ArgoCdConfig,
+    instance_id: UUID,
+    slug: str | None,
+    attached_name: str | None,
+) -> str:
+    """Return an attached, slug-based, or legacy deterministic Application name."""
 
-    return attached_name or f"{config.application_prefix}-{instance_id.hex}"
+    return attached_name or slug or f"{config.application_prefix}-{instance_id.hex}"
 
 
 def application_payload(

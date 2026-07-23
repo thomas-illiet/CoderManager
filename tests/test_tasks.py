@@ -101,13 +101,14 @@ async def encrypt_allocated_database(
 
 def successful_reconcile(
     instance_id: UUID,
+    slug: str | None,
     attached_name: str | None,
     _members: tuple[tuple[str, str], ...],
     _helm_values: argocd.InstanceHelmValues,
 ) -> str:
     """Return a deterministic Argo CD Application name."""
 
-    return attached_name or f"coder-{instance_id.hex}"
+    return attached_name or slug or f"coder-{instance_id.hex}"
 
 
 def test_registered_step_names_and_beat_schedule() -> None:
@@ -155,6 +156,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
 
     def capture_reconcile(
         remote_id: UUID,
+        slug: str | None,
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
@@ -164,6 +166,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         reconciled_values.append(helm_values)
         return successful_reconcile(
             remote_id,
+            slug,
             attached_name,
             members,
             helm_values,
@@ -214,7 +217,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert job.attempt == 2
         assert stored.status is InstanceStatus.SUCCESS
         assert stored.step is None
-        assert stored.argocd_application_name == f"coder-{instance_id.hex}"
+        assert stored.argocd_application_name == instance["slug"]
 
     response = await client.get(f"/api/v1/jobs/{job_id}")
     assert response.status_code == 200
@@ -366,6 +369,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
 
     def add_late_member(
         reconciled_id: UUID,
+        slug: str | None,
         attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
         _helm_values: argocd.InstanceHelmValues,
@@ -375,7 +379,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         with sync_session_maker() as session:
             session.add(Member(instance_id=reconciled_id, username="late", role="user"))
             session.commit()
-        return attached_name or f"coder-{reconciled_id.hex}"
+        return attached_name or slug or f"coder-{reconciled_id.hex}"
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", add_late_member)
     tasks.step_01_update_instance.delay.reset_mock()
@@ -448,18 +452,18 @@ async def test_delete_steps_keep_local_state_until_step_04(
 
     deletion = await client.delete(f"/api/v1/instances/{instance_id}")
     job_id = UUID(deletion.json()["job"]["id"])
-    deleted_remote: list[UUID] = []
+    deleted_remote: list[tuple[UUID, str | None, str | None]] = []
     dropped_targets: list[postgresql.SchemaTarget] = []
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda remote_id, _name: deleted_remote.append(remote_id),
+        lambda remote_id, slug, name: deleted_remote.append((remote_id, slug, name)),
     )
     monkeypatch.setattr(postgresql, "drop_schema", dropped_targets.append)
 
     assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
     assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "pending"}
-    assert deleted_remote == [instance_id]
+    assert deleted_remote == [(instance_id, str(deletion.json()["resource"]["slug"]), None)]
     assert tasks.step_03_remove_schema.run(str(job_id)) == {"status": "pending"}
     assert dropped_targets[0].schema_name == f"coder_{instance_id.hex}"
     async with session_maker() as session:

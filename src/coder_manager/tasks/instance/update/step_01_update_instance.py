@@ -47,7 +47,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Claim members, reconcile Argo CD, and finalize the pass."""
 
-        member_ids, members, attached_name, region, environment, public_url = _claim_members(
+        member_ids, members, slug, attached_name, region, environment, public_url = _claim_members(
             claim,
             session_factory,
         )
@@ -61,6 +61,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             )
             application_name = argocd.reconcile_instance_application(
                 required_resource_id(claim),
+                slug,
                 attached_name,
                 members,
                 helm_values,
@@ -80,7 +81,15 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
 def _claim_members(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
-) -> tuple[tuple[UUID, ...], tuple[tuple[str, str], ...], str | None, str, str, str]:
+) -> tuple[
+    tuple[UUID, ...],
+    tuple[tuple[str, str], ...],
+    str | None,
+    str | None,
+    str,
+    str,
+    str,
+]:
     """Claim the currently pending or failed member changes."""
 
     with session_factory() as session:
@@ -114,6 +123,7 @@ def _claim_members(
         return (
             tuple(claimed_ids),
             active_members,
+            instance.slug,
             instance.argocd_application_name,
             instance.region.value,
             instance.environment.value,

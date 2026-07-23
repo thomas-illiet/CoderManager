@@ -1,7 +1,7 @@
 """Persistence operations for Coder instances."""
 
-import re
-import unicodedata
+import secrets
+import string
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from coder_manager.models import (
+    INSTANCE_SLUG_LENGTH,
     Database,
     DatabaseAllocation,
     Instance,
@@ -30,7 +31,7 @@ from coder_manager.tasks.common.registry import (
 )
 
 MAX_ACTION_LENGTH = 255
-MAX_DNS_LABEL_LENGTH = 63
+INSTANCE_SLUG_ALPHABET = string.ascii_lowercase + string.digits
 ENVIRONMENT_DNS_LABELS = {
     InstanceEnvironment.DEVELOPMENT: "dev",
     InstanceEnvironment.STAGING: "staging",
@@ -40,10 +41,6 @@ ENVIRONMENT_DNS_LABELS = {
 
 class InstanceAlreadyExistsError(Exception):
     """Raised when an instance conflicts with an existing placement or URL."""
-
-
-class InvalidApplicationSlugError(Exception):
-    """Raised when an application identifier cannot produce a valid DNS label."""
 
 
 class InstanceNotFoundError(Exception):
@@ -62,26 +59,19 @@ class InvalidInstanceActionError(Exception):
     """Raised when an internal action name is empty or too long."""
 
 
-def application_slug(name: str) -> str:
-    """Convert an application name into a lowercase ASCII DNS label."""
+def generate_instance_slug() -> str:
+    """Generate one opaque DNS-safe instance slug."""
 
-    ascii_name = (
-        unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
-    )
-    slug = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
-    if not slug or len(slug) > MAX_DNS_LABEL_LENGTH:
-        raise InvalidApplicationSlugError
-    return slug
+    return "".join(secrets.choice(INSTANCE_SLUG_ALPHABET) for _ in range(INSTANCE_SLUG_LENGTH))
 
 
 def instance_url(
-    application_name: str,
+    slug: str,
     payload: InstanceCreate,
     instance_domain: str,
 ) -> str:
     """Build the immutable public URL for a new instance."""
 
-    slug = application_slug(application_name)
     environment = ENVIRONMENT_DNS_LABELS[payload.environment]
     return f"https://{slug}.{payload.region.value}.{instance_domain}.{environment}.echonet"
 
@@ -188,14 +178,18 @@ class InstanceRepository:
         )
         # Persist the instance and its reserved database slot atomically.
         instance_id = uuid4()
+        slug = generate_instance_slug()
+        while await self._session.scalar(select(Instance.id).where(Instance.slug == slug)):
+            slug = generate_instance_slug()
         instance = Instance(
             id=instance_id,
             application=payload.application,
+            slug=slug,
             region=payload.region,
             environment=payload.environment,
             action="creating",
             status=InstanceStatus.PENDING,
-            instance_url=instance_url(payload.application, payload, instance_domain),
+            instance_url=instance_url(slug, payload, instance_domain),
             step=INSTANCE_CREATE_STEP_01,
         )
         job = add_job_execution(

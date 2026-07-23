@@ -1,5 +1,6 @@
 """Coder instance API and state transition tests."""
 
+import re
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -14,17 +15,20 @@ from coder_manager.api.routes import instances as instance_routes
 from coder_manager.config import Settings, get_settings
 from coder_manager.domains import argocd
 from coder_manager.main import app
-from coder_manager.models import InstanceEnvironment, InstanceRegion, InstanceStatus
+from coder_manager.models import Instance, InstanceEnvironment, InstanceRegion, InstanceStatus
 from coder_manager.repositories import (
     InstanceActionConflictError,
     InstanceAlreadyExistsError,
     InstanceDatabaseUnavailableError,
     InstanceNotFoundError,
     InstanceRepository,
-    InvalidApplicationSlugError,
     InvalidInstanceActionError,
 )
+from coder_manager.repositories import instances as instance_repositories
 from coder_manager.schemas import InstanceCreate
+
+TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
+SECOND_INSTANCE_SLUG = "m8n5q3y0r4bc"
 
 
 async def create_instance(
@@ -48,14 +52,23 @@ async def create_instance(
     return response.json()["resource"]
 
 
-async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
+async def test_create_instance_get_and_missing(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify the create instance get and missing scenario."""
 
+    monkeypatch.setattr(
+        instance_repositories,
+        "generate_instance_slug",
+        lambda: TEST_INSTANCE_SLUG,
+    )
     created = await create_instance(client, " mon équipe / portail ")
 
     assert set(created) == {
         "id",
         "application",
+        "slug",
         "region",
         "environment",
         "action",
@@ -70,10 +83,11 @@ async def test_create_instance_get_and_missing(client: AsyncClient) -> None:
         "updated_at",
     }
     assert created["application"] == "MON ÉQUIPE / PORTAIL"
+    assert created["slug"] == TEST_INSTANCE_SLUG
     assert created["action"] == "creating"
     assert created["status"] == "pending"
     assert created["argocd_application_name"] is None
-    assert created["instance_url"] == ("https://mon-equipe-portail.emea.code-studio.dev.echonet")
+    assert created["instance_url"] == (f"https://{TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet")
     assert UUID(created["database_id"])
     assert created["schema_name"] == f"coder_{UUID(created['id']).hex}"
     assert datetime.fromisoformat(created["created_at"])
@@ -121,6 +135,7 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
             first_application,
             environment=environment,
         )
+        assert re.fullmatch(r"[a-z0-9]{12}", instance["slug"])
         assert instance["instance_url"].endswith(f"code-studio.{dns_label}.echonet")
     await create_instance(client, second_application)
 
@@ -139,13 +154,23 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
     assert all(item["application"] == first_application for item in filtered.json()["items"])
 
 
-async def test_instance_domain_is_configurable(client: AsyncClient) -> None:
+async def test_instance_domain_is_configurable(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Build new instance URLs with the configured domain label."""
 
+    monkeypatch.setattr(
+        instance_repositories,
+        "generate_instance_slug",
+        lambda: TEST_INSTANCE_SLUG,
+    )
     app.dependency_overrides[get_settings] = lambda: Settings(instance_domain="coder-studio")
     instance = await create_instance(client, "Mon Équipe / Portail")
 
-    assert instance["instance_url"] == ("https://mon-equipe-portail.emea.coder-studio.dev.echonet")
+    assert instance["instance_url"] == (
+        f"https://{TEST_INSTANCE_SLUG}.emea.coder-studio.dev.echonet"
+    )
 
 
 async def test_create_rejects_legacy_application_id_and_extra_name(client: AsyncClient) -> None:
@@ -173,10 +198,10 @@ async def test_create_rejects_legacy_application_id_and_extra_name(client: Async
     assert with_name.status_code == 422
 
 
-async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
+async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
     client: AsyncClient,
 ) -> None:
-    """Verify the invalid enums pagination and application slugs are rejected scenario."""
+    """Reject invalid API values without imposing DNS rules on applications."""
 
     invalid_region = await client.post(
         "/api/v1/instances",
@@ -212,7 +237,7 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
         },
     )
 
-    invalid_slug = await client.post(
+    punctuation_application = await client.post(
         "/api/v1/instances",
         json={
             "application": "!!!",
@@ -220,7 +245,7 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
             "environment": "development",
         },
     )
-    long_slug = await client.post(
+    long_application = await client.post(
         "/api/v1/instances",
         json={
             "application": "a" * 64,
@@ -234,14 +259,16 @@ async def test_invalid_enums_pagination_and_application_slugs_are_rejected(
     assert invalid_page.status_code == 422
     assert empty_application.status_code == 422
     assert oversized_application.status_code == 422
-    assert invalid_slug.status_code == 422
-    assert long_slug.status_code == 422
+    assert punctuation_application.status_code == 201
+    assert long_application.status_code == 201
 
 
-async def test_placement_and_url_collisions_return_conflict(client: AsyncClient) -> None:
-    """Verify the placement and url collisions return conflict scenario."""
+async def test_placement_conflicts_and_previous_slug_collisions_are_allowed(
+    client: AsyncClient,
+) -> None:
+    """Keep placement uniqueness without deriving URL identity from applications."""
 
-    await create_instance(client, "My App")
+    first = await create_instance(client, "My App")
 
     duplicate_placement = await client.post(
         "/api/v1/instances",
@@ -251,7 +278,7 @@ async def test_placement_and_url_collisions_return_conflict(client: AsyncClient)
             "environment": "development",
         },
     )
-    duplicate_url = await client.post(
+    distinct_application = await client.post(
         "/api/v1/instances",
         json={
             "application": "my-app",
@@ -261,7 +288,43 @@ async def test_placement_and_url_collisions_return_conflict(client: AsyncClient)
     )
 
     assert duplicate_placement.status_code == 409
-    assert duplicate_url.status_code == 409
+    assert distinct_application.status_code == 201
+    second = distinct_application.json()["resource"]
+    assert first["slug"] != second["slug"]
+    assert first["instance_url"] != second["instance_url"]
+
+
+async def test_slug_collision_regenerates_and_legacy_null_slugs_coexist(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regenerate an occupied slug while allowing nullable historical rows."""
+
+    monkeypatch.setattr(
+        instance_repositories,
+        "generate_instance_slug",
+        lambda: TEST_INSTANCE_SLUG,
+    )
+    first = await create_instance(client, "FIRST SLUG")
+    candidates = iter((TEST_INSTANCE_SLUG, SECOND_INSTANCE_SLUG))
+    monkeypatch.setattr(
+        instance_repositories,
+        "generate_instance_slug",
+        lambda: next(candidates),
+    )
+    second = await create_instance(client, "SECOND SLUG")
+
+    assert first["slug"] == TEST_INSTANCE_SLUG
+    assert second["slug"] == SECOND_INSTANCE_SLUG
+    async with session_maker() as session:
+        first_record = await session.get(Instance, UUID(first["id"]))
+        second_record = await session.get(Instance, UUID(second["id"]))
+        assert first_record is not None
+        assert second_record is not None
+        first_record.slug = None
+        second_record.slug = None
+        await session.commit()
 
 
 async def test_same_placement_is_allowed_for_different_applications(client: AsyncClient) -> None:
@@ -370,6 +433,7 @@ def instance_record() -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid4(),
         application="APP",
+        slug=TEST_INSTANCE_SLUG,
         region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
         action="creating",
@@ -439,7 +503,6 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.parametrize(
     ("repository_error", "expected_status"),
     [
-        (InvalidApplicationSlugError, 422),
         (InstanceAlreadyExistsError, 409),
         (InstanceDatabaseUnavailableError, 409),
     ],
@@ -514,15 +577,17 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
 
     def remote_status(
         observed_id: UUID,
+        slug: str | None,
         attached_name: str | None,
         _settings: Settings,
     ) -> argocd.ArgoCdApplicationStatus:
         """Simulate the remote status operation used by this scenario."""
 
         assert observed_id == instance_id
+        assert slug == instance["slug"]
         assert attached_name is None
         return argocd.ArgoCdApplicationStatus(
-            application_name=f"coder-{instance_id.hex}",
+            application_name=str(instance["slug"]),
             sync_status="OutOfSync",
             health_status="Progressing",
             operation_phase="Running",
@@ -537,7 +602,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     assert response.status_code == 200
     assert response.json() == {
         "instance_id": str(instance_id),
-        "application_name": f"coder-{instance_id.hex}",
+        "application_name": instance["slug"],
         "sync_status": "OutOfSync",
         "health_status": "Progressing",
         "operation_phase": "Running",
@@ -578,6 +643,7 @@ async def test_instance_status_route_error_mapping(
 
     def fail_status(
         _instance_id: UUID,
+        _slug: str | None,
         _attached_name: str | None,
         _settings: Settings,
     ) -> None:

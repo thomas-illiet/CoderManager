@@ -141,15 +141,20 @@ combination of application, region, and environment remains unique.
 
 Instance creation is split into two durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
-name passed as a quoted identifier. The second creates or attaches an Argo CD Application named
-`<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance UUID without dashes>`. The Application uses a
-Helm chart from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
+name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
+`metadata.name` is the instance's generated slug. Existing attached Application names are retained;
+the legacy
+`<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance UUID without dashes>` name is used only when a
+historical instance has neither a slug nor an attached name. The Application uses a Helm chart from
+the configured Git repository through the `argocd-cyberark-plugin-helm` plugin.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
 Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
 `https://` scheme and supplies the allocated managed database's
 `server.config.database.username`, `password`, `host`, `database`, and `schema` values.
+The slug names the Argo CD Application metadata; Coder Manager does not add Helm
+`--name-template`, `nameOverride`, or `fullnameOverride` arguments.
 The database password is decrypted only inside the worker while constructing the Argo CD payload.
 `CODER_MANAGER_DEFAULT_ADMINS` is a comma-separated list that is always included in both Helm
 values without creating API member records.
@@ -181,11 +186,13 @@ is encrypted with AES-256-GCM in `token_enc` and bound to the instance UUID. Eve
 moves the instance to `updating/pending` and creates an `instance.update` job.
 `GET` returns `token_configured` and never token material.
 
-The API generates an immutable HTTPS URL from the application identifier, region, and environment. For
-example, application `My App` in `emea` and `development` receives
-`https://my-app.emea.code-studio.dev.echonet`. Environment DNS labels are `dev`, `staging`, and
-`cib` for development, staging, and production respectively. The `code-studio` DNS label defaults
-from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
+The API generates an immutable, globally unique, 12-character lowercase alphanumeric slug for each
+new instance and exposes it as `slug`. The immutable HTTPS URL combines that slug with the region
+and environment; for example, slug `k7m4p2x9q3ab` in `emea` and `development` receives
+`https://k7m4p2x9q3ab.emea.code-studio.dev.echonet`. Environment DNS labels are `dev`, `staging`,
+and `cib` for development, staging, and production respectively. The `code-studio` DNS label
+defaults from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
+Historical instances are not backfilled: their stored URL remains unchanged and `slug` is null.
 
 Deletion is asynchronous. It is accepted after `creating/success` or `updating/success`, returns
 HTTP 202, and changes the state to `deleting/pending`. Its four steps reserve workspace cleanup,
@@ -197,7 +204,7 @@ Every endpoint that starts a resource job returns `{ "resource": ..., "job": ...
 synchronization returns `{ "job": ... }`. `GET /api/v1/jobs/{job_id}` exposes the current step,
 status, attempt, resource reference, and timestamps. Instance and workspace reads also expose their
 latest `job_id` and active `step`; the step becomes null after successful completion.
-Instance responses expose both `created_at` and `updated_at`; the latter changes whenever the
+Instance responses expose `slug`, `created_at`, and `updated_at`; the latter changes whenever the
 instance action or status changes. They also expose the assigned `database_id` and deterministic
 `schema_name`; no database password is returned.
 

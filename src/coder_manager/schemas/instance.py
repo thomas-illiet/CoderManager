@@ -26,6 +26,7 @@ class InstanceRead(BaseModel):
 
     id: UUID
     application: str
+    slug: str | None
     region: InstanceRegion
     environment: InstanceEnvironment
     action: str

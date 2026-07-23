@@ -52,6 +52,9 @@ class InstanceStatus(StrEnum):
     ERROR = "error"
 
 
+INSTANCE_SLUG_LENGTH = 12
+
+
 def enum_values(enum_type: type[StrEnum]) -> list[str]:
     """Return enum values for consistent lowercase database persistence."""
 
@@ -75,6 +78,7 @@ class Instance(Base):
             "environment",
             name="uq_instances_application_region_environment",
         ),
+        UniqueConstraint("slug", name="uq_instances_slug"),
         UniqueConstraint("instance_url", name="uq_instances_instance_url"),
     )
 
@@ -83,6 +87,10 @@ class Instance(Base):
         String(255),
         nullable=False,
         index=True,
+    )
+    slug: Mapped[str | None] = mapped_column(
+        String(INSTANCE_SLUG_LENGTH),
+        nullable=True,
     )
     region: Mapped[InstanceRegion] = mapped_column(
         Enum(

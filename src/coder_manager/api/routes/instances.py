@@ -23,7 +23,6 @@ from coder_manager.repositories import (
     InstanceKubernetesRepository,
     InstanceNotFoundError,
     InstanceRepository,
-    InvalidApplicationSlugError,
     JobExecutionRepository,
 )
 from coder_manager.schemas import (
@@ -238,6 +237,7 @@ async def get_instance_status(
         remote = await run_in_threadpool(
             argocd.read_instance_application_status,
             instance.id,
+            instance.slug,
             instance.argocd_application_name,
             settings,
         )
@@ -284,15 +284,10 @@ async def create_instance(
             payload,
             instance_domain=settings.instance_domain,
         )
-    except InvalidApplicationSlugError as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Application cannot produce a valid DNS label",
-        ) from error
     except InstanceAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An instance already exists for this placement or URL",
+            detail="An instance already exists for this placement or slug",
         ) from error
     except InstanceDatabaseUnavailableError as error:
         raise HTTPException(

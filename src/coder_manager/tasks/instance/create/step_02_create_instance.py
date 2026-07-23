@@ -44,6 +44,7 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
                 ).all()
             )
             instance_id = instance.id
+            slug = instance.slug
             attached_name = instance.argocd_application_name
             region = instance.region.value
             environment = instance.environment.value
@@ -58,6 +59,7 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
         )
         application_name = argocd.reconcile_instance_application(
             instance_id,
+            slug,
             attached_name,
             tuple((username, role.value) for username, role in members),
             helm_values,

@@ -1,6 +1,7 @@
 """ORM models."""
 
 from coder_manager.models.instance import (
+    INSTANCE_SLUG_LENGTH,
     Instance,
     InstanceEnvironment,
     InstanceRegion,
@@ -15,6 +16,7 @@ from coder_manager.models.template_image import TemplateImage
 from coder_manager.models.workspace import Workspace, WorkspaceStatus
 
 __all__ = [
+    "INSTANCE_SLUG_LENGTH",
     "Database",
     "DatabaseAllocation",
     "Instance",

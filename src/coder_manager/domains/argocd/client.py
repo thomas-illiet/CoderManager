@@ -78,13 +78,14 @@ class ArgoCdClient:
     def ensure_application(
         self,
         instance_id: UUID,
+        slug: str | None,
         attached_name: str | None,
         members: Iterable[tuple[str, str]],
         helm_values: InstanceHelmValues,
     ) -> str:
         """Create or overwrite an Application and request one synchronization."""
 
-        name = application_name(self._config, instance_id, attached_name)
+        name = application_name(self._config, instance_id, slug, attached_name)
         desired = application_payload(
             self._config,
             name,
@@ -131,11 +132,12 @@ class ArgoCdClient:
     def get_application_status(
         self,
         instance_id: UUID,
+        slug: str | None,
         attached_name: str | None,
     ) -> ArgoCdApplicationStatus:
         """Return a sanitized snapshot of an Application's remote status."""
 
-        name = application_name(self._config, instance_id, attached_name)
+        name = application_name(self._config, instance_id, slug, attached_name)
         application = self._get_application(name)
         if application is None:
             raise ArgoCdApplicationNotFoundError(name)
@@ -144,11 +146,12 @@ class ArgoCdClient:
     def delete_application(
         self,
         instance_id: UUID,
+        slug: str | None,
         attached_name: str | None,
     ) -> None:
         """Delete an Application and its managed resources idempotently."""
 
-        name = application_name(self._config, instance_id, attached_name)
+        name = application_name(self._config, instance_id, slug, attached_name)
         path = f"api/v1/applications/{name}"
         response = self._client.delete(
             path,

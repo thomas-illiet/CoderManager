@@ -19,9 +19,11 @@ from coder_manager.domains.argocd import (
 )
 from coder_manager.domains.argocd import client as argocd_client
 from coder_manager.domains.argocd import service as argocd_service
+from coder_manager.domains.argocd.applications import application_name
 
+TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 EXPECTED_INSTANCE_HELM_ARGS = (
-    "--set global.baseDomain=coder.emea.code-studio.dev.echonet\n"
+    f"--set global.baseDomain={TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet\n"
     "--set server.config.database.username=db-user\n"
     "--set server.config.database.password=managed\\, secret\n"
     "--set server.config.database.host=postgres.internal\n"
@@ -65,7 +67,7 @@ def instance_helm_values(**overrides: object) -> InstanceHelmValues:
     values: dict[str, object] = {
         "region": "emea",
         "environment": "development",
-        "public_url": "https://coder.emea.code-studio.dev.echonet",
+        "public_url": f"https://{TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet",
         "database_username": "db-user",
         "database_password": SecretStr("managed, secret"),
         "database_host": "postgres.internal",
@@ -94,12 +96,13 @@ def test_create_application_and_sync_contract() -> None:
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         name = client.ensure_application(
             instance_id,
+            TEST_INSTANCE_SLUG,
             None,
             (("zoe", "user"), ("alice", "admin")),
             instance_helm_values(),
         )
 
-    assert name == "managed-12345678123456781234567812345678"
+    assert name == TEST_INSTANCE_SLUG
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", f"/root/api/v1/applications/{name}"),
         ("POST", "/root/api/v1/applications"),
@@ -190,6 +193,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         returned_name = client.ensure_application(
             uuid4(),
+            TEST_INSTANCE_SLUG,
             attached_name,
             (),
             instance_helm_values(region="apac", environment="staging"),
@@ -248,6 +252,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         client.ensure_application(
             uuid4(),
+            TEST_INSTANCE_SLUG,
             "attached",
             (),
             instance_helm_values(region="amer", environment="production"),
@@ -291,7 +296,7 @@ def test_application_status_is_read_without_triggering_sync() -> None:
     config = ArgoCdConfig.from_settings(configured_settings())
     instance_id = uuid4()
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        remote = client.get_application_status(instance_id, "attached")
+        remote = client.get_application_status(instance_id, TEST_INSTANCE_SLUG, "attached")
 
     assert remote.application_name == "attached"
     assert remote.sync_status == "Synced"
@@ -321,10 +326,11 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        partial = client.get_application_status(uuid4(), None)
+        partial = client.get_application_status(uuid4(), TEST_INSTANCE_SLUG, None)
         with pytest.raises(ArgoCdApplicationNotFoundError):
-            client.get_application_status(uuid4(), "missing")
+            client.get_application_status(uuid4(), TEST_INSTANCE_SLUG, "missing")
 
+    assert partial.application_name == TEST_INSTANCE_SLUG
     assert partial.sync_status is None
     assert partial.health_status is None
     assert partial.operation_phase is None
@@ -347,8 +353,8 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
     config = ArgoCdConfig.from_settings(configured_settings())
     instance_id = uuid4()
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        client.delete_application(instance_id, "attached")
-        client.delete_application(instance_id, "attached")
+        client.delete_application(instance_id, TEST_INSTANCE_SLUG, "attached")
+        client.delete_application(instance_id, TEST_INSTANCE_SLUG, "attached")
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("DELETE", "/root/api/v1/applications/attached"),
@@ -378,7 +384,7 @@ def test_delete_instance_application_uses_process_configuration(
 ) -> None:
     """Use the configured client when the worker invokes the deletion service."""
 
-    deleted: list[tuple[UUID, str | None]] = []
+    deleted: list[tuple[UUID, str | None, str | None]] = []
     instance_id = uuid4()
 
     class StubClient:
@@ -395,17 +401,22 @@ def test_delete_instance_application_uses_process_configuration(
         def __exit__(self, *_args: object) -> None:
             """Exit the client context."""
 
-        def delete_application(self, deleted_id: UUID, attached_name: str | None) -> None:
+        def delete_application(
+            self,
+            deleted_id: UUID,
+            slug: str | None,
+            attached_name: str | None,
+        ) -> None:
             """Capture the requested Application deletion."""
 
-            deleted.append((deleted_id, attached_name))
+            deleted.append((deleted_id, slug, attached_name))
 
     monkeypatch.setattr(argocd_service, "get_settings", configured_settings)
     monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
 
-    argocd_service.delete_instance_application(instance_id, "attached")
+    argocd_service.delete_instance_application(instance_id, TEST_INSTANCE_SLUG, "attached")
 
-    assert deleted == [(instance_id, "attached")]
+    assert deleted == [(instance_id, TEST_INSTANCE_SLUG, "attached")]
 
 
 @pytest.mark.parametrize(
@@ -431,6 +442,7 @@ def test_invalid_existing_application_response_is_rejected(response: httpx.Respo
     ):
         client.ensure_application(
             uuid4(),
+            TEST_INSTANCE_SLUG,
             "attached",
             (),
             instance_helm_values(),
@@ -452,6 +464,7 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
     ):
         client.ensure_application(
             uuid4(),
+            TEST_INSTANCE_SLUG,
             None,
             (),
             instance_helm_values(),
@@ -462,6 +475,20 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
     assert "super-secret-token" not in message
     assert "private response" not in message
     assert "super-secret-token" not in repr(config)
+
+
+def test_application_name_prefers_attachment_then_slug_then_legacy_fallback() -> None:
+    """Resolve current and historical Application names without renaming attachments."""
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    instance_id = UUID("12345678-1234-5678-1234-567812345678")
+
+    assert application_name(config, instance_id, TEST_INSTANCE_SLUG, "attached") == "attached"
+    assert application_name(config, instance_id, TEST_INSTANCE_SLUG, None) == TEST_INSTANCE_SLUG
+    assert (
+        application_name(config, instance_id, None, None)
+        == "managed-12345678123456781234567812345678"
+    )
 
 
 @pytest.mark.parametrize("skip_ssl_verify", [False, True])

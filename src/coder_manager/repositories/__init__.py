@@ -12,7 +12,6 @@ from coder_manager.repositories.instances import (
     InstanceDatabaseUnavailableError,
     InstanceNotFoundError,
     InstanceRepository,
-    InvalidApplicationSlugError,
     InvalidInstanceActionError,
 )
 from coder_manager.repositories.job_executions import (
@@ -88,7 +87,6 @@ __all__ = [
     "InstanceKubernetesRepository",
     "InstanceNotFoundError",
     "InstanceRepository",
-    "InvalidApplicationSlugError",
     "InvalidInstanceActionError",
     "InvalidMemberActionError",
     "InvalidWorkspaceActionError",

@@ -31,8 +31,9 @@ def step_02_remove_instance(job_id: str) -> dict[str, str]:
             if instance is None:
                 msg = "Instance is missing"
                 raise RuntimeError(msg)
+            slug = instance.slug
             attached_name = instance.argocd_application_name
-        argocd.delete_instance_application(required_resource_id(claim), attached_name)
+        argocd.delete_instance_application(required_resource_id(claim), slug, attached_name)
         advanced = advance_execution(
             claim,
             next_task_name=INSTANCE_DELETE_STEP_03_TASK,
