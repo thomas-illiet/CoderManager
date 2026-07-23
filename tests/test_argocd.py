@@ -22,9 +22,9 @@ from coder_manager.domains.argocd import service as argocd_service
 
 EXPECTED_INSTANCE_HELM_ARGS = (
     "--set global.config.publicURL=https://coder.emea.code-studio.dev.echonet "
-    "--set 'global.wildcardAccessHost=*.coder.emea.code-studio.dev.echonet' "
+    "--set global.wildcardAccessHost=*.coder.emea.code-studio.dev.echonet "
     "--set server.config.database.username=db-user "
-    "--set 'server.config.database.password=managed\\, secret' "
+    "--set server.config.database.password=managed\\, secret "
     "--set server.config.database.host=postgres.internal "
     "--set server.config.database.database=coder "
     "--set server.config.database.schema=coder_instance"
@@ -128,8 +128,9 @@ def test_create_application_and_sync_contract() -> None:
                     "name": "HELM_ARGS",
                     "value": (
                         "-f values-global.yaml -f values-dev.yaml "
-                        "--set users=alice,root.admin,zoe "
-                        f"--set admins=alice,root.admin {EXPECTED_INSTANCE_HELM_ARGS}"
+                        "--set policy.config.allowedUsernames=alice,root.admin,zoe "
+                        "--set policy.config.adminUsernames=alice,root.admin "
+                        f"{EXPECTED_INSTANCE_HELM_ARGS}"
                     ),
                 }
             ],
@@ -147,6 +148,7 @@ def test_create_application_and_sync_contract() -> None:
             ],
         },
     }
+    assert "'" not in payload["spec"]["source"]["plugin"]["env"][0]["value"]
     assert payload["spec"]["destination"] == {
         "name": "in-cluster",
         "namespace": name,
@@ -206,7 +208,9 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
-                "-f values-global.yaml -f values-stg.yaml --set users= --set admins= "
+                "-f values-global.yaml -f values-stg.yaml "
+                "--set policy.config.allowedUsernames= "
+                "--set policy.config.adminUsernames= "
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
             ),
         }
@@ -257,7 +261,8 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "-f values-global.yaml -f values-prd.yaml "
-                "--set users=alice,root.admin --set admins=alice,root.admin "
+                "--set policy.config.allowedUsernames=alice,root.admin "
+                "--set policy.config.adminUsernames=alice,root.admin "
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
             ),
         }

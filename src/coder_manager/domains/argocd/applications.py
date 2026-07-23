@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shlex
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -134,10 +133,10 @@ def application_payload(
 
 
 def _helm_scalar_argument(name: str, value: str) -> str:
-    """Build one shell-safe Helm scalar assignment."""
+    """Build one unquoted Helm scalar assignment."""
 
     escaped_value = value.replace("\\", "\\\\").replace(",", "\\,")
-    return f"--set {shlex.quote(f'{name}={escaped_value}')}"
+    return f"--set {name}={escaped_value}"
 
 
 def application_update_payload(
