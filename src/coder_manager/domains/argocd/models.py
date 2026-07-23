@@ -20,14 +20,20 @@ class InstanceHelmValues:
     database_schema: str
 
     @property
-    def wildcard_access_host(self) -> str:
-        """Return the wildcard hostname associated with the public instance URL."""
+    def base_domain(self) -> str:
+        """Return the hostname of the public instance URL without its scheme."""
 
         hostname = urlsplit(self.public_url).hostname
         if hostname is None:  # pragma: no cover - persisted instance URL invariant
             msg = "Instance public URL does not contain a hostname"
             raise ValueError(msg)
-        return f"*.{hostname}"
+        return hostname
+
+    @property
+    def wildcard_access_host(self) -> str:
+        """Return the wildcard hostname associated with the public instance URL."""
+
+        return f"*.{self.base_domain}"
 
 
 @dataclass(frozen=True)

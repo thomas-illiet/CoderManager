@@ -193,6 +193,9 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "success"}
     assert len(reconciled_values) == 1
     assert reconciled_values[0].public_url == instance["instance_url"]
+    assert reconciled_values[0].base_domain == str(instance["instance_url"]).removeprefix(
+        "https://"
+    )
     assert reconciled_values[0].wildcard_access_host == (
         f"*.{str(instance['instance_url']).removeprefix('https://')}"
     )

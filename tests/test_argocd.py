@@ -21,7 +21,7 @@ from coder_manager.domains.argocd import client as argocd_client
 from coder_manager.domains.argocd import service as argocd_service
 
 EXPECTED_INSTANCE_HELM_ARGS = (
-    "--set global.publicURL=https://coder.emea.code-studio.dev.echonet\n"
+    "--set global.baseDomain=coder.emea.code-studio.dev.echonet\n"
     "--set server.config.database.username=db-user\n"
     "--set server.config.database.password=managed\\, secret\n"
     "--set server.config.database.host=postgres.internal\n"
