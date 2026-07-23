@@ -325,10 +325,9 @@ redelivers the exact allowlisted step for `pending` and `error` jobs and first r
 `running` jobs to `pending`. Unknown task names are logged and ignored. The healthcheck and scanner
 are intentionally not tracked as jobs.
 
-Migration `20260720_0011` backfills known non-success instance and workspace actions as `pending`
-jobs. Already successful resources keep `job_id` and `step` null, and no remote schema is created
-retroactively for them. The task registry change is intentionally breaking: stop the API, worker,
-and Beat while applying the migration, then restart all three with the new image.
+The initial Alembic baseline creates job rows and lifecycle columns directly. Deploy schema changes
+with the same image as the API, worker, and Beat so every process uses the matching task registry
+and database contract.
 
 FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`. Celery tasks use a
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection
