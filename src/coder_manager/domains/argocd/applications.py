@@ -119,7 +119,7 @@ def application_payload(
                 },
             },
             "destination": {
-                "name": config.destination_name,
+                "name": config.destination_for(helm_values.environment),
                 "namespace": APPLICATION_NAMESPACE,
             },
             "syncPolicy": {

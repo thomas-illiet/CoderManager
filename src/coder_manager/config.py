@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     argocd_repository_url: str | None = None
     argocd_repository_path: str | None = None
     argocd_target_revision: str | None = None
-    argocd_destination_name: str | None = None
+    argocd_development_destination_name: str | None = None
+    argocd_staging_destination_name: str | None = None
+    argocd_production_destination_name: str | None = None
     cyberark_development_app_id: str | None = None
     cyberark_development_cert_name: str | None = None
     cyberark_development_key_name: str | None = None

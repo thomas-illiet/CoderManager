@@ -44,7 +44,9 @@ def configured_settings(**overrides: object) -> Settings:
         "argocd_repository_url": "https://git.test/platform.git",
         "argocd_repository_path": "charts/coder",
         "argocd_target_revision": "v1.2.3",
-        "argocd_destination_name": "in-cluster",
+        "argocd_development_destination_name": "development-cluster",
+        "argocd_staging_destination_name": "staging-cluster",
+        "argocd_production_destination_name": "production-cluster",
         "default_admins": " Root.Admin,alice ",
     }
     for environment in ("development", "staging", "production"):
@@ -150,7 +152,7 @@ def test_create_application_and_sync_contract() -> None:
     }
     assert "'" not in payload["spec"]["source"]["plugin"]["env"][0]["value"]
     assert payload["spec"]["destination"] == {
-        "name": "in-cluster",
+        "name": "development-cluster",
         "namespace": "app-coder-system",
     }
     assert payload["spec"]["syncPolicy"] == {
@@ -222,6 +224,10 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         "keyName": "staging-key",
         "safe": "staging-safe",
     }
+    assert update["spec"]["destination"] == {
+        "name": "staging-cluster",
+        "namespace": "app-coder-system",
+    }
     assert "status" not in update
 
 
@@ -268,6 +274,10 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             ),
         }
     ]
+    assert update["spec"]["destination"] == {
+        "name": "production-cluster",
+        "namespace": "app-coder-system",
+    }
 
 
 def test_application_status_is_read_without_triggering_sync() -> None:
@@ -539,6 +549,10 @@ def test_client_tls_and_timeout_configuration(
         (
             configured_settings(default_admins="x" * 256),
             "longer than 255",
+        ),
+        (
+            configured_settings(argocd_production_destination_name=" "),
+            "CODER_MANAGER_ARGOCD_PRODUCTION_DESTINATION_NAME",
         ),
         (
             configured_settings(cyberark_production_safe=" "),

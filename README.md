@@ -162,11 +162,13 @@ included in the allowed-user and administrator values.
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
 `CODER_MANAGER_ARGOCD_PROJECT`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`, and
-`CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure one CyberArk plugin map for each environment.
-Variable names follow `CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where environments are
-`DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and
-`SAFE`. All 12 values are required for Argo CD reconciliation; `.env.example` lists the complete
-matrix. TLS certificate verification is enabled by default; set
+one destination per environment with
+`CODER_MANAGER_ARGOCD_<ENVIRONMENT>_DESTINATION_NAME`. Configure one CyberArk plugin map for each
+environment. Variable names follow `CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where
+environments are `DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`, `CERT_NAME`,
+`KEY_NAME`, and `SAFE`. All three destinations and all 12 CyberArk values are required for Argo CD
+reconciliation; `.env.example` lists the complete matrix. TLS certificate verification is enabled
+by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
 worker requests synchronization but does not wait for Argo CD health convergence.
 

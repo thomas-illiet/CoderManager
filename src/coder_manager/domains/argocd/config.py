@@ -44,7 +44,7 @@ class ArgoCdConfig:
     repository_url: str
     repository_path: str
     target_revision: str
-    destination_name: str
+    destination_names: Mapping[str, str]
     cyberark_parameters: Mapping[str, CyberArkParameters]
     default_admins: tuple[str, ...]
 
@@ -61,8 +61,8 @@ class ArgoCdConfig:
             "CODER_MANAGER_ARGOCD_REPOSITORY_URL": settings.argocd_repository_url,
             "CODER_MANAGER_ARGOCD_REPOSITORY_PATH": settings.argocd_repository_path,
             "CODER_MANAGER_ARGOCD_TARGET_REVISION": settings.argocd_target_revision,
-            "CODER_MANAGER_ARGOCD_DESTINATION_NAME": settings.argocd_destination_name,
         }
+        required.update(_destination_settings(settings))
         required.update(_cyberark_settings(settings))
         missing = [name for name, value in required.items() if not value or not value.strip()]
         if missing:
@@ -85,10 +85,19 @@ class ArgoCdConfig:
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
             target_revision=_required_value(required, "CODER_MANAGER_ARGOCD_TARGET_REVISION"),
-            destination_name=_required_value(required, "CODER_MANAGER_ARGOCD_DESTINATION_NAME"),
+            destination_names=_destination_names(required),
             cyberark_parameters=_cyberark_parameters(required),
             default_admins=_parse_default_admins(settings.default_admins),
         )
+
+    def destination_for(self, environment: str) -> str:
+        """Return the Argo CD destination configured for one environment."""
+
+        try:
+            return self.destination_names[environment]
+        except KeyError as error:  # pragma: no cover - callers use domain enum values
+            msg = f"Unsupported Argo CD destination: {environment}"
+            raise ArgoCdConfigurationError(msg) from error
 
     def cyberark_for(self, environment: str) -> CyberArkParameters:
         """Return the CyberArk parameters configured for one instance target."""
@@ -107,6 +116,38 @@ def _required_value(values: Mapping[str, str | None], name: str) -> str:
     if value is None:  # pragma: no cover - checked by caller
         raise ArgoCdConfigurationError(name)
     return value.strip()
+
+
+def _destination_settings(settings: Settings) -> dict[str, str | None]:
+    """Collect the three environment-specific Argo CD destinations."""
+
+    return {
+        _destination_environment_name(environment): getattr(
+            settings,
+            f"argocd_{environment}_destination_name",
+        )
+        for environment in INSTANCE_ENVIRONMENTS
+    }
+
+
+def _destination_names(values: Mapping[str, str | None]) -> Mapping[str, str]:
+    """Build an immutable destination lookup for every environment."""
+
+    return MappingProxyType(
+        {
+            environment: _required_value(
+                values,
+                _destination_environment_name(environment),
+            )
+            for environment in INSTANCE_ENVIRONMENTS
+        }
+    )
+
+
+def _destination_environment_name(environment: str) -> str:
+    """Return the public destination environment variable name."""
+
+    return f"CODER_MANAGER_ARGOCD_{environment}_DESTINATION_NAME".upper()
 
 
 def _cyberark_settings(settings: Settings) -> dict[str, str | None]:
