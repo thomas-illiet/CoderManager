@@ -19,7 +19,7 @@ from coder_manager.domains.argocd import (
 )
 from coder_manager.domains.argocd import client as argocd_client
 from coder_manager.domains.argocd import service as argocd_service
-from coder_manager.domains.argocd.applications import application_name
+from coder_manager.domains.argocd.applications import application_name, application_payload
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
@@ -131,8 +131,9 @@ def test_create_application_and_sync_contract() -> None:
                     "name": "HELM_ARGS",
                     "value": (
                         "--namespace app-coder-system\n"
-                        "--set policy.config.allowedUsernames=admin,alice,root.admin,zoe\n"
-                        "--set policy.config.adminUsernames=admin,alice,root.admin\n"
+                        "--set policy.config.allowedUsernames="
+                        "admin\\,alice\\,root.admin\\,zoe\n"
+                        "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
                         f"{EXPECTED_INSTANCE_HELM_ARGS}"
                     ),
                 }
@@ -161,6 +162,24 @@ def test_create_application_and_sync_contract() -> None:
             "selfHeal": True,
         }
     }
+
+
+def test_policy_username_lists_escape_helm_commas() -> None:
+    """Keep comma-separated policy values in one Helm scalar assignment."""
+
+    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    payload = application_payload(
+        config,
+        TEST_APPLICATION_NAME,
+        uuid4(),
+        (("h45221", "user"),),
+        instance_helm_values(),
+    )
+
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert "--set policy.config.allowedUsernames=admin\\,h45221\n" in helm_arguments
+    assert "--set policy.config.adminUsernames=admin\n" in helm_arguments
+    assert "'" not in helm_arguments
 
 
 def test_existing_application_is_attached_and_overwritten() -> None:
@@ -268,8 +287,8 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--namespace app-coder-system\n"
-                "--set policy.config.allowedUsernames=admin,alice,root.admin\n"
-                "--set policy.config.adminUsernames=admin,alice,root.admin\n"
+                "--set policy.config.allowedUsernames=admin\\,alice\\,root.admin\n"
+                "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
             ),
         }

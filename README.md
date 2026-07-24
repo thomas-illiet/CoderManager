@@ -147,7 +147,9 @@ historical instance with neither a slug nor an attached name. The Application us
 from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin. The third
 creates or recovers Coder's first administrator account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
-`cyberark` map containing `appId`, `certName`, `keyName`, and `safe` parameters.
+`cyberark` map containing `appId`, `certName`, `keyName`, and `safe` parameters. Commas in these
+two Helm scalar assignments are backslash-escaped so Helm keeps each list as one value; the chart
+still receives the comma-separated string.
 Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
 `https://` scheme and supplies the allocated managed database's

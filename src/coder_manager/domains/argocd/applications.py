@@ -55,8 +55,14 @@ def application_payload(
     helm_arguments = "\n".join(
         (
             f"--namespace {APPLICATION_NAMESPACE}",
-            f"--set policy.config.allowedUsernames={','.join(users)}",
-            f"--set policy.config.adminUsernames={','.join(admins)}",
+            _helm_scalar_argument(
+                "policy.config.allowedUsernames",
+                ",".join(users),
+            ),
+            _helm_scalar_argument(
+                "policy.config.adminUsernames",
+                ",".join(admins),
+            ),
             _helm_scalar_argument("global.baseDomain", helm_values.base_domain),
             _helm_scalar_argument(
                 "server.config.database.username",
