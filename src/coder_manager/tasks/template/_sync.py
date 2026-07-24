@@ -75,7 +75,6 @@ def fetch_template_archive(snapshot: TemplateSourceSnapshot) -> TemplateArchive:
         snapshot.git_url,
         snapshot.branch,
         snapshot.source_path,
-        get_settings().git_allowed_hosts,
     )
 
 

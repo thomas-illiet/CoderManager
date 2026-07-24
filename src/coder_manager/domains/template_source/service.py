@@ -11,14 +11,10 @@ import tempfile
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from coder_manager.domains.template_source.errors import TemplateSourceError
 
 TEMPLATE_ARCHIVE_LIMIT = 1 << 20
-SCP_GIT_URL_PATTERN = re.compile(
-    r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+):(?P<path>[^\s]+)$"
-)
 GIT_SSH_COMMAND = (
     "ssh -oBatchMode=yes -oStrictHostKeyChecking=yes -oIdentitiesOnly=yes -oForwardAgent=no"
 )
@@ -30,19 +26,6 @@ class TemplateArchive:
 
     commit: str
     content: bytes
-
-
-def git_host(git_url: str) -> str:
-    """Return the normalized host from one supported remote URL."""
-
-    parsed = urlsplit(git_url)
-    if parsed.scheme in {"https", "ssh"} and parsed.hostname is not None:
-        return parsed.hostname.lower()
-    match = SCP_GIT_URL_PATTERN.fullmatch(git_url)
-    if match is not None:
-        return match.group("host").lower()
-    msg = "Template Git URL is unsupported"
-    raise TemplateSourceError(msg)
 
 
 def _git_environment() -> dict[str, str]:
@@ -162,15 +145,8 @@ def fetch_branch_archive(
     git_url: str,
     branch: str,
     source_path: str,
-    allowed_hosts: str,
 ) -> TemplateArchive:
     """Fetch one exact branch HEAD and return its Coder-compatible archive."""
-
-    allowed = {host.strip().lower() for host in allowed_hosts.split(",") if host.strip()}
-    host = git_host(git_url)
-    if host not in allowed:
-        msg = "Template Git host is not allowed"
-        raise TemplateSourceError(msg)
 
     with tempfile.TemporaryDirectory(prefix="coder-manager-template-") as temporary:
         repository = Path(temporary) / "repository"

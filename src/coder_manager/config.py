@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
     job_retry_interval_seconds: int = Field(default=60, ge=1)
     job_stale_after_seconds: int = Field(default=300, ge=1)
-    git_allowed_hosts: str = ""
     template_sync_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
     template_sync_timeout_seconds: int = Field(default=1800, ge=1)
     instance_domain: str = Field(

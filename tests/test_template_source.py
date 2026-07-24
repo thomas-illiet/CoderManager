@@ -11,7 +11,6 @@ from coder_manager.domains.template_source import (
     TemplateSourceError,
     archive_template_directory,
     fetch_branch_archive,
-    git_host,
     service,
 )
 
@@ -59,21 +58,7 @@ def test_archive_requires_root_terraform_and_enforces_limit(tmp_path: Path) -> N
         archive_template_directory(tmp_path)
 
 
-@pytest.mark.parametrize(
-    ("url", "host"),
-    [
-        ("https://git.example.com/group/template.git", "git.example.com"),
-        ("ssh://git@git.example.com/group/template.git", "git.example.com"),
-        ("git@git.example.com:group/template.git", "git.example.com"),
-    ],
-)
-def test_git_host_supports_configured_transport_shapes(url: str, host: str) -> None:
-    """Extract one exact allowlist host from every accepted URL shape."""
-
-    assert git_host(url) == host
-
-
-def test_fetch_targets_exact_branch_and_rejects_unknown_host(
+def test_fetch_targets_exact_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Fetch only refs/heads and archive the configured repository subdirectory."""
@@ -98,17 +83,8 @@ def test_fetch_targets_exact_branch_and_rejects_unknown_host(
         "git@git.example.com:group/template.git",
         "feature/python",
         "templates/python",
-        "other.example.com, git.example.com",
     )
 
     assert archive.commit == commit
     assert any("refs/heads/feature/python" in arguments for arguments in calls)
     assert all("refs/tags/" not in " ".join(arguments) for arguments in calls)
-
-    with pytest.raises(TemplateSourceError, match="not allowed"):
-        fetch_branch_archive(
-            "git@unknown.example.com:group/template.git",
-            "main",
-            ".",
-            "git.example.com",
-        )

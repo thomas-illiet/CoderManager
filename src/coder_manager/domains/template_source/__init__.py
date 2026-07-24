@@ -6,7 +6,6 @@ from coder_manager.domains.template_source.service import (
     TemplateArchive,
     archive_template_directory,
     fetch_branch_archive,
-    git_host,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "TemplateSourceError",
     "archive_template_directory",
     "fetch_branch_archive",
-    "git_host",
 ]
