@@ -90,11 +90,21 @@ async def test_provider_get_distinguishes_missing_instance_and_configuration(
 
     unconfigured = await client.get(f"/api/v1/instances/{instance['id']}/provider")
     missing = await client.get(f"/api/v1/instances/{uuid4()}/provider")
+    unconfigured_download = await client.get(
+        f"/api/v1/instances/{instance['id']}/provider/configuration"
+    )
+    missing_download = await client.get(f"/api/v1/instances/{uuid4()}/provider/configuration")
 
     assert unconfigured.status_code == 404
     assert unconfigured.json() == {"detail": "Kubernetes provider not configured"}
     assert missing.status_code == 404
     assert missing.json() == {"detail": "Instance not found"}
+    assert unconfigured_download.status_code == 404
+    assert unconfigured_download.json() == {"detail": "Kubernetes provider not configured"}
+    assert unconfigured_download.headers["cache-control"] == "no-store"
+    assert missing_download.status_code == 404
+    assert missing_download.json() == {"detail": "Instance not found"}
+    assert missing_download.headers["cache-control"] == "no-store"
 
 
 async def test_provider_upload_encrypts_arbitrary_bytes_and_requests_update(
@@ -151,8 +161,14 @@ async def test_provider_upload_encrypts_arbitrary_bytes_and_requests_update(
         assert instance_record.status is InstanceStatus.PENDING
 
     fetched = await client.get(f"/api/v1/instances/{instance_id}/provider")
+    downloaded = await client.get(f"/api/v1/instances/{instance_id}/provider/configuration")
     assert fetched.status_code == 200
     assert fetched.json() == created_resource
+    assert downloaded.status_code == 200
+    assert downloaded.content == KUBECONFIG
+    assert downloaded.headers["content-type"] == "application/octet-stream"
+    assert downloaded.headers["cache-control"] == "no-store"
+    assert downloaded.headers["content-disposition"] == 'attachment; filename="kubeconfig"'
 
 
 async def test_provider_accepts_empty_file_and_rejects_missing_or_legacy_payloads(
@@ -237,6 +253,40 @@ async def test_provider_is_create_only_and_redacts_crypto_failures(
     assert unavailable.status_code == 503
     assert unavailable.json() == {"detail": "Kubeconfig encryption is not configured"}
     assert leak_marker.decode() not in unavailable.text
+
+
+async def test_provider_download_redacts_crypto_and_decryption_failures(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Return non-cacheable configuration errors without exposing ciphertext."""
+
+    instance = await create_instance(client, "DOWNLOAD FAILURE PROVIDER")
+    instance_id = UUID(instance["id"])
+    await mark_instance_idle(session_maker, instance_id, expected_action="creating")
+    created = await client.post(
+        f"/api/v1/instances/{instance_id}/provider",
+        files=kubeconfig_file(),
+    )
+    assert created.status_code == 202
+
+    app.dependency_overrides[get_settings] = lambda: Settings(crypto_key="invalid")
+    unavailable = await client.get(f"/api/v1/instances/{instance_id}/provider/configuration")
+    assert unavailable.status_code == 503
+    assert unavailable.json() == {"detail": "Kubeconfig encryption is not configured"}
+    assert unavailable.headers["cache-control"] == "no-store"
+
+    app.dependency_overrides[get_settings] = lambda: Settings(crypto_key=CRYPTO_KEY)
+    async with session_maker() as session:
+        provider = await session.get(InstanceKubernetes, instance_id)
+        assert provider is not None
+        provider.kubeconfig_enc = b"invalid-envelope"
+        await session.commit()
+    undecryptable = await client.get(f"/api/v1/instances/{instance_id}/provider/configuration")
+    assert undecryptable.status_code == 503
+    assert undecryptable.json() == {"detail": "Kubeconfig cannot be decrypted"}
+    assert undecryptable.headers["cache-control"] == "no-store"
+    assert KUBECONFIG not in undecryptable.content
 
 
 async def test_provider_repository_covers_resource_and_create_only_boundaries(

@@ -14,6 +14,7 @@ from coder_manager.crypto import (
     InstancePasswordCipher,
     InstancePasswordDecryptionError,
     KubeconfigCipher,
+    KubeconfigDecryptionError,
 )
 from coder_manager.database import get_session
 from coder_manager.domains import argocd
@@ -66,6 +67,7 @@ def kubeconfig_cipher(settings: Settings) -> KubeconfigCipher:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Kubeconfig encryption is not configured",
+            headers=NO_STORE_HEADERS,
         ) from error
 
 
@@ -199,6 +201,52 @@ async def get_instance_provider(
             detail="Kubernetes provider not configured",
         ) from error
     return kubernetes_provider_read(provider)
+
+
+@router.get(
+    "/{instance_id}/provider/configuration",
+    summary="Download an instance Kubernetes provider configuration",
+)
+async def get_instance_provider_configuration(
+    instance_id: UUID,
+    session: SessionDependency,
+    settings: SettingsDependency,
+) -> Response:
+    """Return the decrypted kubeconfig as a non-cacheable binary download."""
+
+    try:
+        provider = await InstanceKubernetesRepository(session).get(instance_id)
+    except InstanceNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+            headers=NO_STORE_HEADERS,
+        ) from error
+    except InstanceKubernetesNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Kubernetes provider not configured",
+            headers=NO_STORE_HEADERS,
+        ) from error
+    try:
+        kubeconfig = kubeconfig_cipher(settings).decrypt(
+            provider.kubeconfig_enc,
+            provider.instance_id,
+        )
+    except KubeconfigDecryptionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Kubeconfig cannot be decrypted",
+            headers=NO_STORE_HEADERS,
+        ) from error
+    return Response(
+        content=kubeconfig,
+        media_type="application/octet-stream",
+        headers={
+            **NO_STORE_HEADERS,
+            "Content-Disposition": 'attachment; filename="kubeconfig"',
+        },
+    )
 
 
 @router.post(

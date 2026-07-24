@@ -57,6 +57,7 @@ All endpoints are under `/api/v1`:
 | `POST` | `/instances` | Request instance creation |
 | `POST` | `/instances/{id}/sync` | Force Argo CD reconciliation |
 | `GET` | `/instances/{id}/provider` | Get the Kubernetes provider upload status |
+| `GET` | `/instances/{id}/provider/configuration` | Download the decrypted kubeconfig |
 | `POST` | `/instances/{id}/provider` | Upload the provider kubeconfig and update the instance |
 | `DELETE` | `/instances/{id}` | Request instance deletion |
 | `GET` | `/instances/{id}/members?page=1&page_size=20` | List instance members |
@@ -198,6 +199,10 @@ content, or whether the file is empty. The raw bytes are encrypted with AES-256-
 `updating/pending` and creates an `instance.update` job. A configured provider cannot be replaced,
 and there is no provider `PUT` endpoint. `GET` returns `kubeconfig_configured` and timestamps
 without exposing file or ciphertext material.
+`GET /api/v1/instances/{id}/provider/configuration` decrypts and returns the original bytes as an
+`application/octet-stream` attachment named `kubeconfig`. Successful and error responses use
+`Cache-Control: no-store`; missing instances or providers return 404, while unavailable encryption
+or an unauthenticatable envelope returns a redacted 503.
 
 The provider upload schema is a breaking change. Its migration deletes all legacy provider rows
 containing `host`, `namespace`, `ca`, and `token_enc` without changing instance state or scheduling
