@@ -15,6 +15,8 @@ from coder_manager.models import (
     InstanceStatus,
     JobExecution,
     JobStatus,
+    Template,
+    TemplateSyncStatus,
     Workspace,
     WorkspaceStatus,
 )
@@ -31,6 +33,7 @@ RESOURCE_ACTIONS = {
     "instance.create": "creating",
     "instance.update": "updating",
     "instance.delete": "deleting",
+    "template.sync": "syncing",
     "workspace.create": "creating",
     "workspace.update": "updating",
     "workspace.delete": "deleting",
@@ -54,12 +57,16 @@ def _resource_for_job(
     job: JobExecution,
     *,
     lock: bool,
-) -> Instance | Workspace | None:
+) -> Instance | Template | Workspace | None:
     """Load the resource attached to a job, optionally locking it."""
 
     if job.resource_type is None or job.resource_id is None:
         return None
-    model = {"instance": Instance, "workspace": Workspace}.get(job.resource_type)
+    model = {
+        "instance": Instance,
+        "template": Template,
+        "workspace": Workspace,
+    }.get(job.resource_type)
     if model is None:
         return None
     statement = select(model).where(model.id == job.resource_id)
@@ -68,7 +75,10 @@ def _resource_for_job(
     return session.scalar(statement)
 
 
-def _resource_matches(job: JobExecution, resource: Instance | Workspace | None) -> bool:
+def _resource_matches(
+    job: JobExecution,
+    resource: Instance | Template | Workspace | None,
+) -> bool:
     """Check that the current resource still owns this exact job step."""
 
     if job.resource_type is None:
@@ -110,6 +120,8 @@ def claim_execution(
         job.updated_at = datetime.now(UTC)
         if isinstance(resource, Instance):
             resource.status = InstanceStatus.RUNNING
+        elif isinstance(resource, Template):
+            resource.sync_status = TemplateSyncStatus.RUNNING
         elif isinstance(resource, Workspace):
             resource.status = WorkspaceStatus.RUNNING
         claim = ExecutionClaim(
@@ -127,7 +139,7 @@ def claim_execution(
 def owned_execution(
     session: Session,
     claim: ExecutionClaim,
-) -> tuple[JobExecution, Instance | Workspace | None] | None:
+) -> tuple[JobExecution, Instance | Template | Workspace | None] | None:
     """Lock and return a job/resource pair only while the claim still owns it."""
 
     job = session.scalar(
@@ -153,7 +165,7 @@ def advance_execution(
     next_task_name: str,
     next_step: str,
     session_factory: sessionmaker[Session],
-    mutate: Callable[[Session, Instance | Workspace | None], None] | None = None,
+    mutate: Callable[[Session, Instance | Template | Workspace | None], None] | None = None,
 ) -> bool:
     """Persist a next pending step, then ask Celery to execute it."""
 
@@ -172,6 +184,9 @@ def advance_execution(
         if isinstance(resource, Instance):
             resource.step = next_step
             resource.status = InstanceStatus.PENDING
+        elif isinstance(resource, Template):
+            resource.step = next_step
+            resource.sync_status = TemplateSyncStatus.PENDING
         elif isinstance(resource, Workspace):
             resource.step = next_step
             resource.status = WorkspaceStatus.PENDING
@@ -184,7 +199,7 @@ def complete_execution(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
     *,
-    mutate: Callable[[Session, Instance | Workspace | None], None] | None = None,
+    mutate: Callable[[Session, Instance | Template | Workspace | None], None] | None = None,
     delete_resource: bool = False,
 ) -> bool:
     """Complete an owned execution and optionally mutate or delete its resource."""
@@ -204,6 +219,9 @@ def complete_execution(
                 session.delete(resource)
             elif isinstance(resource, Instance):
                 resource.status = InstanceStatus.SUCCESS
+                resource.step = None
+            elif isinstance(resource, Template):
+                resource.sync_status = TemplateSyncStatus.SUCCESS
                 resource.step = None
             elif isinstance(resource, Workspace):
                 resource.status = WorkspaceStatus.SUCCESS
@@ -232,6 +250,8 @@ def fail_execution(
         job.updated_at = datetime.now(UTC)
         if isinstance(resource, Instance):
             resource.status = InstanceStatus.ERROR
+        elif isinstance(resource, Template):
+            resource.sync_status = TemplateSyncStatus.ERROR
         elif isinstance(resource, Workspace):
             resource.status = WorkspaceStatus.ERROR
         session.commit()
@@ -282,6 +302,8 @@ def prepare_execution_retry(
             job.claimed_at = None
             if isinstance(resource, Instance):
                 resource.status = InstanceStatus.PENDING
+            elif isinstance(resource, Template):
+                resource.sync_status = TemplateSyncStatus.PENDING
             elif isinstance(resource, Workspace):
                 resource.status = WorkspaceStatus.PENDING
             session.commit()
@@ -295,3 +317,20 @@ def required_resource_id(claim: ExecutionClaim) -> UUID:
         msg = "Job resource is missing"
         raise RuntimeError(msg)
     return claim.resource_id
+
+
+def heartbeat_execution(
+    claim: ExecutionClaim,
+    session_factory: sessionmaker[Session],
+) -> bool:
+    """Refresh one still-owned running claim so Beat does not reclaim it."""
+
+    with session_factory() as session:
+        owned = owned_execution(session, claim)
+        if owned is None:
+            return False
+        job, _resource = owned
+        job.claimed_at = datetime.now(UTC)
+        job.updated_at = datetime.now(UTC)
+        session.commit()
+        return True

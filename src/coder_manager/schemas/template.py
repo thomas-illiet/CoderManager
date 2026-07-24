@@ -1,6 +1,8 @@
 """Coder template request and response schemas."""
 
+import re
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Annotated, Self
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -21,9 +23,19 @@ NonEmptyString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
 ]
 GitUrl = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
+CoderName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+SourcePath = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
+BranchName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ModuleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ModuleList = Annotated[list[ModuleName], Field(min_length=1)]
 PositiveInteger = Annotated[int, Field(gt=0)]
+CODER_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
+SCP_GIT_URL_PATTERN = re.compile(
+    r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+):(?P<path>[^\s]+)$"
+)
+INVALID_GIT_REF_CHARACTERS = frozenset(" ~^:?*[\\")
+ASCII_CONTROL_LIMIT = 32
+ASCII_DELETE = 127
 
 
 class TemplateMutableFields(BaseModel):
@@ -33,8 +45,9 @@ class TemplateMutableFields(BaseModel):
 
     name: NonEmptyString
     git_url: GitUrl
+    source_path: SourcePath = "."
+    branch: BranchName
     modules: ModuleList
-    version: NonEmptyString
     min_cpu_count: PositiveInteger
     max_cpu_count: PositiveInteger
     min_ram_gb: PositiveInteger
@@ -48,8 +61,66 @@ class TemplateMutableFields(BaseModel):
         """Require an absolute HTTPS URL without contacting the repository."""
 
         parsed = urlsplit(value)
-        if parsed.scheme != "https" or parsed.hostname is None:
-            msg = "git_url must be an absolute HTTPS URL"
+        is_https = (
+            parsed.scheme == "https"
+            and parsed.hostname is not None
+            and parsed.username is None
+            and parsed.password is None
+        )
+        is_ssh = (
+            parsed.scheme == "ssh"
+            and parsed.hostname is not None
+            and parsed.username is not None
+            and parsed.password is None
+            and bool(parsed.path.strip("/"))
+        )
+        is_scp = SCP_GIT_URL_PATTERN.fullmatch(value) is not None
+        if not (is_https or is_ssh or is_scp):
+            msg = "git_url must be an HTTPS, ssh://, or user@host:path Git URL"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("source_path")
+    @classmethod
+    def validate_source_path(cls, value: str) -> str:
+        """Normalize a repository-relative POSIX directory without traversal."""
+
+        if "\\" in value:
+            msg = "source_path must use POSIX separators"
+            raise ValueError(msg)
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts:
+            msg = "source_path must remain inside the repository"
+            raise ValueError(msg)
+        normalized = str(path)
+        if normalized in {"", "/"}:
+            return "."
+        return normalized
+
+    @field_validator("branch")
+    @classmethod
+    def validate_branch(cls, value: str) -> str:
+        """Accept one exact Git branch name and reject option-like or unsafe refs."""
+
+        components = value.split("/")
+        invalid = (
+            value.startswith(("-", "/"))
+            or value.endswith(("/", ".", ".lock"))
+            or "//" in value
+            or ".." in value
+            or "@{" in value
+            or any(character in INVALID_GIT_REF_CHARACTERS for character in value)
+            or any(
+                not component or component.startswith(".") or component.endswith(".lock")
+                for component in components
+            )
+            or any(
+                ord(character) < ASCII_CONTROL_LIMIT or ord(character) == ASCII_DELETE
+                for character in value
+            )
+        )
+        if invalid:
+            msg = "branch must be a valid Git branch name"
             raise ValueError(msg)
         return value
 
@@ -82,8 +153,20 @@ class TemplateMutableFields(BaseModel):
 class TemplateCreate(TemplateMutableFields):
     """Payload accepted when creating a Coder template."""
 
+    coder_name: CoderName
     scope: TemplateScope
     application: ApplicationIdentifier | None = None
+
+    @field_validator("coder_name")
+    @classmethod
+    def normalize_coder_name(cls, value: str) -> str:
+        """Normalize and validate the stable technical Coder template name."""
+
+        normalized = value.lower()
+        if CODER_NAME_PATTERN.fullmatch(normalized) is None:
+            msg = "coder_name must be a lowercase Coder slug"
+            raise ValueError(msg)
+        return normalized
 
     @model_validator(mode="after")
     def validate_scope(self) -> Self:
@@ -109,11 +192,13 @@ class TemplateRead(BaseModel):
 
     id: UUID
     name: str
+    coder_name: str
     scope: TemplateScope
     application: str | None
     git_url: str
+    source_path: str
+    branch: str
     modules: list[str]
-    version: str
     min_cpu_count: int
     max_cpu_count: int
     min_ram_gb: int

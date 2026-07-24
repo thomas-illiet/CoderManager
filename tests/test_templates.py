@@ -1,10 +1,17 @@
 """Coder template API behavior tests."""
 
+import re
 from datetime import datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from coder_manager.models import JobExecution, JobStatus, Template, TemplateSyncStatus
+from coder_manager.tasks import step_01_sync_template
+from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01_TASK
 
 RESOURCE_LIMITS = {
     "min_cpu_count": 1,
@@ -22,13 +29,16 @@ async def create_template(
 ) -> dict[str, object]:
     """Create a template and return its API representation."""
 
+    name = str(overrides.get("name", "Python"))
     payload: dict[str, object] = {
-        "name": "Python",
+        "name": name,
+        "coder_name": re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-"),
         "scope": "global",
         "application": None,
         "git_url": "https://git.example.com/templates/python.git",
+        "source_path": ".",
+        "branch": "main",
         "modules": ["code-server", "git-config"],
-        "version": "v1.0.0",
         **RESOURCE_LIMITS,
     }
     payload.update(overrides)
@@ -46,7 +56,7 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
     created = await create_template(
         client,
         modules=[" code-server ", "git-config"],
-        version="main",
+        branch="main",
     )
     assert created["scope"] == "global"
     assert created["application"] is None
@@ -66,8 +76,9 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
         json={
             "name": "Python Updated",
             "git_url": "https://git.example.com/templates/python-v2.git",
+            "source_path": "templates/python",
+            "branch": "feature/new-template",
             "modules": ["jetbrains-gateway"],
-            "version": "feature/new-template",
             **RESOURCE_LIMITS,
         },
     )
@@ -75,6 +86,9 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
     assert updated.json()["name"] == "Python Updated"
     assert updated.json()["scope"] == "global"
     assert updated.json()["application"] is None
+    assert updated.json()["coder_name"] == "python"
+    assert updated.json()["source_path"] == "templates/python"
+    assert updated.json()["branch"] == "feature/new-template"
     assert updated.json()["modules"] == ["jetbrains-gateway"]
     assert updated.json()["created_at"] == created["created_at"]
     assert updated.json()["updated_at"] != created["updated_at"]
@@ -83,6 +97,86 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
     assert deleted.status_code == 204
     assert deleted.content == b""
     assert (await client.get(f"/api/v1/templates/{created['id']}")).status_code == 404
+
+
+async def test_template_sync_is_fire_and_forget_and_locks_mutations(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Queue one private job while keeping status and history out of the API."""
+
+    created = await create_template(
+        client,
+        git_url="git@git.example.com:templates/python.git",
+        branch="feature/python",
+    )
+    step_01_sync_template.delay.reset_mock()
+
+    response = await client.post(f"/api/v1/templates/{created['id']}/sync")
+
+    assert response.status_code == 202
+    assert response.content == b""
+    async with session_maker() as session:
+        template = await session.get(Template, UUID(str(created["id"])))
+        assert template is not None
+        assert template.sync_status is TemplateSyncStatus.PENDING
+        assert template.job_id is not None
+        job = await session.get(JobExecution, template.job_id)
+        assert job is not None
+        assert job.task_name == TEMPLATE_SYNC_STEP_01_TASK
+        assert job.status is JobStatus.PENDING
+        job_id = job.id
+    step_01_sync_template.delay.assert_called_once_with(str(job_id))
+
+    second = await client.post(f"/api/v1/templates/{created['id']}/sync")
+    blocked_put = await client.put(
+        f"/api/v1/templates/{created['id']}",
+        json={
+            "name": created["name"],
+            "git_url": created["git_url"],
+            "source_path": created["source_path"],
+            "branch": created["branch"],
+            "modules": created["modules"],
+            **RESOURCE_LIMITS,
+        },
+    )
+    blocked_delete = await client.delete(f"/api/v1/templates/{created['id']}")
+    assert second.status_code == 409
+    assert blocked_put.status_code == 409
+    assert blocked_delete.status_code == 409
+    assert "sync_status" not in created
+    assert "job_id" not in created
+
+    async with session_maker() as session:
+        template = await session.get(Template, UUID(str(created["id"])))
+        old_job = await session.get(JobExecution, job_id)
+        assert template is not None
+        assert old_job is not None
+        template.sync_status = TemplateSyncStatus.SUCCESS
+        template.step = None
+        old_job.status = JobStatus.SUCCESS
+        await session.commit()
+
+    replacement = await client.post(f"/api/v1/templates/{created['id']}/sync")
+    assert replacement.status_code == 202
+    async with session_maker() as session:
+        assert await session.get(JobExecution, job_id) is None
+        job_count = await session.scalar(
+            select(func.count())
+            .select_from(JobExecution)
+            .where(
+                JobExecution.resource_type == "template",
+                JobExecution.resource_id == UUID(str(created["id"])),
+            )
+        )
+        assert job_count == 1
+
+
+async def test_no_template_version_history_api_is_exposed(client: AsyncClient) -> None:
+    """Keep the V1 contract free from local version-history endpoints."""
+
+    paths = (await client.get("/openapi.json")).json()["paths"]
+    assert all("/versions" not in path for path in paths)
 
 
 async def test_identical_update_preserves_updated_at(client: AsyncClient) -> None:
@@ -94,8 +188,9 @@ async def test_identical_update_preserves_updated_at(client: AsyncClient) -> Non
         json={
             "name": created["name"],
             "git_url": created["git_url"],
+            "source_path": created["source_path"],
+            "branch": created["branch"],
             "modules": created["modules"],
-            "version": created["version"],
             **RESOURCE_LIMITS,
         },
     )
@@ -117,11 +212,12 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
         "/api/v1/templates",
         json={
             "name": "python",
+            "coder_name": "python",
             "scope": "global",
             "application": None,
             "git_url": "https://git.example.com/duplicate.git",
+            "branch": "main",
             "modules": ["module"],
-            "version": "main",
             **RESOURCE_LIMITS,
         },
     )
@@ -137,11 +233,12 @@ async def test_template_name_is_unique_case_insensitively_per_scope(
         "/api/v1/templates",
         json={
             "name": "PYTHON",
+            "coder_name": "python",
             "scope": "application",
             "application": " first ",
             "git_url": "https://git.example.com/duplicate.git",
+            "branch": "main",
             "modules": ["module"],
-            "version": "main",
             **RESOURCE_LIMITS,
         },
     )
@@ -229,7 +326,12 @@ async def test_template_list_is_paginated_and_escapes_name_wildcards(
     [
         ({"git_url": "http://git.example.com/template.git"}, 422),
         ({"git_url": "not-a-url"}, 422),
-        ({"version": "   "}, 422),
+        ({"branch": "   "}, 422),
+        ({"branch": "-unsafe"}, 422),
+        ({"branch": "feature..unsafe"}, 422),
+        ({"version": "legacy"}, 422),
+        ({"source_path": "../outside"}, 422),
+        ({"coder_name": "invalid name"}, 422),
         ({"modules": []}, 422),
         ({"modules": ["module", " module "]}, 422),
         ({"modules": ["   "]}, 422),
@@ -247,11 +349,12 @@ async def test_invalid_template_payloads_are_rejected(
 
     payload: dict[str, object] = {
         "name": "Python",
+        "coder_name": "python",
         "scope": "global",
         "application": None,
         "git_url": "https://git.example.com/template.git",
+        "branch": "main",
         "modules": ["module"],
-        "version": "main",
         **RESOURCE_LIMITS,
     }
     payload.update(overrides)
@@ -279,8 +382,9 @@ async def test_external_application_is_normalized_and_update_scope_is_rejected(
             "scope": "application",
             "application": "APP",
             "git_url": created["git_url"],
+            "source_path": created["source_path"],
+            "branch": created["branch"],
             "modules": created["modules"],
-            "version": created["version"],
             **RESOURCE_LIMITS,
         },
     )
@@ -297,8 +401,9 @@ async def test_update_name_conflict_returns_409(client: AsyncClient) -> None:
         json={
             "name": "PYTHON",
             "git_url": other["git_url"],
+            "source_path": other["source_path"],
+            "branch": other["branch"],
             "modules": other["modules"],
-            "version": other["version"],
             **RESOURCE_LIMITS,
         },
     )
@@ -312,8 +417,8 @@ async def test_missing_template_endpoints_return_404(client: AsyncClient) -> Non
     payload = {
         "name": "Missing",
         "git_url": "https://git.example.com/missing.git",
+        "branch": "main",
         "modules": ["module"],
-        "version": "main",
         **RESOURCE_LIMITS,
     }
     responses = [
@@ -321,6 +426,7 @@ async def test_missing_template_endpoints_return_404(client: AsyncClient) -> Non
         await client.get(f"/api/v1/templates/{template_id}/modules"),
         await client.put(f"/api/v1/templates/{template_id}", json=payload),
         await client.delete(f"/api/v1/templates/{template_id}"),
+        await client.post(f"/api/v1/templates/{template_id}/sync"),
     ]
     assert all(response.status_code == 404 for response in responses)
     assert all(response.json() == {"detail": "Template not found"} for response in responses)

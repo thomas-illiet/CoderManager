@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 INSTANCE_CREATE_STEP_01 = "step_01_create_schema"
 INSTANCE_CREATE_STEP_02 = "step_02_create_instance"
 INSTANCE_CREATE_STEP_03 = "step_03_bootstrap_admin"
+INSTANCE_CREATE_STEP_04 = "step_04_sync_templates"
 INSTANCE_UPDATE_STEP_01 = "step_01_update_instance"
 INSTANCE_DELETE_STEP_01 = "step_01_remove_workspaces"
 INSTANCE_DELETE_STEP_02 = "step_02_remove_instance"
@@ -24,10 +25,12 @@ WORKSPACE_CREATE_STEP_01 = "step_01_create_workspace"
 WORKSPACE_UPDATE_STEP_01 = "step_01_update_workspace"
 WORKSPACE_DELETE_STEP_01 = "step_01_delete_workspace"
 DATABASE_SYNC_STEP_01 = "step_01_sync_database"
+TEMPLATE_SYNC_STEP_01 = "step_01_sync_template"
 
 INSTANCE_CREATE_STEP_01_TASK = "coder_manager.instance.create.step_01_create_schema"
 INSTANCE_CREATE_STEP_02_TASK = "coder_manager.instance.create.step_02_create_instance"
 INSTANCE_CREATE_STEP_03_TASK = "coder_manager.instance.create.step_03_bootstrap_admin"
+INSTANCE_CREATE_STEP_04_TASK = "coder_manager.instance.create.step_04_sync_templates"
 INSTANCE_UPDATE_STEP_01_TASK = "coder_manager.instance.update.step_01_update_instance"
 INSTANCE_DELETE_STEP_01_TASK = "coder_manager.instance.delete.step_01_remove_workspaces"
 INSTANCE_DELETE_STEP_02_TASK = "coder_manager.instance.delete.step_02_remove_instance"
@@ -37,12 +40,14 @@ WORKSPACE_CREATE_STEP_01_TASK = "coder_manager.workspace.create.step_01_create_w
 WORKSPACE_UPDATE_STEP_01_TASK = "coder_manager.workspace.update.step_01_update_workspace"
 WORKSPACE_DELETE_STEP_01_TASK = "coder_manager.workspace.delete.step_01_delete_workspace"
 DATABASE_SYNC_STEP_01_TASK = "coder_manager.database.sync.step_01_sync_database"
+TEMPLATE_SYNC_STEP_01_TASK = "coder_manager.template.sync.step_01_sync_template"
 
 REGISTERED_STEP_NAMES = frozenset(
     {
         INSTANCE_CREATE_STEP_01_TASK,
         INSTANCE_CREATE_STEP_02_TASK,
         INSTANCE_CREATE_STEP_03_TASK,
+        INSTANCE_CREATE_STEP_04_TASK,
         INSTANCE_UPDATE_STEP_01_TASK,
         INSTANCE_DELETE_STEP_01_TASK,
         INSTANCE_DELETE_STEP_02_TASK,
@@ -52,6 +57,7 @@ REGISTERED_STEP_NAMES = frozenset(
         WORKSPACE_UPDATE_STEP_01_TASK,
         WORKSPACE_DELETE_STEP_01_TASK,
         DATABASE_SYNC_STEP_01_TASK,
+        TEMPLATE_SYNC_STEP_01_TASK,
     }
 )
 

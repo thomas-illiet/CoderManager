@@ -38,8 +38,8 @@ from coder_manager.repositories import (
 from coder_manager.repositories import instances as instance_repositories
 from coder_manager.schemas import InstanceCreate
 from coder_manager.tasks.common.registry import (
-    INSTANCE_CREATE_STEP_03,
-    INSTANCE_CREATE_STEP_03_TASK,
+    INSTANCE_CREATE_STEP_04,
+    INSTANCE_CREATE_STEP_04_TASK,
 )
 from tests.conftest import TEST_CRYPTO_KEY
 
@@ -134,10 +134,10 @@ async def test_instance_admin_endpoint_returns_static_identity_and_stored_passwo
         session.add(
             JobExecution(
                 name="instance.create",
-                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                task_name=INSTANCE_CREATE_STEP_04_TASK,
                 resource_type="instance",
                 resource_id=instance_id,
-                step=INSTANCE_CREATE_STEP_03,
+                step=INSTANCE_CREATE_STEP_04,
                 status=JobStatus.SUCCESS,
             )
         )
@@ -199,10 +199,10 @@ async def test_instance_admin_endpoint_redacts_crypto_failures(
         session.add(
             JobExecution(
                 name="instance.create",
-                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                task_name=INSTANCE_CREATE_STEP_04_TASK,
                 resource_type="instance",
                 resource_id=instance_id,
-                step=INSTANCE_CREATE_STEP_03,
+                step=INSTANCE_CREATE_STEP_04,
                 status=JobStatus.SUCCESS,
             )
         )

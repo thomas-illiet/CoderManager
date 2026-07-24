@@ -5,11 +5,15 @@ from coder_manager.celery_app import celery_app
 from coder_manager.domains import coder
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
-    complete_execution,
+    advance_execution,
     required_resource_id,
     run_claimed_step,
 )
-from coder_manager.tasks.common.registry import INSTANCE_CREATE_STEP_03_TASK
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_03_TASK,
+    INSTANCE_CREATE_STEP_04,
+    INSTANCE_CREATE_STEP_04_TASK,
+)
 from coder_manager.tasks.instance._bootstrap import (
     bootstrap_succeeded,
     prepared_admin_password,
@@ -29,13 +33,23 @@ def step_03_bootstrap_admin(job_id: str) -> dict[str, str]:
         with session_factory() as session:
             already_succeeded = bootstrap_succeeded(session, instance_id)
         if already_succeeded:
-            completed = complete_execution(claim, session_factory)
-            return {"status": "success" if completed else "noop"}
+            advanced = advance_execution(
+                claim,
+                next_task_name=INSTANCE_CREATE_STEP_04_TASK,
+                next_step=INSTANCE_CREATE_STEP_04,
+                session_factory=session_factory,
+            )
+            return {"status": "pending" if advanced else "noop"}
 
         instance_url, password = prepared_admin_password(instance_id, session_factory)
         coder.bootstrap_admin_account(instance_url, password)
-        completed = complete_execution(claim, session_factory)
-        return {"status": "success" if completed else "noop"}
+        advanced = advance_execution(
+            claim,
+            next_task_name=INSTANCE_CREATE_STEP_04_TASK,
+            next_step=INSTANCE_CREATE_STEP_04,
+            session_factory=session_factory,
+        )
+        return {"status": "pending" if advanced else "noop"}
 
     return run_claimed_step(
         job_id,

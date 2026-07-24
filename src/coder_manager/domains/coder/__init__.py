@@ -10,6 +10,7 @@ from coder_manager.domains.coder.errors import (
     CoderFirstUserConflictError,
     CoderRequestError,
 )
+from coder_manager.domains.coder.models import CoderTemplate, CoderTemplateVersion
 from coder_manager.domains.coder.service import bootstrap_admin_account
 
 __all__ = [
@@ -19,5 +20,7 @@ __all__ = [
     "CoderClient",
     "CoderFirstUserConflictError",
     "CoderRequestError",
+    "CoderTemplate",
+    "CoderTemplateVersion",
     "bootstrap_admin_account",
 ]

@@ -12,6 +12,7 @@ from coder_manager.repositories import (
     TemplateHasWorkspacesError,
     TemplateNotFoundError,
     TemplateRepository,
+    TemplateSyncInProgressError,
     TemplateWorkspaceCompatibilityError,
 )
 from coder_manager.schemas import (
@@ -21,6 +22,8 @@ from coder_manager.schemas import (
     TemplateRead,
     TemplateUpdate,
 )
+from coder_manager.tasks import step_01_sync_template
+from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -58,6 +61,30 @@ async def list_template_modules(template_id: UUID, session: SessionDependency) -
     if template is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found")
     return list(template.modules)
+
+
+@router.post(
+    "/{template_id}/sync",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Synchronize a template's current Git branch",
+)
+async def sync_template(template_id: UUID, session: SessionDependency) -> Response:
+    """Queue a fire-and-forget synchronization without exposing job state."""
+
+    try:
+        job_id = await TemplateRepository(session).request_sync(template_id)
+    except TemplateNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Template not found",
+        ) from error
+    except TemplateSyncInProgressError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Template synchronization is already in progress",
+        ) from error
+    dispatch_registered_step(step_01_sync_template.name, job_id)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.get("/{template_id}", summary="Get a Coder template")
@@ -108,6 +135,11 @@ async def update_template(
             status_code=status.HTTP_409_CONFLICT,
             detail="A template with this name already exists in this scope",
         ) from error
+    except TemplateSyncInProgressError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Template synchronization is already in progress",
+        ) from error
     except TemplateWorkspaceCompatibilityError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -135,5 +167,10 @@ async def delete_template(template_id: UUID, session: SessionDependency) -> Resp
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Template still has workspaces",
+        ) from error
+    except TemplateSyncInProgressError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Template synchronization is already in progress",
         ) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)

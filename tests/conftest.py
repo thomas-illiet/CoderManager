@@ -24,6 +24,7 @@ from coder_manager.tasks import (
     step_01_delete_workspace,
     step_01_remove_workspaces,
     step_01_sync_database,
+    step_01_sync_template,
     step_01_update_instance,
     step_01_update_workspace,
     step_02_create_instance,
@@ -31,6 +32,7 @@ from coder_manager.tasks import (
     step_03_bootstrap_admin,
     step_03_remove_schema,
     step_04_remove_local_configuration,
+    step_04_sync_templates,
 )
 from coder_manager.worker_database import derive_sync_database_url
 
@@ -51,10 +53,12 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         step_02_remove_instance,
         step_03_remove_schema,
         step_04_remove_local_configuration,
+        step_04_sync_templates,
         step_01_create_workspace,
         step_01_update_workspace,
         step_01_delete_workspace,
         step_01_sync_database,
+        step_01_sync_template,
     ):
         monkeypatch.setattr(task, "delay", MagicMock())
 

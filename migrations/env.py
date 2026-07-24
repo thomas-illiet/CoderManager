@@ -16,6 +16,7 @@ from coder_manager.models import (  # noqa: F401
     JobExecution,
     Member,
     Template,
+    TemplateDeployment,
     TemplateImage,
     Workspace,
 )

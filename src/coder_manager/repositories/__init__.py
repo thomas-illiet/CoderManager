@@ -49,6 +49,7 @@ from coder_manager.repositories.templates import (
     TemplateHasWorkspacesError,
     TemplateNotFoundError,
     TemplateRepository,
+    TemplateSyncInProgressError,
     TemplateWorkspaceCompatibilityError,
 )
 from coder_manager.repositories.workspaces import (
@@ -106,6 +107,7 @@ __all__ = [
     "TemplateImageTemplateNotFoundError",
     "TemplateNotFoundError",
     "TemplateRepository",
+    "TemplateSyncInProgressError",
     "TemplateWorkspaceCompatibilityError",
     "WorkspaceActionConflictError",
     "WorkspaceAlreadyExistsError",

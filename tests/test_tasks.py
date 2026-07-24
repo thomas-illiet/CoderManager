@@ -44,6 +44,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_02_TASK,
     INSTANCE_CREATE_STEP_03,
     INSTANCE_CREATE_STEP_03_TASK,
+    INSTANCE_CREATE_STEP_04,
+    INSTANCE_CREATE_STEP_04_TASK,
     INSTANCE_DELETE_STEP_04,
     INSTANCE_DELETE_STEP_04_TASK,
     INSTANCE_UPDATE_STEP_01,
@@ -117,10 +119,10 @@ async def mark_bootstrap_succeeded(
         session.add(
             JobExecution(
                 name="instance.create",
-                task_name=INSTANCE_CREATE_STEP_03_TASK,
+                task_name=INSTANCE_CREATE_STEP_04_TASK,
                 resource_type="instance",
                 resource_id=instance_id,
-                step=INSTANCE_CREATE_STEP_03,
+                step=INSTANCE_CREATE_STEP_04,
                 status=JobStatus.SUCCESS,
             )
         )
@@ -149,6 +151,7 @@ def test_registered_step_names_and_beat_schedule() -> None:
             tasks.step_01_create_schema,
             tasks.step_02_create_instance,
             tasks.step_03_bootstrap_admin,
+            tasks.step_04_sync_templates,
             tasks.step_01_update_instance,
             tasks.step_01_remove_workspaces,
             tasks.step_02_remove_instance,
@@ -158,6 +161,7 @@ def test_registered_step_names_and_beat_schedule() -> None:
             tasks.step_01_update_workspace,
             tasks.step_01_delete_workspace,
             tasks.step_01_sync_database,
+            tasks.step_01_sync_template,
         )
     } == REGISTERED_STEP_NAMES
     assert not hasattr(tasks, "upsert_instance")
@@ -212,6 +216,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     )
     tasks.step_02_create_instance.delay.reset_mock()
     tasks.step_03_bootstrap_admin.delay.reset_mock()
+    tasks.step_04_sync_templates.delay.reset_mock()
 
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
     assert len(created_targets) == 1
@@ -257,10 +262,23 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert stored.status is InstanceStatus.PENDING
         assert stored.argocd_application_name == f"coder-{instance['slug']}"
 
-    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
     assert len(bootstrapped) == 1
     assert bootstrapped[0][0] == instance["instance_url"]
     assert len(bootstrapped[0][1].get_secret_value()) == 43
+    tasks.step_04_sync_templates.delay.assert_called_once_with(str(job_id))
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_CREATE_STEP_04_TASK
+        assert job.step == INSTANCE_CREATE_STEP_04
+        assert job.status is JobStatus.PENDING
+        assert stored.step == INSTANCE_CREATE_STEP_04
+        assert stored.status is InstanceStatus.PENDING
+
+    assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "noop"}
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
@@ -268,7 +286,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert job is not None
         assert stored is not None
         assert job.status is JobStatus.SUCCESS
-        assert job.attempt == 3
+        assert job.attempt == 4
         assert stored.status is InstanceStatus.SUCCESS
         assert stored.step is None
         assert stored.argocd_application_name == f"coder-{instance['slug']}"
@@ -378,8 +396,9 @@ async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
         assert failed_instance.password_enc is not None
         prepared_envelope = failed_instance.password_enc
 
-    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
     assert observed_passwords == [observed_passwords[0], observed_passwords[0]]
+    assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
     async with session_maker() as session:
         completed_instance = await session.get(Instance, instance_id)
         assert completed_instance is not None
@@ -411,7 +430,8 @@ async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
         "bootstrap_admin_account",
         lambda _url, _password: pytest.fail("remote bootstrap must not be called"),
     )
-    assert tasks.step_03_bootstrap_admin.run(str(redundant_job_id)) == {"status": "success"}
+    assert tasks.step_03_bootstrap_admin.run(str(redundant_job_id)) == {"status": "pending"}
+    assert tasks.step_04_sync_templates.run(str(redundant_job_id)) == {"status": "success"}
 
 
 async def test_attempt_fencing_rejects_late_worker_completion(

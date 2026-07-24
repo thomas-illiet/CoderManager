@@ -50,7 +50,7 @@ from coder_manager.tasks import (
     step_01_update_instance,
 )
 from coder_manager.tasks.common.registry import (
-    INSTANCE_CREATE_STEP_03,
+    INSTANCE_CREATE_STEP_04,
     dispatch_registered_step,
 )
 
@@ -155,7 +155,7 @@ async def get_instance_admin(
     bootstrap_succeeded = await JobExecutionRepository(session).has_successful_resource_step(
         resource_type="instance",
         resource_id=instance_id,
-        step=INSTANCE_CREATE_STEP_03,
+        step=INSTANCE_CREATE_STEP_04,
     )
     if instance.password_enc is None or not bootstrap_succeeded:
         raise HTTPException(

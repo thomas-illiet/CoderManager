@@ -7,8 +7,16 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coder_manager.models import Template, TemplateScope, Workspace
+from coder_manager.models import (
+    JobExecution,
+    Template,
+    TemplateScope,
+    TemplateSyncStatus,
+    Workspace,
+)
+from coder_manager.repositories.job_executions import add_job_execution
 from coder_manager.schemas import TemplateCreate, TemplateUpdate
+from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01, TEMPLATE_SYNC_STEP_01_TASK
 
 
 class TemplateAlreadyExistsError(Exception):
@@ -25,6 +33,10 @@ class TemplateHasWorkspacesError(Exception):
 
 class TemplateWorkspaceCompatibilityError(Exception):
     """Raised when a template update would invalidate a workspace."""
+
+
+class TemplateSyncInProgressError(Exception):
+    """Raised when a mutation conflicts with an active template synchronization."""
 
 
 class TemplateRepository:
@@ -87,6 +99,17 @@ class TemplateRepository:
 
         return await self._session.get(Template, template_id)
 
+    async def _discard_current_job(self, template: Template) -> None:
+        """Remove the superseded synchronization job instead of retaining history."""
+
+        if template.job_id is None:
+            return
+        job = await self._session.get(JobExecution, template.job_id)
+        template.job_id = None
+        await self._session.flush()
+        if job is not None:
+            await self._session.delete(job)
+
     async def create(self, payload: TemplateCreate) -> Template:
         """Create a validated global or application-scoped template."""
 
@@ -94,9 +117,11 @@ class TemplateRepository:
             name=payload.name,
             scope=payload.scope,
             application=payload.application,
+            coder_name=payload.coder_name,
             git_url=payload.git_url,
+            source_path=payload.source_path,
+            branch=payload.branch,
             modules=list(payload.modules),
-            version=payload.version,
             min_cpu_count=payload.min_cpu_count,
             max_cpu_count=payload.max_cpu_count,
             min_ram_gb=payload.min_ram_gb,
@@ -123,13 +148,17 @@ class TemplateRepository:
         if template is None:
             await self._session.rollback()
             raise TemplateNotFoundError
+        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+            await self._session.rollback()
+            raise TemplateSyncInProgressError
 
         # Preserve an unchanged template without touching its update timestamp.
         changed = (
             template.name != payload.name
             or template.git_url != payload.git_url
+            or template.source_path != payload.source_path
+            or template.branch != payload.branch
             or template.modules != payload.modules
-            or template.version != payload.version
             or template.min_cpu_count != payload.min_cpu_count
             or template.max_cpu_count != payload.max_cpu_count
             or template.min_ram_gb != payload.min_ram_gb
@@ -159,14 +188,19 @@ class TemplateRepository:
         # Apply all mutable fields only after every dependent workspace passes validation.
         template.name = payload.name
         template.git_url = payload.git_url
+        template.source_path = payload.source_path
+        template.branch = payload.branch
         template.modules = list(payload.modules)
-        template.version = payload.version
         template.min_cpu_count = payload.min_cpu_count
         template.max_cpu_count = payload.max_cpu_count
         template.min_ram_gb = payload.min_ram_gb
         template.max_ram_gb = payload.max_ram_gb
         template.min_disk_gb = payload.min_disk_gb
         template.max_disk_gb = payload.max_disk_gb
+        await self._discard_current_job(template)
+        template.action = "updated"
+        template.sync_status = TemplateSyncStatus.SUCCESS
+        template.step = None
         template.updated_at = datetime.now(UTC)
         try:
             await self._session.commit()
@@ -185,11 +219,44 @@ class TemplateRepository:
         if template is None:
             await self._session.rollback()
             raise TemplateNotFoundError
+        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+            await self._session.rollback()
+            raise TemplateSyncInProgressError
         workspace_id = await self._session.scalar(
             select(Workspace.id).where(Workspace.template_id == template_id).limit(1)
         )
         if workspace_id is not None:
             await self._session.rollback()
             raise TemplateHasWorkspacesError
+        await self._discard_current_job(template)
         await self._session.delete(template)
         await self._session.commit()
+
+    async def request_sync(self, template_id: UUID) -> UUID:
+        """Create one durable fire-and-forget synchronization job."""
+
+        template = await self._session.scalar(
+            select(Template).where(Template.id == template_id).with_for_update()
+        )
+        if template is None:
+            await self._session.rollback()
+            raise TemplateNotFoundError
+        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+            await self._session.rollback()
+            raise TemplateSyncInProgressError
+
+        await self._discard_current_job(template)
+        job = add_job_execution(
+            self._session,
+            name="template.sync",
+            task_name=TEMPLATE_SYNC_STEP_01_TASK,
+            resource_type="template",
+            resource_id=template.id,
+            step=TEMPLATE_SYNC_STEP_01,
+        )
+        template.action = "syncing"
+        template.sync_status = TemplateSyncStatus.PENDING
+        template.job_id = job.id
+        template.step = TEMPLATE_SYNC_STEP_01
+        await self._session.commit()
+        return job.id

@@ -125,11 +125,13 @@ async def create_template(
         "/api/v1/templates",
         json={
             "name": name,
+            "coder_name": name.lower().replace(" ", "-"),
             "scope": scope,
             "application": application,
             "git_url": "https://git.example.com/template.git",
+            "source_path": ".",
+            "branch": "main",
             "modules": modules or ["code-server", "git-config"],
-            "version": "v1",
             **LIMITS,
         },
     )
@@ -623,8 +625,9 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
         json={
             "name": template["name"],
             "git_url": template["git_url"],
+            "source_path": template["source_path"],
+            "branch": template["branch"],
             "modules": ["git-config"],
-            "version": template["version"],
             **LIMITS,
         },
     )
@@ -635,8 +638,9 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
         json={
             "name": "Python updated",
             "git_url": template["git_url"],
+            "source_path": template["source_path"],
+            "branch": "release/v2",
             "modules": template["modules"],
-            "version": "v2",
             **LIMITS,
         },
     )
@@ -796,8 +800,9 @@ async def test_repositories_exercise_direct_successful_lifecycle(
             TemplateUpdate(
                 name="Python",
                 git_url="https://git.example.com/template.git",
+                source_path=".",
+                branch="main",
                 modules=["code-server", "git-config"],
-                version="v1",
                 **LIMITS,
             ),
         )

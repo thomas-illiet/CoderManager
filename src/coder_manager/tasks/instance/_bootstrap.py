@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from coder_manager.config import get_settings
 from coder_manager.crypto import InstancePasswordCipher
 from coder_manager.models import Instance, JobExecution, JobStatus
-from coder_manager.tasks.common.registry import INSTANCE_CREATE_STEP_03
+from coder_manager.tasks.common.registry import INSTANCE_CREATE_STEP_04
 
 
 def bootstrap_succeeded(session: Session, instance_id: UUID) -> bool:
@@ -21,7 +21,7 @@ def bootstrap_succeeded(session: Session, instance_id: UUID) -> bool:
         .where(
             JobExecution.resource_type == "instance",
             JobExecution.resource_id == instance_id,
-            JobExecution.step == INSTANCE_CREATE_STEP_03,
+            JobExecution.step == INSTANCE_CREATE_STEP_04,
             JobExecution.status == JobStatus.SUCCESS,
         )
         .limit(1)

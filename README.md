@@ -70,6 +70,7 @@ All endpoints are under `/api/v1`:
 | `GET` | `/templates/{id}/modules` | Get a template's module names |
 | `POST` | `/templates` | Create a template |
 | `PUT` | `/templates/{id}` | Replace a template's mutable fields |
+| `POST` | `/templates/{id}/sync` | Queue current-branch synchronization |
 | `DELETE` | `/templates/{id}` | Delete a template |
 | `GET` | `/templates/{id}/images?page=1&page_size=20` | List allowed Docker images |
 | `GET` | `/templates/{id}/images/{image_id}` | Get one allowed Docker image |
@@ -250,11 +251,13 @@ Creation payload:
 ```json
 {
   "name": "Python Development",
+  "coder_name": "python-development",
   "scope": "application",
   "application": "MY-BUSINESS-APPLICATION",
-  "git_url": "https://git.example.com/coder/python-template.git",
+  "git_url": "git@git.example.com:coder/python-template.git",
+  "source_path": "templates/python",
+  "branch": "main",
   "modules": ["code-server", "git-config"],
-  "version": "v1.0.0",
   "min_cpu_count": 1,
   "max_cpu_count": 8,
   "min_ram_gb": 2,
@@ -265,12 +268,29 @@ Creation payload:
 ```
 
 Set `scope` to `global` and `application` to `null` for a global template. Application identifiers
-are normalized like instance identifiers and are not checked against an internal catalog. Git URLs must use
-HTTPS. Versions are free-form Git references, and modules must be a non-empty ordered list without
+are normalized like instance identifiers and are not checked against an internal catalog.
+`coder_name` is the immutable lowercase slug used inside Coder. Git URLs accept HTTPS, `ssh://`, or
+SCP-style SSH syntax. `source_path` is repository-relative and defaults to `.`, while `branch`
+targets one exact `refs/heads/...` branch. Modules must be a non-empty ordered list without
 duplicates. CPU counts, RAM GB, and disk GB are positive integers with inclusive minimum and
-maximum bounds. PUT replaces these limits together with `name`, `git_url`, `modules`, and `version`;
-scope and application remain immutable. A change that would invalidate an existing workspace
-returns HTTP 409. `GET /templates/{id}/modules` returns the module array directly.
+maximum bounds. PUT replaces these limits together with `name`, `git_url`, `source_path`, `branch`,
+and `modules`; scope, application, and `coder_name` remain immutable. A change that would invalidate
+an existing workspace returns HTTP 409. `GET /templates/{id}/modules` returns the module array
+directly.
+
+`POST /templates/{id}/sync` returns an empty HTTP 202 response after committing a durable
+fire-and-forget job. The worker fetches the current branch HEAD once and synchronizes it to every
+ready compatible instance. Global templates target all ready instances; application templates
+target only matching normalized application identifiers. CoderManager stores only the current
+per-instance deployment state and exposes no local template-version history.
+
+The worker image contains Git and OpenSSH. Mount the SSH identity and `known_hosts` read-only for
+`appuser`, and set `CODER_MANAGER_GIT_ALLOWED_HOSTS` to a comma-separated exact hostname allowlist.
+SSH uses batch mode, strict host-key checking, identity-only authentication, and no agent
+forwarding. `CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS` controls Coder import polling
+(2 seconds by default), and `CODER_MANAGER_TEMPLATE_SYNC_TIMEOUT_SECONDS` bounds an individual
+import (1800 seconds by default). Template archives use USTAR, exclude Terraform state and tfvars,
+and must not exceed 1 MiB.
 
 Filtering by `application` returns the global templates plus those attached to that application.
 The optional `scope` filter narrows that result, and `name` performs a case-insensitive literal
