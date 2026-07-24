@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr
+from pydantic import SecretBytes, SecretStr
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +17,7 @@ class InstanceHelmValues:
     database_host: str
     database_name: str
     database_schema: str
+    kubeconfig: SecretBytes | None = None
 
     @property
     def base_domain(self) -> str:

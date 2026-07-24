@@ -8,11 +8,7 @@ from coder_manager.schemas.instance import (
     InstancePage,
     InstanceRead,
 )
-from coder_manager.schemas.instance_kubernetes import (
-    InstanceKubernetesCreate,
-    InstanceKubernetesRead,
-    InstanceKubernetesUpdate,
-)
+from coder_manager.schemas.instance_kubernetes import InstanceKubernetesRead
 from coder_manager.schemas.job_execution import JobRead, JobResourceResponse, JobResponse
 from coder_manager.schemas.managed_database import (
     DatabaseCreate,
@@ -58,9 +54,7 @@ __all__ = [
     "InstanceAdminCredentialsRead",
     "InstanceArgoCdStatusRead",
     "InstanceCreate",
-    "InstanceKubernetesCreate",
     "InstanceKubernetesRead",
-    "InstanceKubernetesUpdate",
     "InstancePage",
     "InstanceRead",
     "JobRead",

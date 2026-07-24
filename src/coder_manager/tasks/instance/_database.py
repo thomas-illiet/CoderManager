@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from pydantic import SecretBytes
 from sqlalchemy import select
 
 from coder_manager.config import get_settings
-from coder_manager.crypto import PasswordCipher
+from coder_manager.crypto import KubeconfigCipher, PasswordCipher
 from coder_manager.domains.argocd import InstanceHelmValues
 from coder_manager.domains.postgresql import SchemaTarget
-from coder_manager.models import Database, DatabaseAllocation
+from coder_manager.models import Database, DatabaseAllocation, InstanceKubernetes
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -59,6 +60,18 @@ def instance_helm_values(
     if target is None:
         msg = "Instance database allocation is missing"
         raise RuntimeError(msg)
+    with session_factory() as session:
+        provider = session.get(InstanceKubernetes, instance_id)
+        kubeconfig = (
+            None
+            if provider is None
+            else SecretBytes(
+                KubeconfigCipher(get_settings().crypto_key).decrypt(
+                    provider.kubeconfig_enc,
+                    instance_id,
+                )
+            )
+        )
     return InstanceHelmValues(
         environment=environment,
         public_url=public_url,
@@ -67,4 +80,5 @@ def instance_helm_values(
         database_host=target.host,
         database_name=target.database_name,
         database_schema=target.schema_name,
+        kubeconfig=kubeconfig,
     )

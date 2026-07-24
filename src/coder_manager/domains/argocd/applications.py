@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from base64 import b64encode
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
@@ -52,40 +53,42 @@ def application_payload(
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(helm_values.environment)
-    helm_arguments = "\n".join(
-        (
-            f"--namespace {APPLICATION_NAMESPACE}",
-            _helm_scalar_argument(
-                "policy.config.allowedUsernames",
-                ",".join(users),
-            ),
-            _helm_scalar_argument(
-                "policy.config.adminUsernames",
-                ",".join(admins),
-            ),
-            _helm_scalar_argument("global.baseDomain", helm_values.base_domain),
-            _helm_scalar_argument(
-                "server.config.database.username",
-                helm_values.database_username,
-            ),
-            _helm_scalar_argument(
-                "server.config.database.password",
-                helm_values.database_password.get_secret_value(),
-            ),
-            _helm_scalar_argument(
-                "server.config.database.host",
-                helm_values.database_host,
-            ),
-            _helm_scalar_argument(
-                "server.config.database.database",
-                helm_values.database_name,
-            ),
-            _helm_scalar_argument(
-                "server.config.database.schema",
-                helm_values.database_schema,
-            ),
-        )
-    )
+    helm_argument_lines = [
+        f"--namespace {APPLICATION_NAMESPACE}",
+        _helm_scalar_argument(
+            "policy.config.allowedUsernames",
+            ",".join(users),
+        ),
+        _helm_scalar_argument(
+            "policy.config.adminUsernames",
+            ",".join(admins),
+        ),
+        _helm_scalar_argument("global.baseDomain", helm_values.base_domain),
+        _helm_scalar_argument(
+            "server.config.database.username",
+            helm_values.database_username,
+        ),
+        _helm_scalar_argument(
+            "server.config.database.password",
+            helm_values.database_password.get_secret_value(),
+        ),
+        _helm_scalar_argument(
+            "server.config.database.host",
+            helm_values.database_host,
+        ),
+        _helm_scalar_argument(
+            "server.config.database.database",
+            helm_values.database_name,
+        ),
+        _helm_scalar_argument(
+            "server.config.database.schema",
+            helm_values.database_schema,
+        ),
+    ]
+    if helm_values.kubeconfig is not None:
+        kubeconfig_base64 = b64encode(helm_values.kubeconfig.get_secret_value()).decode("ascii")
+        helm_argument_lines.append(_helm_scalar_argument("server.config.kube", kubeconfig_base64))
+    helm_arguments = "\n".join(helm_argument_lines)
     helm_arguments += "\n"
     return {
         "apiVersion": "argoproj.io/v1alpha1",

@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from coder_manager import tasks, worker_database
 from coder_manager.celery_app import celery_app
 from coder_manager.config import Settings, get_settings
-from coder_manager.crypto import InstancePasswordCipher, PasswordCipher
+from coder_manager.crypto import (
+    InstancePasswordCipher,
+    KubeconfigCipher,
+    KubeconfigDecryptionError,
+    PasswordCipher,
+)
 from coder_manager.domains import argocd, coder, postgresql
 from coder_manager.models import (
     Database,
@@ -516,19 +521,48 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reconcile an existing instance before scheduling its missing administrator."""
+    """Load an encrypted kubeconfig while reconciling before administrator bootstrap."""
 
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "EXISTING ADMIN BACKFILL")
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
+    kubeconfig = b"\x00worker-kubeconfig\xff"
+    async with session_maker() as session:
+        session.add(
+            InstanceKubernetes(
+                instance_id=instance_id,
+                kubeconfig_enc=KubeconfigCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
+                    kubeconfig,
+                    instance_id,
+                ),
+            )
+        )
+        await session.commit()
     response = await client.post(f"/api/v1/instances/{instance_id}/sync")
     job_id = UUID(response.json()["job"]["id"])
-    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    reconciled_values: list[argocd.InstanceHelmValues] = []
+
+    def capture_reconcile(
+        remote_id: UUID,
+        slug: str | None,
+        attached_name: str | None,
+        members: tuple[tuple[str, str], ...],
+        helm_values: argocd.InstanceHelmValues,
+    ) -> str:
+        """Capture the decrypted kubeconfig passed to the Argo CD boundary."""
+
+        reconciled_values.append(helm_values)
+        return successful_reconcile(remote_id, slug, attached_name, members, helm_values)
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
     tasks.step_03_bootstrap_admin.delay.reset_mock()
 
     assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "pending"}
+    assert len(reconciled_values) == 1
+    assert reconciled_values[0].kubeconfig is not None
+    assert reconciled_values[0].kubeconfig.get_secret_value() == kubeconfig
     tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
@@ -541,6 +575,42 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
         assert stored.job_id == job_id
         assert stored.step == INSTANCE_CREATE_STEP_03
         assert stored.status is InstanceStatus.PENDING
+
+
+async def test_update_fails_when_kubeconfig_cannot_be_decrypted(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mark the job and instance as errors when kubeconfig authentication fails."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "INVALID KUBECONFIG")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    async with session_maker() as session:
+        session.add(
+            InstanceKubernetes(
+                instance_id=instance_id,
+                kubeconfig_enc=b"invalid-envelope",
+            )
+        )
+        await session.commit()
+    response = await client.post(f"/api/v1/instances/{instance_id}/sync")
+    job_id = UUID(response.json()["job"]["id"])
+
+    with pytest.raises(KubeconfigDecryptionError):
+        tasks.step_01_update_instance.run(str(job_id))
+
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.status is JobStatus.ERROR
+        assert stored.status is InstanceStatus.ERROR
 
 
 async def test_update_step_coalesces_member_changes_into_a_new_job(
@@ -640,10 +710,7 @@ async def test_delete_steps_keep_local_state_until_step_04(
         session.add(
             InstanceKubernetes(
                 instance_id=instance_id,
-                host="https://kubernetes.validation.invalid",
-                namespace="validation",
-                token_enc=b"encrypted-token",
-                ca="validation-ca",
+                kubeconfig_enc=b"encrypted-kubeconfig",
             )
         )
         await session.commit()
@@ -731,10 +798,7 @@ async def test_each_delete_step_failure_preserves_local_configuration(
         session.add(
             InstanceKubernetes(
                 instance_id=instance_id,
-                host="https://kubernetes.failure.invalid",
-                namespace="failure-validation",
-                token_enc=b"encrypted-token",
-                ca="validation-ca",
+                kubeconfig_enc=b"encrypted-kubeconfig",
             )
         )
         await session.commit()

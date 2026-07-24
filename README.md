@@ -56,9 +56,8 @@ All endpoints are under `/api/v1`:
 | `GET` | `/instances/{id}/status` | Get the live Argo CD status |
 | `POST` | `/instances` | Request instance creation |
 | `POST` | `/instances/{id}/sync` | Force Argo CD reconciliation |
-| `GET` | `/instances/{id}/provider` | Get the Kubernetes provider configuration |
-| `POST` | `/instances/{id}/provider` | Create the provider and update the instance |
-| `PUT` | `/instances/{id}/provider` | Update the provider CA or token |
+| `GET` | `/instances/{id}/provider` | Get the Kubernetes provider upload status |
+| `POST` | `/instances/{id}/provider` | Upload the provider kubeconfig and update the instance |
 | `DELETE` | `/instances/{id}` | Request instance deletion |
 | `GET` | `/instances/{id}/members?page=1&page_size=20` | List instance members |
 | `GET` | `/instances/{id}/members/{member_id}` | Get one instance member |
@@ -155,6 +154,8 @@ Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` names
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
 `https://` scheme and supplies the allocated managed database's
 `server.config.database.username`, `password`, `host`, `database`, and `schema` values.
+When a Kubernetes provider is configured, it also supplies the uploaded file as a single-line
+RFC 4648 Base64 value through `server.config.kube`.
 The slug names the Argo CD Application metadata; Coder Manager does not add Helm
 `--name-template`, `nameOverride`, or `fullnameOverride` arguments.
 The database password is decrypted only inside the worker while constructing the Argo CD payload.
@@ -190,12 +191,17 @@ password only after a successful `step_03_bootstrap_admin`; prepared credentials
 running attempt remain unavailable. The response uses `Cache-Control: no-store`. This is a
 breaking migration: existing instances are not reconciled or bootstrapped automatically.
 
-`POST /api/v1/instances/{id}/provider` creates the Kubernetes provider with `host`, `namespace`,
-`ca`, and the write-only `token`. `PUT` updates `ca` and optionally rotates `token`; `host` and
-`namespace` are immutable, whether omitted or repeated unchanged in the update payload. The token
-is encrypted with AES-256-GCM in `token_enc` and bound to the instance UUID. Every accepted change
-moves the instance to `updating/pending` and creates an `instance.update` job.
-`GET` returns `token_configured` and never token material.
+`POST /api/v1/instances/{id}/provider` is a create-only `multipart/form-data` upload whose required
+file field is named `kubeconfig`. Coder Manager does not validate the filename, media type, size,
+content, or whether the file is empty. The raw bytes are encrypted with AES-256-GCM in
+`kubeconfig_enc` and bound to the instance UUID. The accepted upload moves the instance to
+`updating/pending` and creates an `instance.update` job. A configured provider cannot be replaced,
+and there is no provider `PUT` endpoint. `GET` returns `kubeconfig_configured` and timestamps
+without exposing file or ciphertext material.
+
+The provider upload schema is a breaking change. Its migration deletes all legacy provider rows
+containing `host`, `namespace`, `ca`, and `token_enc` without changing instance state or scheduling
+reconciliation. Those instances must upload a new kubeconfig explicitly.
 
 The API generates an immutable, globally unique, 12-character lowercase alphanumeric slug for each
 new instance and exposes it as `slug`. The immutable HTTPS URL combines that slug with the

@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretBytes, SecretStr
 
 from coder_manager.config import Settings
 from coder_manager.domains.argocd import (
@@ -180,6 +180,33 @@ def test_policy_username_lists_escape_helm_commas() -> None:
     assert "--set policy.config.allowedUsernames=admin\\,h45221\n" in helm_arguments
     assert "--set policy.config.adminUsernames=admin\n" in helm_arguments
     assert "'" not in helm_arguments
+
+
+@pytest.mark.parametrize(
+    ("kubeconfig", "encoded"),
+    [
+        (b"\x00\xffarbitrary\nkubeconfig", "AP9hcmJpdHJhcnkKa3ViZWNvbmZpZw=="),
+        (b"", ""),
+    ],
+)
+def test_kubeconfig_is_appended_to_helm_arguments_as_base64(
+    kubeconfig: bytes,
+    encoded: str,
+) -> None:
+    """Append uploaded bytes as one exact Base64 Helm scalar, including an empty file."""
+
+    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    payload = application_payload(
+        config,
+        TEST_APPLICATION_NAME,
+        uuid4(),
+        (),
+        instance_helm_values(kubeconfig=SecretBytes(kubeconfig)),
+    )
+
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert helm_arguments.endswith(f"--set server.config.kube={encoded}\n")
+    assert helm_arguments.count("--set server.config.kube=") == 1
 
 
 def test_existing_application_is_attached_and_overwritten() -> None:

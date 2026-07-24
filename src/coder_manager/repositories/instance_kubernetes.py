@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -23,8 +22,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from coder_manager.crypto import KubernetesTokenCipher
-    from coder_manager.schemas import InstanceKubernetesCreate, InstanceKubernetesUpdate
+    from coder_manager.crypto import KubeconfigCipher
 
 
 class InstanceKubernetesNotFoundError(Exception):
@@ -33,10 +31,6 @@ class InstanceKubernetesNotFoundError(Exception):
 
 class InstanceKubernetesAlreadyConfiguredError(Exception):
     """Raised when creating a provider that is already configured."""
-
-
-class InstanceKubernetesImmutableFieldError(Exception):
-    """Raised when an update attempts to change host or namespace."""
 
 
 class InstanceKubernetesRepository:
@@ -74,8 +68,8 @@ class InstanceKubernetesRepository:
     async def create_and_request_update(
         self,
         instance_id: UUID,
-        payload: InstanceKubernetesCreate,
-        cipher: KubernetesTokenCipher,
+        kubeconfig: bytes,
+        cipher: KubeconfigCipher,
     ) -> InstanceKubernetes:
         """Create provider data and atomically request an instance reconciliation."""
 
@@ -86,52 +80,9 @@ class InstanceKubernetesRepository:
 
         provider = InstanceKubernetes(
             instance_id=instance_id,
-            host=payload.host,
-            namespace=payload.namespace,
-            token_enc=cipher.encrypt(payload.token, instance_id),
-            ca=payload.ca,
+            kubeconfig_enc=cipher.encrypt(kubeconfig, instance_id),
         )
         self._session.add(provider)
-        instance.action = "updating"
-        instance.status = InstanceStatus.PENDING
-        job = add_job_execution(
-            self._session,
-            name="instance.update",
-            task_name=INSTANCE_UPDATE_STEP_01_TASK,
-            resource_type="instance",
-            resource_id=instance.id,
-            step=INSTANCE_UPDATE_STEP_01,
-        )
-        instance.job_id = job.id
-        instance.step = INSTANCE_UPDATE_STEP_01
-        await self._session.commit()
-        await self._session.refresh(provider)
-        return provider
-
-    async def update_and_request_update(
-        self,
-        instance_id: UUID,
-        payload: InstanceKubernetesUpdate,
-        cipher: KubernetesTokenCipher,
-    ) -> InstanceKubernetes:
-        """Update mutable provider data and atomically request reconciliation."""
-
-        instance = await self._lock_idle_instance(instance_id)
-        provider = await self._session.get(InstanceKubernetes, instance_id)
-        if provider is None:
-            await self._session.rollback()
-            raise InstanceKubernetesNotFoundError
-        if (payload.host is not None and payload.host != provider.host) or (
-            payload.namespace is not None and payload.namespace != provider.namespace
-        ):
-            await self._session.rollback()
-            raise InstanceKubernetesImmutableFieldError
-
-        provider.ca = payload.ca
-        if payload.token is not None:
-            provider.token_enc = cipher.encrypt(payload.token, instance_id)
-        provider.updated_at = datetime.now(UTC)
-
         instance.action = "updating"
         instance.status = InstanceStatus.PENDING
         job = add_job_execution(

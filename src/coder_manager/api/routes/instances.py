@@ -4,7 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -13,7 +13,7 @@ from coder_manager.crypto import (
     CryptoConfigurationError,
     InstancePasswordCipher,
     InstancePasswordDecryptionError,
-    KubernetesTokenCipher,
+    KubeconfigCipher,
 )
 from coder_manager.database import get_session
 from coder_manager.domains import argocd
@@ -24,7 +24,6 @@ from coder_manager.repositories import (
     InstanceAlreadyExistsError,
     InstanceDatabaseUnavailableError,
     InstanceKubernetesAlreadyConfiguredError,
-    InstanceKubernetesImmutableFieldError,
     InstanceKubernetesNotFoundError,
     InstanceKubernetesRepository,
     InstanceNotFoundError,
@@ -36,9 +35,7 @@ from coder_manager.schemas import (
     InstanceAdminCredentialsRead,
     InstanceArgoCdStatusRead,
     InstanceCreate,
-    InstanceKubernetesCreate,
     InstanceKubernetesRead,
-    InstanceKubernetesUpdate,
     InstancePage,
     InstanceRead,
     JobRead,
@@ -60,15 +57,15 @@ SettingsDependency = Annotated[Settings, Depends(get_settings)]
 NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 
 
-def kubernetes_token_cipher(settings: Settings) -> KubernetesTokenCipher:
-    """Build the token cipher or return a redacted configuration error."""
+def kubeconfig_cipher(settings: Settings) -> KubeconfigCipher:
+    """Build the kubeconfig cipher or return a redacted configuration error."""
 
     try:
-        return KubernetesTokenCipher(settings.crypto_key)
+        return KubeconfigCipher(settings.crypto_key)
     except CryptoConfigurationError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Kubernetes token encryption is not configured",
+            detail="Kubeconfig encryption is not configured",
         ) from error
 
 
@@ -86,14 +83,11 @@ def instance_password_cipher(settings: Settings) -> InstancePasswordCipher:
 
 
 def kubernetes_provider_read(provider: InstanceKubernetes) -> InstanceKubernetesRead:
-    """Build a provider response without exposing encrypted token material."""
+    """Build a provider response without exposing kubeconfig material."""
 
     return InstanceKubernetesRead(
         instance_id=provider.instance_id,
-        host=provider.host,
-        namespace=provider.namespace,
-        token_configured=bool(provider.token_enc),
-        ca=provider.ca,
+        kubeconfig_configured=True,
         created_at=provider.created_at,
         updated_at=provider.updated_at,
     )
@@ -190,7 +184,7 @@ async def get_instance_provider(
     instance_id: UUID,
     session: SessionDependency,
 ) -> InstanceKubernetesRead:
-    """Return the public Kubernetes configuration without its token."""
+    """Return Kubernetes provider status without its kubeconfig."""
 
     try:
         provider = await InstanceKubernetesRepository(session).get(instance_id)
@@ -214,17 +208,17 @@ async def get_instance_provider(
 )
 async def create_instance_provider(
     instance_id: UUID,
-    payload: InstanceKubernetesCreate,
+    kubeconfig: Annotated[UploadFile, File()],
     session: SessionDependency,
     settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceKubernetesRead]:
-    """Create Kubernetes configuration and enqueue an instance reconciliation."""
+    """Upload a kubeconfig and enqueue an instance reconciliation."""
 
     try:
         provider = await InstanceKubernetesRepository(session).create_and_request_update(
             instance_id,
-            payload,
-            kubernetes_token_cipher(settings),
+            await kubeconfig.read(),
+            kubeconfig_cipher(settings),
         )
     except InstanceNotFoundError as error:
         raise HTTPException(
@@ -240,51 +234,6 @@ async def create_instance_provider(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Kubernetes provider is already configured",
-        ) from error
-    job = await _instance_job(session, instance_id)
-    if job is not None:
-        dispatch_registered_step(step_01_update_instance.name, job.id)
-    return JobResourceResponse(resource=kubernetes_provider_read(provider), job=job)
-
-
-@router.put(
-    "/{instance_id}/provider",
-    status_code=status.HTTP_202_ACCEPTED,
-    summary="Update an instance Kubernetes provider",
-)
-async def update_instance_provider(
-    instance_id: UUID,
-    payload: InstanceKubernetesUpdate,
-    session: SessionDependency,
-    settings: SettingsDependency,
-) -> JobResourceResponse[InstanceKubernetesRead]:
-    """Update CA or token without allowing host or namespace changes."""
-
-    try:
-        provider = await InstanceKubernetesRepository(session).update_and_request_update(
-            instance_id,
-            payload,
-            kubernetes_token_cipher(settings),
-        )
-    except InstanceNotFoundError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Instance not found",
-        ) from error
-    except InstanceKubernetesNotFoundError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Kubernetes provider not configured",
-        ) from error
-    except InstanceActionConflictError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Instance has an action in progress",
-        ) from error
-    except InstanceKubernetesImmutableFieldError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Kubernetes provider host and namespace are immutable",
         ) from error
     job = await _instance_job(session, instance_id)
     if job is not None:

@@ -2,7 +2,6 @@
 
 from coder_manager.repositories.instance_kubernetes import (
     InstanceKubernetesAlreadyConfiguredError,
-    InstanceKubernetesImmutableFieldError,
     InstanceKubernetesNotFoundError,
     InstanceKubernetesRepository,
 )
@@ -81,7 +80,6 @@ __all__ = [
     "InstanceAlreadyExistsError",
     "InstanceDatabaseUnavailableError",
     "InstanceKubernetesAlreadyConfiguredError",
-    "InstanceKubernetesImmutableFieldError",
     "InstanceKubernetesNotFoundError",
     "InstanceKubernetesRepository",
     "InstanceNotFoundError",
