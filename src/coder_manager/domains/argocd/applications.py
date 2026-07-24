@@ -51,7 +51,7 @@ def application_payload(
     """
 
     users, admins = _member_values(config.default_admins, members)
-    cyberark = config.cyberark_for(helm_values.region, helm_values.environment)
+    cyberark = config.cyberark_for(helm_values.environment)
     helm_arguments = "\n".join(
         (
             f"--namespace {APPLICATION_NAMESPACE}",
@@ -112,7 +112,6 @@ def application_payload(
                                 "appId": cyberark.app_id,
                                 "certName": cyberark.cert_name,
                                 "keyName": cyberark.key_name,
-                                "region": helm_values.region.upper(),
                                 "safe": cyberark.safe,
                             },
                         }

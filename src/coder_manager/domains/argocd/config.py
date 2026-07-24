@@ -18,14 +18,13 @@ APPLICATION_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$")
 MAX_APPLICATION_NAME_LENGTH = 63
 UUID_HEX_LENGTH = 32
 MAX_USERNAME_LENGTH = 255
-INSTANCE_REGIONS = ("emea", "apac", "amer")
 INSTANCE_ENVIRONMENTS = ("development", "staging", "production")
 CYBERARK_FIELDS = ("app_id", "cert_name", "key_name", "safe")
 
 
 @dataclass(frozen=True)
 class CyberArkParameters:
-    """Plugin parameters selected for one instance region and environment."""
+    """Plugin parameters selected for one instance environment."""
 
     app_id: str
     cert_name: str
@@ -46,7 +45,7 @@ class ArgoCdConfig:
     repository_path: str
     target_revision: str
     destination_name: str
-    cyberark_parameters: Mapping[tuple[str, str], CyberArkParameters]
+    cyberark_parameters: Mapping[str, CyberArkParameters]
     default_admins: tuple[str, ...]
 
     @classmethod
@@ -91,13 +90,13 @@ class ArgoCdConfig:
             default_admins=_parse_default_admins(settings.default_admins),
         )
 
-    def cyberark_for(self, region: str, environment: str) -> CyberArkParameters:
+    def cyberark_for(self, environment: str) -> CyberArkParameters:
         """Return the CyberArk parameters configured for one instance target."""
 
         try:
-            return self.cyberark_parameters[(region, environment)]
+            return self.cyberark_parameters[environment]
         except KeyError as error:  # pragma: no cover - callers use domain enum values
-            msg = f"Unsupported CyberArk target: {region}/{environment}"
+            msg = f"Unsupported CyberArk target: {environment}"
             raise ArgoCdConfigurationError(msg) from error
 
 
@@ -111,14 +110,13 @@ def _required_value(values: Mapping[str, str | None], name: str) -> str:
 
 
 def _cyberark_settings(settings: Settings) -> dict[str, str | None]:
-    """Collect the nine region/environment CyberArk setting groups."""
+    """Collect the three environment-specific CyberArk setting groups."""
 
     return {
-        _cyberark_environment_name(region, environment, field_name): getattr(
+        _cyberark_environment_name(environment, field_name): getattr(
             settings,
-            f"cyberark_{region}_{environment}_{field_name}",
+            f"cyberark_{environment}_{field_name}",
         )
-        for region in INSTANCE_REGIONS
         for environment in INSTANCE_ENVIRONMENTS
         for field_name in CYBERARK_FIELDS
     }
@@ -126,38 +124,37 @@ def _cyberark_settings(settings: Settings) -> dict[str, str | None]:
 
 def _cyberark_parameters(
     values: Mapping[str, str | None],
-) -> Mapping[tuple[str, str], CyberArkParameters]:
+) -> Mapping[str, CyberArkParameters]:
     """Build an immutable lookup for all supported instance targets."""
 
     parameters = {
-        (region, environment): CyberArkParameters(
+        environment: CyberArkParameters(
             app_id=_required_value(
                 values,
-                _cyberark_environment_name(region, environment, "app_id"),
+                _cyberark_environment_name(environment, "app_id"),
             ),
             cert_name=_required_value(
                 values,
-                _cyberark_environment_name(region, environment, "cert_name"),
+                _cyberark_environment_name(environment, "cert_name"),
             ),
             key_name=_required_value(
                 values,
-                _cyberark_environment_name(region, environment, "key_name"),
+                _cyberark_environment_name(environment, "key_name"),
             ),
             safe=_required_value(
                 values,
-                _cyberark_environment_name(region, environment, "safe"),
+                _cyberark_environment_name(environment, "safe"),
             ),
         )
-        for region in INSTANCE_REGIONS
         for environment in INSTANCE_ENVIRONMENTS
     }
     return MappingProxyType(parameters)
 
 
-def _cyberark_environment_name(region: str, environment: str, field_name: str) -> str:
+def _cyberark_environment_name(environment: str, field_name: str) -> str:
     """Return the public environment variable name for one CyberArk value."""
 
-    return f"CODER_MANAGER_CYBERARK_{region}_{environment}_{field_name}".upper()
+    return f"CODER_MANAGER_CYBERARK_{environment}_{field_name}".upper()
 
 
 def _parse_default_admins(raw_value: str) -> tuple[str, ...]:

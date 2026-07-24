@@ -6,8 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StringConstraints, field_validator
 
-from coder_manager.models import InstanceRegion
-
 NonEmptyString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
 ]
@@ -29,7 +27,6 @@ class DatabaseMutableFields(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: NonEmptyString
-    region: InstanceRegion
     instance_max: Annotated[int, Field(ge=1)]
     host: NonEmptyString
     port: Annotated[int, Field(ge=1, le=65535)] = 5432
@@ -65,7 +62,6 @@ class DatabaseRead(BaseModel):
 
     id: UUID
     name: str
-    region: InstanceRegion
     instance_max: int
     host: str
     port: int
@@ -85,7 +81,6 @@ class DatabaseListQuery(BaseModel):
 
     page: Annotated[int, Field(ge=1)] = 1
     page_size: Annotated[int, Field(ge=1, le=100)] = 20
-    region: InstanceRegion | None = None
     name: Annotated[
         str | None,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
@@ -103,7 +98,7 @@ class DatabasePage(BaseModel):
 
 
 class DatabaseUsageStatistics(BaseModel):
-    """Capacity statistics shared by global and regional views."""
+    """Capacity statistics shared by global and per-database views."""
 
     database_count: int
     total_capacity: int
@@ -112,18 +107,11 @@ class DatabaseUsageStatistics(BaseModel):
     utilization_percent: float
 
 
-class DatabaseRegionStatistics(DatabaseUsageStatistics):
-    """Capacity statistics for one region."""
-
-    region: InstanceRegion
-
-
 class DatabaseItemStatistics(BaseModel):
     """Capacity statistics for one managed database."""
 
     id: UUID
     name: str
-    region: InstanceRegion
     instance_max: int
     allocated_instances: int
     available_slots: int
@@ -131,7 +119,6 @@ class DatabaseItemStatistics(BaseModel):
 
 
 class DatabaseStatistics(DatabaseUsageStatistics):
-    """Consolidated pool statistics with regional and per-database detail."""
+    """Consolidated pool statistics with per-database detail."""
 
-    regions: list[DatabaseRegionStatistics]
     databases: list[DatabaseItemStatistics]

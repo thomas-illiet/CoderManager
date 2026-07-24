@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from coder_manager.config import Settings, get_settings
 from coder_manager.database import get_session
 from coder_manager.main import app
-from coder_manager.models import Database, InstanceRegion
+from coder_manager.models import Database
 from coder_manager.models.base import Base
 from coder_manager.tasks import (
     retry_job_executions,
@@ -72,19 +72,17 @@ async def session_maker(tmp_path: Path) -> AsyncIterator[async_sessionmaker[Asyn
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     async with maker() as session:
-        session.add_all(
+        session.add(
             Database(
                 id=uuid4(),
-                name=f"test-{region.value}",
-                region=region,
+                name="test",
                 instance_max=100,
-                host=f"postgres-{region.value}.internal",
+                host="postgres.internal",
                 port=5432,
                 database_name="coder",
                 username="coder_manager",
                 password_enc=b"test-only",
             )
-            for region in InstanceRegion
         )
         await session.commit()
     yield maker

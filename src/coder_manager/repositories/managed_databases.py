@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from coder_manager.models import Database, DatabaseAllocation, InstanceRegion
+from coder_manager.models import Database, DatabaseAllocation
 
 if TYPE_CHECKING:
     from sqlalchemy import Select
@@ -34,10 +34,6 @@ class DatabaseInUseError(Exception):
 
 class DatabaseCapacityConflictError(Exception):
     """Raised when a capacity update would be lower than current usage."""
-
-
-class DatabaseRegionConflictError(Exception):
-    """Raised when changing the region of a database with allocations."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,16 +67,12 @@ class DatabaseRepository:
         *,
         page: int,
         page_size: int,
-        region: InstanceRegion | None = None,
         name: str | None = None,
     ) -> tuple[list[DatabaseUsage], int]:
         """Return a filtered page with allocation counts."""
 
         count_statement = select(func.count()).select_from(Database)
         usage_statement = self._usage_statement()
-        if region is not None:
-            count_statement = count_statement.where(Database.region == region)
-            usage_statement = usage_statement.where(Database.region == region)
         if name is not None:
             condition = Database.name.icontains(name, autoescape=True)
             count_statement = count_statement.where(condition)
@@ -95,11 +87,10 @@ class DatabaseRepository:
         return [DatabaseUsage(database, count) for database, count in rows], total or 0
 
     async def list_usage(self) -> list[DatabaseUsage]:
-        """Return usage for every database in deterministic regional order."""
+        """Return usage for every database in deterministic order."""
 
         rows = await self._session.execute(
             self._usage_statement().order_by(
-                Database.region,
                 func.lower(Database.name),
                 Database.name,
                 Database.id,
@@ -125,7 +116,6 @@ class DatabaseRepository:
         database = Database(
             id=database_id,
             name=payload.name,
-            region=payload.region,
             instance_max=payload.instance_max,
             host=payload.host,
             port=payload.port,
@@ -150,7 +140,7 @@ class DatabaseRepository:
     ) -> DatabaseUsage:
         """Replace public fields while preserving or rotating the encrypted password."""
 
-        # Lock the database so capacity and region checks use a stable allocation count.
+        # Lock the database so capacity checks use a stable allocation count.
         database = await self._session.scalar(
             select(Database).where(Database.id == database_id).with_for_update()
         )
@@ -168,13 +158,8 @@ class DatabaseRepository:
         if payload.instance_max < allocated_instances:
             await self._session.rollback()
             raise DatabaseCapacityConflictError
-        if payload.region != database.region and allocated_instances:
-            await self._session.rollback()
-            raise DatabaseRegionConflictError
-
         # Apply connection metadata only after allocation invariants have passed.
         database.name = payload.name
-        database.region = payload.region
         database.instance_max = payload.instance_max
         database.host = payload.host
         database.port = payload.port

@@ -24,7 +24,6 @@ from coder_manager.repositories.managed_databases import (
     DatabaseCapacityConflictError,
     DatabaseInUseError,
     DatabaseNotFoundError,
-    DatabaseRegionConflictError,
     DatabaseRepository,
     DatabaseUsage,
 )
@@ -75,7 +74,6 @@ __all__ = [
     "DatabaseCapacityConflictError",
     "DatabaseInUseError",
     "DatabaseNotFoundError",
-    "DatabaseRegionConflictError",
     "DatabaseRepository",
     "DatabaseUsage",
     "InstanceActionConflictError",

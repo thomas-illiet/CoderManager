@@ -365,7 +365,7 @@ async def create_instance(
     except InstanceDatabaseUnavailableError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="No database capacity available for region",
+            detail="No database capacity available",
         ) from error
     job = await _job_read(session, getattr(instance, "job_id", None))
     if job is not None:

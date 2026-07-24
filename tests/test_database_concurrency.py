@@ -55,14 +55,13 @@ async def postgres_session_maker() -> AsyncIterator[async_sessionmaker[AsyncSess
 async def test_concurrent_reservations_never_exceed_instance_max(
     postgres_session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Serialize regional placement so two requests cannot claim the final slot."""
+    """Serialize global placement so two requests cannot claim the final slot."""
 
     applications = ["APP-1", "APP-2"]
     async with postgres_session_maker() as session:
         session.add(
             Database(
                 name="only",
-                region="emea",
                 instance_max=1,
                 host="postgres.internal",
                 port=5432,
@@ -81,7 +80,6 @@ async def test_concurrent_reservations_never_exceed_instance_max(
                 await InstanceRepository(session).create(
                     InstanceCreate(
                         application=application,
-                        region="emea",
                         environment="development",
                     ),
                     instance_domain="code-studio",

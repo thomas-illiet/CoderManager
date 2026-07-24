@@ -24,7 +24,7 @@ from coder_manager.domains.argocd.applications import application_name
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 EXPECTED_INSTANCE_HELM_ARGS = (
-    f"--set global.baseDomain={TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet\n"
+    f"--set global.baseDomain={TEST_INSTANCE_SLUG}.code-studio.dev.echonet\n"
     "--set server.config.database.username=db-user\n"
     "--set server.config.database.password=managed\\, secret\n"
     "--set server.config.database.host=postgres.internal\n"
@@ -47,17 +47,16 @@ def configured_settings(**overrides: object) -> Settings:
         "argocd_destination_name": "in-cluster",
         "default_admins": " Root.Admin,alice ",
     }
-    for region in ("emea", "apac", "amer"):
-        for environment in ("development", "staging", "production"):
-            prefix = f"cyberark_{region}_{environment}"
-            values.update(
-                {
-                    f"{prefix}_app_id": f"{region}-{environment}-app",
-                    f"{prefix}_cert_name": f"{region}-{environment}-cert",
-                    f"{prefix}_key_name": f"{region}-{environment}-key",
-                    f"{prefix}_safe": f"{region}-{environment}-safe",
-                }
-            )
+    for environment in ("development", "staging", "production"):
+        prefix = f"cyberark_{environment}"
+        values.update(
+            {
+                f"{prefix}_app_id": f"{environment}-app",
+                f"{prefix}_cert_name": f"{environment}-cert",
+                f"{prefix}_key_name": f"{environment}-key",
+                f"{prefix}_safe": f"{environment}-safe",
+            }
+        )
     values.update(overrides)
     return Settings.model_validate(values)
 
@@ -66,9 +65,8 @@ def instance_helm_values(**overrides: object) -> InstanceHelmValues:
     """Build complete instance-specific Helm values with optional overrides."""
 
     values: dict[str, object] = {
-        "region": "emea",
         "environment": "development",
-        "public_url": f"https://{TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet",
+        "public_url": f"https://{TEST_INSTANCE_SLUG}.code-studio.dev.echonet",
         "database_username": "db-user",
         "database_password": SecretStr("managed, secret"),
         "database_host": "postgres.internal",
@@ -141,11 +139,10 @@ def test_create_application_and_sync_contract() -> None:
                 {
                     "name": "cyberark",
                     "map": {
-                        "appId": "emea-development-app",
-                        "certName": "emea-development-cert",
-                        "keyName": "emea-development-key",
-                        "region": "EMEA",
-                        "safe": "emea-development-safe",
+                        "appId": "development-app",
+                        "certName": "development-cert",
+                        "keyName": "development-key",
+                        "safe": "development-safe",
                     },
                 }
             ],
@@ -197,7 +194,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
             TEST_INSTANCE_SLUG,
             attached_name,
             (),
-            instance_helm_values(region="apac", environment="staging"),
+            instance_helm_values(environment="staging"),
         )
 
     assert returned_name == attached_name
@@ -220,11 +217,10 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         }
     ]
     assert update["spec"]["source"]["plugin"]["parameters"][0]["map"] == {
-        "appId": "apac-staging-app",
-        "certName": "apac-staging-cert",
-        "keyName": "apac-staging-key",
-        "region": "APAC",
-        "safe": "apac-staging-safe",
+        "appId": "staging-app",
+        "certName": "staging-cert",
+        "keyName": "staging-key",
+        "safe": "staging-safe",
     }
     assert "status" not in update
 
@@ -256,7 +252,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             TEST_INSTANCE_SLUG,
             "attached",
             (),
-            instance_helm_values(region="amer", environment="production"),
+            instance_helm_values(environment="production"),
         )
 
     assert [request.method for request in requests] == ["GET", "POST", "GET", "PUT", "POST"]
@@ -545,8 +541,8 @@ def test_client_tls_and_timeout_configuration(
             "longer than 255",
         ),
         (
-            configured_settings(cyberark_amer_production_safe=" "),
-            "CODER_MANAGER_CYBERARK_AMER_PRODUCTION_SAFE",
+            configured_settings(cyberark_production_safe=" "),
+            "CODER_MANAGER_CYBERARK_PRODUCTION_SAFE",
         ),
     ],
 )

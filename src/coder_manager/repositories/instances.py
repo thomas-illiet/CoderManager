@@ -52,7 +52,7 @@ class InstanceActionConflictError(Exception):
 
 
 class InstanceDatabaseUnavailableError(Exception):
-    """Raised when no database in the requested region has a free slot."""
+    """Raised when no managed database has a free slot."""
 
 
 class InvalidInstanceActionError(Exception):
@@ -73,7 +73,7 @@ def instance_url(
     """Build the immutable public URL for a new instance."""
 
     environment = ENVIRONMENT_DNS_LABELS[payload.environment]
-    return f"https://{slug}.{payload.region.value}.{instance_domain}.{environment}.echonet"
+    return f"https://{slug}.{instance_domain}.{environment}.echonet"
 
 
 class InstanceRepository:
@@ -111,7 +111,6 @@ class InstanceRepository:
         result = await self._session.scalars(
             list_statement.order_by(
                 Instance.application,
-                Instance.region,
                 Instance.environment,
                 Instance.id,
             )
@@ -135,13 +134,12 @@ class InstanceRepository:
         *,
         instance_domain: str,
     ) -> Instance:
-        """Create an instance and reserve capacity on the least utilized regional database."""
+        """Create an instance and reserve capacity on the least utilized database."""
 
-        # Lock every regional candidate so concurrent requests cannot overbook a database.
+        # Lock every candidate so concurrent requests cannot overbook a database.
         databases = list(
             await self._session.scalars(
                 select(Database)
-                .where(Database.region == payload.region)
                 .order_by(func.lower(Database.name), Database.name, Database.id)
                 .with_for_update()
             )
@@ -185,7 +183,6 @@ class InstanceRepository:
             id=instance_id,
             application=payload.application,
             slug=slug,
-            region=payload.region,
             environment=payload.environment,
             action="creating",
             status=InstanceStatus.PENDING,

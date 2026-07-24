@@ -23,7 +23,6 @@ from coder_manager.main import app
 from coder_manager.models import (
     Instance,
     InstanceEnvironment,
-    InstanceRegion,
     InstanceStatus,
     JobExecution,
     JobStatus,
@@ -52,7 +51,6 @@ async def create_instance(
     client: AsyncClient,
     application: str,
     *,
-    region: str = "emea",
     environment: str = "development",
 ) -> dict[str, str]:
     """Create and return one Coder instance through the API."""
@@ -61,7 +59,6 @@ async def create_instance(
         "/api/v1/instances",
         json={
             "application": application,
-            "region": region,
             "environment": environment,
         },
     )
@@ -86,7 +83,6 @@ async def test_create_instance_get_and_missing(
         "id",
         "application",
         "slug",
-        "region",
         "environment",
         "action",
         "status",
@@ -104,7 +100,7 @@ async def test_create_instance_get_and_missing(
     assert created["action"] == "creating"
     assert created["status"] == "pending"
     assert created["argocd_application_name"] is None
-    assert created["instance_url"] == (f"https://{TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet")
+    assert created["instance_url"] == f"https://{TEST_INSTANCE_SLUG}.code-studio.dev.echonet"
     assert UUID(created["database_id"])
     assert created["schema_name"] == f"coder_{UUID(created['id']).hex}"
     assert datetime.fromisoformat(created["created_at"])
@@ -247,7 +243,6 @@ async def test_removed_application_contract_is_rejected(client: AsyncClient) -> 
         "/api/v1/instances",
         json={
             "application_id": str(uuid4()),
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -305,9 +300,7 @@ async def test_instance_domain_is_configurable(
     app.dependency_overrides[get_settings] = lambda: Settings(instance_domain="coder-studio")
     instance = await create_instance(client, "Mon Équipe / Portail")
 
-    assert instance["instance_url"] == (
-        f"https://{TEST_INSTANCE_SLUG}.emea.coder-studio.dev.echonet"
-    )
+    assert instance["instance_url"] == f"https://{TEST_INSTANCE_SLUG}.coder-studio.dev.echonet"
 
 
 async def test_create_rejects_legacy_application_id_and_extra_name(client: AsyncClient) -> None:
@@ -317,7 +310,6 @@ async def test_create_rejects_legacy_application_id_and_extra_name(client: Async
         "/api/v1/instances",
         json={
             "application_id": str(uuid4()),
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -325,7 +317,6 @@ async def test_create_rejects_legacy_application_id_and_extra_name(client: Async
         "/api/v1/instances",
         json={
             "application": "APP",
-            "region": "emea",
             "environment": "development",
             "name": "Instances do not have names",
         },
@@ -340,11 +331,11 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
 ) -> None:
     """Reject invalid API values without imposing DNS rules on applications."""
 
-    invalid_region = await client.post(
+    removed_region = await client.post(
         "/api/v1/instances",
         json={
             "application": "APP",
-            "region": "antarctica",
+            "region": "emea",
             "environment": "development",
         },
     )
@@ -352,7 +343,6 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "APP",
-            "region": "emea",
             "environment": "testing",
         },
     )
@@ -361,7 +351,6 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "   ",
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -369,7 +358,6 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "a" * 256,
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -378,7 +366,6 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "!!!",
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -386,12 +373,11 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "a" * 64,
-            "region": "emea",
             "environment": "development",
         },
     )
 
-    assert invalid_region.status_code == 422
+    assert removed_region.status_code == 422
     assert invalid_environment.status_code == 422
     assert invalid_page.status_code == 422
     assert empty_application.status_code == 422
@@ -411,7 +397,6 @@ async def test_placement_conflicts_and_previous_slug_collisions_are_allowed(
         "/api/v1/instances",
         json={
             "application": "my app",
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -419,7 +404,6 @@ async def test_placement_conflicts_and_previous_slug_collisions_are_allowed(
         "/api/v1/instances",
         json={
             "application": "my-app",
-            "region": "emea",
             "environment": "development",
         },
     )
@@ -470,7 +454,6 @@ async def test_same_placement_is_allowed_for_different_applications(client: Asyn
     first = await create_instance(client, "First App")
     second = await create_instance(client, "Second App")
 
-    assert first["region"] == second["region"] == "emea"
     assert first["environment"] == second["environment"] == "development"
 
 
@@ -571,11 +554,10 @@ def instance_record() -> SimpleNamespace:
         id=uuid4(),
         application="APP",
         slug=TEST_INSTANCE_SLUG,
-        region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
         action="creating",
         status=InstanceStatus.PENDING,
-        instance_url="https://app.emea.code-studio.dev.echonet",
+        instance_url="https://app.code-studio.dev.echonet",
         argocd_application_name="managed-attached",
         created_at=now,
         updated_at=now,
@@ -622,7 +604,6 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(instance_routes, "InstanceRepository", SuccessfulRepository)
     payload = InstanceCreate(
         application=record.application,
-        region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
     )
 
@@ -671,7 +652,6 @@ async def test_create_instance_route_error_mapping(
     monkeypatch.setattr(instance_routes, "InstanceRepository", FailingRepository)
     payload = InstanceCreate(
         application="APP",
-        region=InstanceRegion.EMEA,
         environment=InstanceEnvironment.DEVELOPMENT,
     )
 

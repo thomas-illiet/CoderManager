@@ -31,7 +31,6 @@ async def create_instance(client: AsyncClient, application: str) -> dict[str, ob
         "/api/v1/instances",
         json={
             "application": application,
-            "region": "emea",
             "environment": "development",
         },
     )

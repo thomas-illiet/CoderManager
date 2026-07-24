@@ -50,14 +50,13 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Claim members, reconcile Argo CD, and finalize the pass."""
 
-        member_ids, members, slug, attached_name, region, environment, public_url = _claim_members(
+        member_ids, members, slug, attached_name, environment, public_url = _claim_members(
             claim,
             session_factory,
         )
         try:
             helm_values = instance_helm_values(
                 required_resource_id(claim),
-                region,
                 environment,
                 public_url,
                 session_factory,
@@ -89,7 +88,6 @@ def _claim_members(
     tuple[tuple[str, str], ...],
     str | None,
     str | None,
-    str,
     str,
     str,
 ]:
@@ -128,7 +126,6 @@ def _claim_members(
             active_members,
             instance.slug,
             instance.argocd_application_name,
-            instance.region.value,
             instance.environment.value,
             instance.instance_url,
         )

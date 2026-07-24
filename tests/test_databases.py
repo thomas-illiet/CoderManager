@@ -35,7 +35,6 @@ from coder_manager.repositories import (
     DatabaseCapacityConflictError,
     DatabaseInUseError,
     DatabaseNotFoundError,
-    DatabaseRegionConflictError,
     InstanceRepository,
 )
 from coder_manager.schemas import DatabaseCreate, DatabaseUpdate
@@ -47,7 +46,6 @@ OTHER_CRYPTO_KEY = b64encode(b"z" * 32).decode()
 def database_payload(
     name: str,
     *,
-    region: str = "emea",
     instance_max: int = 2,
     password: str = "database-secret",
 ) -> dict[str, object]:
@@ -55,7 +53,6 @@ def database_payload(
 
     return {
         "name": name,
-        "region": region,
         "instance_max": instance_max,
         "host": f"{name.lower()}.postgres.internal",
         "port": 5432,
@@ -95,8 +92,6 @@ def application_identifier(suffix: str) -> str:
 async def create_coder_instance(
     client: AsyncClient,
     application: str,
-    *,
-    region: str = "emea",
 ) -> dict[str, object]:
     """Create one Coder instance through the API."""
 
@@ -104,7 +99,6 @@ async def create_coder_instance(
         "/api/v1/instances",
         json={
             "application": application,
-            "region": region,
             "environment": "development",
         },
     )
@@ -194,7 +188,6 @@ async def test_database_route_error_mapping(monkeypatch: pytest.MonkeyPatch) -> 
             DatabaseCapacityConflictError,
             "instance_max cannot be lower than current allocations",
         ),
-        (DatabaseRegionConflictError, "A database with allocations cannot change region"),
     ):
         FailingRepository.error = repository_error
         with pytest.raises(HTTPException) as update_error:
@@ -218,7 +211,7 @@ async def test_database_crud_encrypts_and_rotates_password(
 ) -> None:
     """Verify the database crud encrypts and rotates password scenario."""
 
-    created = await create_database(client, name="Finance EMEA", password="first-secret")
+    created = await create_database(client, name="Finance", password="first-secret")
 
     assert created["password_configured"] is True
     assert "password" not in created
@@ -239,11 +232,13 @@ async def test_database_crud_encrypts_and_rotates_password(
     fetched = await client.get(f"/api/v1/databases/{database_id}")
     listed = await client.get(
         "/api/v1/databases",
-        params={"region": "emea", "name": "finance"},
+        params={"name": "finance"},
     )
+    removed_filter = await client.get("/api/v1/databases", params={"region": "emea"})
     assert fetched.status_code == 200
     assert listed.status_code == 200
     assert listed.json()["total"] == 1
+    assert removed_filter.status_code == 422
 
     update_payload = database_payload("Finance Europe", instance_max=4)
     update_payload.pop("password")
@@ -313,7 +308,6 @@ async def test_managed_database_connection_executes_probe(
     monkeypatch.setattr(database_routes.asyncpg, "connect", connect)
     database = Database(
         name="Probe",
-        region="emea",
         instance_max=1,
         host="postgres.internal",
         port=5433,
@@ -373,7 +367,7 @@ async def test_database_validation_duplicates_and_crypto_configuration(
     """Verify the database validation duplicates and crypto configuration scenario."""
 
     first = await create_database(client, name="Case Sensitive")
-    second = await create_database(client, name="Second Name")
+    await create_database(client, name="Second Name")
     duplicate = await client.post(
         "/api/v1/databases",
         json=database_payload("case sensitive"),
@@ -382,6 +376,9 @@ async def test_database_validation_duplicates_and_crypto_configuration(
         "/api/v1/databases",
         json=database_payload("Invalid", instance_max=0, password=""),
     )
+    removed_region_payload = database_payload("Legacy Field")
+    removed_region_payload["region"] = "emea"
+    removed_region = await client.post("/api/v1/databases", json=removed_region_payload)
     leak_marker = "secret-leak-marker" * 300
     invalid_password = await client.post(
         "/api/v1/databases",
@@ -389,6 +386,7 @@ async def test_database_validation_duplicates_and_crypto_configuration(
     )
     assert duplicate.status_code == 409
     assert invalid.status_code == 422
+    assert removed_region.status_code == 422
     assert invalid_password.status_code == 422
     assert leak_marker not in invalid_password.text
     assert "[REDACTED]" in invalid_password.text
@@ -409,12 +407,6 @@ async def test_database_validation_duplicates_and_crypto_configuration(
     assert missing_update.status_code == 404
     assert missing_delete.status_code == 404
 
-    moved_payload = database_payload("Second Name", region="apac")
-    moved_payload.pop("password")
-    moved = await client.put(f"/api/v1/databases/{second['id']}", json=moved_payload)
-    assert moved.status_code == 200
-    assert moved.json()["region"] == "apac"
-
     app.dependency_overrides[get_settings] = lambda: Settings(crypto_key="invalid")
     unavailable = await client.post(
         "/api/v1/databases",
@@ -434,7 +426,7 @@ async def test_allocation_balances_by_utilization_and_statistics(
     await clear_database_pool(session_maker)
     alpha = await create_database(client, name="Alpha", instance_max=2)
     beta = await create_database(client, name="Beta", instance_max=4)
-    await create_database(client, name="APAC", region="apac", instance_max=3)
+    gamma = await create_database(client, name="Gamma", instance_max=3)
 
     instances = [
         await create_coder_instance(client, application_identifier(str(suffix)))
@@ -444,8 +436,8 @@ async def test_allocation_balances_by_utilization_and_statistics(
     assert [instance["database_id"] for instance in instances] == [
         alpha["id"],
         beta["id"],
+        gamma["id"],
         beta["id"],
-        alpha["id"],
     ]
     assert all(
         instance["schema_name"] == f"coder_{UUID(str(instance['id'])).hex}"
@@ -460,27 +452,10 @@ async def test_allocation_balances_by_utilization_and_statistics(
     assert statistics["allocated_instances"] == 4
     assert statistics["available_slots"] == 5
     assert statistics["utilization_percent"] == 44.44
-    assert statistics["regions"] == [
-        {
-            "region": "emea",
-            "database_count": 2,
-            "total_capacity": 6,
-            "allocated_instances": 4,
-            "available_slots": 2,
-            "utilization_percent": 66.67,
-        },
-        {
-            "region": "apac",
-            "database_count": 1,
-            "total_capacity": 3,
-            "allocated_instances": 0,
-            "available_slots": 3,
-            "utilization_percent": 0.0,
-        },
-    ]
     per_database = {item["name"]: item for item in statistics["databases"]}
-    assert per_database["Alpha"]["utilization_percent"] == 100.0
+    assert per_database["Alpha"]["utilization_percent"] == 50.0
     assert per_database["Beta"]["utilization_percent"] == 50.0
+    assert per_database["Gamma"]["utilization_percent"] == 33.33
 
 
 async def test_database_instances_are_paginated_and_scoped(
@@ -490,22 +465,20 @@ async def test_database_instances_are_paginated_and_scoped(
     """Verify the database instances are paginated and scoped scenario."""
 
     await clear_database_pool(session_maker)
-    database = await create_database(client, name="Instances EMEA", instance_max=3)
-    other_database = await create_database(
-        client,
-        name="Instances APAC",
-        region="apac",
-        instance_max=1,
-    )
+    database = await create_database(client, name="Instances Primary", instance_max=3)
 
     expected_instances = [
         await create_coder_instance(client, application_identifier(suffix))
         for suffix in ("database-list-one", "database-list-two")
     ]
+    other_database = await create_database(
+        client,
+        name="Instances Other",
+        instance_max=1,
+    )
     other_instance = await create_coder_instance(
         client,
         application_identifier("database-list-other"),
-        region="apac",
     )
 
     first_page = await client.get(
@@ -577,7 +550,6 @@ async def test_empty_statistics_and_no_capacity_are_atomic(
         "allocated_instances": 0,
         "available_slots": 0,
         "utilization_percent": 0.0,
-        "regions": [],
         "databases": [],
     }
 
@@ -587,12 +559,11 @@ async def test_empty_statistics_and_no_capacity_are_atomic(
         "/api/v1/instances",
         json={
             "application": application_identifier("second"),
-            "region": "emea",
             "environment": "development",
         },
     )
     assert rejected.status_code == 409
-    assert rejected.json() == {"detail": "No database capacity available for region"}
+    assert rejected.json() == {"detail": "No database capacity available"}
     async with session_maker() as session:
         assert await session.scalar(select(func.count()).select_from(Instance)) == 1
         assert await session.scalar(select(func.count()).select_from(DatabaseAllocation)) == 1
@@ -601,11 +572,11 @@ async def test_empty_statistics_and_no_capacity_are_atomic(
         assert str(allocation.database_id) == database["id"]
 
 
-async def test_in_use_database_rejects_capacity_region_and_deletion(
+async def test_in_use_database_rejects_capacity_and_deletion(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Verify the in use database rejects capacity region and deletion scenario."""
+    """Verify an in-use database rejects invalid capacity and deletion."""
 
     await clear_database_pool(session_maker)
     database = await create_database(client, name="Busy", instance_max=2)
@@ -614,12 +585,9 @@ async def test_in_use_database_rejects_capacity_region_and_deletion(
 
     payload = database_payload("Busy", instance_max=1)
     capacity = await client.put(f"/api/v1/databases/{database['id']}", json=payload)
-    payload = database_payload("Busy", region="apac", instance_max=2)
-    region = await client.put(f"/api/v1/databases/{database['id']}", json=payload)
     deletion = await client.delete(f"/api/v1/databases/{database['id']}")
 
     assert capacity.status_code == 409
-    assert region.status_code == 409
     assert deletion.status_code == 409
 
 

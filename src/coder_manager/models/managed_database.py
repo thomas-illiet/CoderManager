@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
-    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -21,7 +20,6 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from coder_manager.models.base import Base
-from coder_manager.models.instance import InstanceRegion, enum_values
 
 if TYPE_CHECKING:
     from coder_manager.models.instance import Instance
@@ -43,11 +41,6 @@ class Database(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    region: Mapped[InstanceRegion] = mapped_column(
-        Enum(InstanceRegion, name="instance_region", values_callable=enum_values),
-        nullable=False,
-        index=True,
-    )
     instance_max: Mapped[int] = mapped_column(Integer, nullable=False)
     host: Mapped[str] = mapped_column(String(255), nullable=False)
     port: Mapped[int] = mapped_column(Integer, nullable=False, default=5432, server_default="5432")

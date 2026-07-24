@@ -42,8 +42,8 @@ All endpoints are under `/api/v1`:
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/health` | API liveness |
-| `GET` | `/databases?page=1&page_size=20&region=emea` | Paginated database pool list |
-| `GET` | `/databases/statistics` | Global, regional, and per-database usage |
+| `GET` | `/databases?page=1&page_size=20&name=primary` | Paginated database pool list |
+| `GET` | `/databases/statistics` | Global and per-database usage |
 | `POST` | `/databases/sync` | Request database synchronization |
 | `GET` | `/databases/{id}` | Get one database pool entry |
 | `GET` | `/databases/{id}/check` | Check the stored database connection |
@@ -83,15 +83,14 @@ All endpoints are under `/api/v1`:
 
 ## Database pool API
 
-Every Coder instance reserves one logical PostgreSQL schema from a database in its region. Add a
+Every Coder instance reserves one logical PostgreSQL schema from the global database pool. Add a
 pool entry with:
 
 ```json
 {
-  "name": "EMEA primary",
-  "region": "emea",
+  "name": "Primary",
   "instance_max": 20,
-  "host": "postgres-emea.internal",
+  "host": "postgres.internal",
   "port": 5432,
   "database_name": "coder",
   "username": "coder_admin",
@@ -102,12 +101,12 @@ pool entry with:
 Set `CODER_MANAGER_CRYPTO_KEY` to a base64-encoded 32-byte key, for example with
 `openssl rand -base64 32`. Only the password is encrypted with AES-256-GCM in `password_enc`; it is
 never returned by the API. `PUT` keeps the existing password when the field is omitted. Database
-names are case-insensitively unique, and entries with active allocations cannot be deleted, moved
-to another region, or reduced below their current usage.
+names are case-insensitively unique, and entries with active allocations cannot be deleted or
+reduced below their current usage.
 
 `GET /api/v1/databases/statistics` reports total capacity, allocations, available slots, and
-utilization percentages globally, by region, and for every pool entry. These values are derived
-from allocation rows rather than stored counters.
+utilization percentages globally and for every pool entry. These values are derived from allocation
+rows rather than stored counters.
 
 `GET /api/v1/databases/{id}/check` decrypts the stored password and opens a short-lived PostgreSQL
 connection to validate the configured host, port, database, username, and password. Connection
@@ -118,27 +117,26 @@ the request remains observable and retryable even when the broker is temporarily
 
 ## Instances API
 
-Instances are identified by their application, region, and environment; they do not have their own
-name. The list endpoint accepts an optional `application` query parameter.
+Instances are identified by their application and environment; they do not have their own name.
+The list endpoint accepts an optional `application` query parameter.
 
 Creation payload:
 
 ```json
 {
   "application": "MY-BUSINESS-APPLICATION",
-  "region": "emea",
   "environment": "development"
 }
 ```
 
-Supported regions are `emea`, `apac`, and `amer`. Supported environments are `development`,
-`staging`, and `production`. A new instance starts with `action` set to `creating` and `status` set
-to `pending`. Actions are otherwise free-form strings for future provisioning workflows, while
-statuses are limited to `pending`, `running`, `success`, and `error`.
+Supported environments are `development`, `staging`, and `production`. A new instance starts with
+`action` set to `creating` and `status` set to `pending`. Actions are otherwise free-form strings
+for future provisioning workflows, while statuses are limited to `pending`, `running`, `success`,
+and `error`.
 
 `application` is an externally managed free-form identifier. It is trimmed, converted to uppercase,
 and limited to 255 characters. Coder Manager does not verify it against an internal catalog. The
-combination of application, region, and environment remains unique.
+combination of application and environment remains unique.
 
 Instance creation is split into three durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
@@ -149,7 +147,7 @@ historical instance with neither a slug nor an attached name. The Application us
 from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin. The third
 creates or recovers Coder's first administrator account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
-`cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
+`cyberark` map containing `appId`, `certName`, `keyName`, and `safe` parameters.
 Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
 `https://` scheme and supplies the allocated managed database's
@@ -164,13 +162,11 @@ included in the allowed-user and administrator values.
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
 `CODER_MANAGER_ARGOCD_PROJECT`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`, and
-`CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure one CyberArk plugin map for each of the nine
-region/environment combinations. Variable names follow
-`CODER_MANAGER_CYBERARK_<REGION>_<ENVIRONMENT>_<FIELD>`, where regions are `EMEA`, `APAC`, and
-`AMER`, environments are `DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`,
-`CERT_NAME`, `KEY_NAME`, and `SAFE`. All 36 values are required for Argo CD reconciliation. The
-plugin `region` parameter comes directly from the instance region in uppercase; `.env.example`
-lists the complete matrix. TLS certificate verification is enabled by default; set
+`CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure one CyberArk plugin map for each environment.
+Variable names follow `CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where environments are
+`DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and
+`SAFE`. All 12 values are required for Argo CD reconciliation; `.env.example` lists the complete
+matrix. TLS certificate verification is enabled by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
 worker requests synchronization but does not wait for Argo CD health convergence.
 
@@ -197,12 +193,11 @@ moves the instance to `updating/pending` and creates an `instance.update` job.
 `GET` returns `token_configured` and never token material.
 
 The API generates an immutable, globally unique, 12-character lowercase alphanumeric slug for each
-new instance and exposes it as `slug`. The immutable HTTPS URL combines that slug with the region
-and environment; for example, slug `k7m4p2x9q3ab` in `emea` and `development` receives
-`https://k7m4p2x9q3ab.emea.code-studio.dev.echonet`. Environment DNS labels are `dev`, `staging`,
-and `cib` for development, staging, and production respectively. The `code-studio` DNS label
-defaults from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
-Historical instances are not backfilled: their stored URL remains unchanged and `slug` is null.
+new instance and exposes it as `slug`. The immutable HTTPS URL combines that slug with the
+environment; for example, slug `k7m4p2x9q3ab` in `development` receives
+`https://k7m4p2x9q3ab.code-studio.dev.echonet`. Environment DNS labels are `dev`, `staging`, and
+`cib` for development, staging, and production respectively. The `code-studio` DNS label defaults
+from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
 
 Deletion is asynchronous. It is accepted after `creating/success` or `updating/success`, returns
 HTTP 202, and changes the state to `deleting/pending`. Its four steps reserve workspace cleanup,

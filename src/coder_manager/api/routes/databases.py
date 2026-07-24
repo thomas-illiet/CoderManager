@@ -1,6 +1,5 @@
 """Managed PostgreSQL database pool endpoints."""
 
-from collections import defaultdict
 from typing import Annotated
 from uuid import UUID
 
@@ -16,13 +15,12 @@ from coder_manager.crypto import (
     PasswordDecryptionError,
 )
 from coder_manager.database import get_session
-from coder_manager.models import Database, InstanceRegion
+from coder_manager.models import Database
 from coder_manager.repositories import (
     DatabaseAlreadyExistsError,
     DatabaseCapacityConflictError,
     DatabaseInUseError,
     DatabaseNotFoundError,
-    DatabaseRegionConflictError,
     DatabaseRepository,
     DatabaseUsage,
     InstanceRepository,
@@ -34,7 +32,6 @@ from coder_manager.schemas import (
     DatabaseListQuery,
     DatabasePage,
     DatabaseRead,
-    DatabaseRegionStatistics,
     DatabaseStatistics,
     DatabaseUpdate,
     InstancePage,
@@ -78,7 +75,6 @@ def database_read(usage: DatabaseUsage) -> DatabaseRead:
     return DatabaseRead(
         id=database.id,
         name=database.name,
-        region=database.region,
         instance_max=database.instance_max,
         host=database.host,
         port=database.port,
@@ -122,7 +118,6 @@ async def list_databases(
     usages, total = await DatabaseRepository(session).list_page(
         page=query.page,
         page_size=query.page_size,
-        region=query.region,
         name=query.name,
     )
     pages = (total + query.page_size - 1) // query.page_size
@@ -137,39 +132,14 @@ async def list_databases(
 
 @router.get("/statistics", summary="Get managed database usage statistics")
 async def get_database_statistics(session: SessionDependency) -> DatabaseStatistics:
-    """Return global, regional, and per-database capacity statistics."""
+    """Return global and per-database capacity statistics."""
 
-    # Group the repository snapshot once so all aggregate views stay consistent.
+    # Read the repository snapshot once so all aggregate views stay consistent.
     usages = await DatabaseRepository(session).list_usage()
-    regional_usages: dict[InstanceRegion, list[DatabaseUsage]] = defaultdict(list)
-    for usage in usages:
-        regional_usages[usage.database.region].append(usage)
 
-    # Build regional totals in enum order for a stable API response.
     total_capacity = sum(usage.database.instance_max for usage in usages)
     allocated_instances = sum(usage.allocated_instances for usage in usages)
-    regions: list[DatabaseRegionStatistics] = []
-    for region in InstanceRegion:
-        region_usages = regional_usages.get(region, [])
-        if not region_usages:
-            continue
-        region_capacity = sum(usage.database.instance_max for usage in region_usages)
-        region_allocated = sum(usage.allocated_instances for usage in region_usages)
-        regions.append(
-            DatabaseRegionStatistics(
-                region=region,
-                database_count=len(region_usages),
-                total_capacity=region_capacity,
-                allocated_instances=region_allocated,
-                available_slots=max(region_capacity - region_allocated, 0),
-                utilization_percent=utilization_percent(
-                    allocated=region_allocated,
-                    capacity=region_capacity,
-                ),
-            )
-        )
 
-    # Reuse the same snapshot for global and per-database utilization values.
     return DatabaseStatistics(
         database_count=len(usages),
         total_capacity=total_capacity,
@@ -179,12 +149,10 @@ async def get_database_statistics(session: SessionDependency) -> DatabaseStatist
             allocated=allocated_instances,
             capacity=total_capacity,
         ),
-        regions=regions,
         databases=[
             DatabaseItemStatistics(
                 id=usage.database.id,
                 name=usage.database.name,
-                region=usage.database.region,
                 instance_max=usage.database.instance_max,
                 allocated_instances=usage.allocated_instances,
                 available_slots=max(
@@ -291,7 +259,7 @@ async def create_database(
     session: SessionDependency,
     settings: SettingsDependency,
 ) -> DatabaseRead:
-    """Encrypt the password and add one database to the regional pool."""
+    """Encrypt the password and add one database to the pool."""
 
     try:
         usage = await DatabaseRepository(session).create(payload, password_cipher(settings))
@@ -332,11 +300,6 @@ async def update_database(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="instance_max cannot be lower than current allocations",
-        ) from error
-    except DatabaseRegionConflictError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A database with allocations cannot change region",
         ) from error
     return database_read(usage)
 

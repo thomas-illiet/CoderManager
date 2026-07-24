@@ -28,14 +28,6 @@ if TYPE_CHECKING:
     from coder_manager.models.workspace import Workspace
 
 
-class InstanceRegion(StrEnum):
-    """Regions in which a Coder instance can be provisioned."""
-
-    EMEA = "emea"
-    APAC = "apac"
-    AMER = "amer"
-
-
 class InstanceEnvironment(StrEnum):
     """Deployment environments supported by Coder instances."""
 
@@ -63,7 +55,7 @@ def enum_values(enum_type: type[StrEnum]) -> list[str]:
 
 
 class Instance(Base):
-    """A regional Coder instance labeled with an external application identifier."""
+    """A Coder instance labeled with an external application identifier."""
 
     __tablename__ = "instances"
     __table_args__ = (
@@ -75,9 +67,8 @@ class Instance(Base):
         ),
         UniqueConstraint(
             "application",
-            "region",
             "environment",
-            name="uq_instances_application_region_environment",
+            name="uq_instances_application_environment",
         ),
         UniqueConstraint("slug", name="uq_instances_slug"),
         UniqueConstraint("instance_url", name="uq_instances_instance_url"),
@@ -92,14 +83,6 @@ class Instance(Base):
     slug: Mapped[str | None] = mapped_column(
         String(INSTANCE_SLUG_LENGTH),
         nullable=True,
-    )
-    region: Mapped[InstanceRegion] = mapped_column(
-        Enum(
-            InstanceRegion,
-            name="instance_region",
-            values_callable=enum_values,
-        ),
-        nullable=False,
     )
     environment: Mapped[InstanceEnvironment] = mapped_column(
         Enum(

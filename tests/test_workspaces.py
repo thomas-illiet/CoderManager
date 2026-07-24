@@ -54,7 +54,6 @@ async def create_instance(
         "/api/v1/instances",
         json={
             "application": application,
-            "region": "emea",
             "environment": environment,
         },
     )

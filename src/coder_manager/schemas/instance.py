@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from coder_manager.models import InstanceEnvironment, InstanceRegion, InstanceStatus
+from coder_manager.models import InstanceEnvironment, InstanceStatus
 from coder_manager.schemas.application_identifier import ApplicationIdentifier
 
 
@@ -15,7 +15,6 @@ class InstanceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     application: ApplicationIdentifier
-    region: InstanceRegion
     environment: InstanceEnvironment
 
 
@@ -27,7 +26,6 @@ class InstanceRead(BaseModel):
     id: UUID
     application: str
     slug: str | None
-    region: InstanceRegion
     environment: InstanceEnvironment
     action: str
     status: InstanceStatus
