@@ -15,6 +15,14 @@ from coder_manager.domains.template_source import (
 )
 
 
+def test_git_ssh_command_skips_known_hosts() -> None:
+    """Keep Git SSH non-interactive without requiring a known_hosts file."""
+
+    command = service.GIT_SSH_COMMAND
+    assert "-oStrictHostKeyChecking=no" in command
+    assert "-oUserKnownHostsFile=/dev/null" in command
+
+
 def test_archive_filters_sensitive_and_hidden_files(tmp_path: Path) -> None:
     """Match the Coder CLI exclusions while retaining the Terraform lockfile."""
 

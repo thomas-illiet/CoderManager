@@ -285,9 +285,10 @@ ready compatible instance. Global templates target all ready instances; applicat
 target only matching normalized application identifiers. CoderManager stores only the current
 per-instance deployment state and exposes no local template-version history.
 
-The worker image contains Git and OpenSSH. Mount the SSH identity and `known_hosts` read-only for
-`appuser`. SSH uses batch mode, strict host-key checking, identity-only authentication, and no
-agent forwarding. `CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS` controls Coder import polling
+The worker image contains Git and OpenSSH. Mount the SSH identity read-only for `appuser`. SSH uses
+batch mode, disables host-key verification and `known_hosts`, uses identity-only authentication,
+and disables agent forwarding. `CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS` controls Coder
+import polling
 (2 seconds by default), and `CODER_MANAGER_TEMPLATE_SYNC_TIMEOUT_SECONDS` bounds an individual
 import (1800 seconds by default). Template archives use USTAR, exclude Terraform state and tfvars,
 and must not exceed 1 MiB.

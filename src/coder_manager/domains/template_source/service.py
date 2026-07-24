@@ -16,7 +16,8 @@ from coder_manager.domains.template_source.errors import TemplateSourceError
 
 TEMPLATE_ARCHIVE_LIMIT = 1 << 20
 GIT_SSH_COMMAND = (
-    "ssh -oBatchMode=yes -oStrictHostKeyChecking=yes -oIdentitiesOnly=yes -oForwardAgent=no"
+    "ssh -oBatchMode=yes -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null "
+    "-oIdentitiesOnly=yes -oForwardAgent=no"
 )
 
 
