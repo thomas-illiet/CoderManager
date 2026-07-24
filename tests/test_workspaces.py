@@ -114,7 +114,7 @@ async def create_member(
 async def create_template(
     client: AsyncClient,
     *,
-    name: str = "Python",
+    display_name: str = "Python",
     scope: str = "global",
     application: str | None = None,
     modules: list[str] | None = None,
@@ -124,8 +124,8 @@ async def create_template(
     response = await client.post(
         "/api/v1/templates",
         json={
-            "name": name,
-            "coder_name": name.lower().replace(" ", "-"),
+            "display_name": display_name,
+            "name": display_name.lower().replace(" ", "-"),
             "scope": scope,
             "application": application,
             "git_url": "https://git.example.com/template.git",
@@ -519,7 +519,7 @@ async def test_workspace_relationship_validation_and_name_uniqueness(
     pending_member = await create_member(
         client, session_maker, instance["id"], username="pending", ready=False
     )
-    other_template = await create_template(client, name="Go")
+    other_template = await create_template(client, display_name="Go")
     other_image = await create_image(client, other_template["id"], name="company/go")
 
     pending_owner = await client.post(
@@ -623,7 +623,7 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
     incompatible = await client.put(
         f"/api/v1/templates/{template['id']}",
         json={
-            "name": template["name"],
+            "display_name": template["display_name"],
             "git_url": template["git_url"],
             "source_path": template["source_path"],
             "branch": template["branch"],
@@ -636,7 +636,7 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
     compatible = await client.put(
         f"/api/v1/templates/{template['id']}",
         json={
-            "name": "Python updated",
+            "display_name": "Python updated",
             "git_url": template["git_url"],
             "source_path": template["source_path"],
             "branch": "release/v2",
@@ -668,7 +668,7 @@ async def test_workspace_missing_resources_and_cross_scope_template(
 
     scoped = await create_template(
         client,
-        name="Scoped",
+        display_name="Scoped",
         scope="application",
         application="APPLICATION 2",
     )
@@ -788,7 +788,7 @@ async def test_repositories_exercise_direct_successful_lifecycle(
             page_size=20,
             application=None,
             scope=None,
-            name="Python",
+            display_name="Python",
         )
         assert total == 1
         assert templates[0].id == template_id
@@ -798,7 +798,7 @@ async def test_repositories_exercise_direct_successful_lifecycle(
         unchanged_template = await template_repository.update(
             template_id,
             TemplateUpdate(
-                name="Python",
+                display_name="Python",
                 git_url="https://git.example.com/template.git",
                 source_path=".",
                 branch="main",
@@ -864,6 +864,6 @@ async def test_repositories_exercise_direct_successful_lifecycle(
         deleted = await repository.request_deletion(workspace_id)
         assert deleted.action == "deleting"
 
-    disposable_template = await create_template(client, name="Disposable")
+    disposable_template = await create_template(client, display_name="Disposable")
     async with session_maker() as session:
         await TemplateRepository(session).delete(UUID(str(disposable_template["id"])))

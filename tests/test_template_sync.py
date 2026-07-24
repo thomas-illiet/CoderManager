@@ -82,7 +82,7 @@ async def test_template_sync_targets_scope_and_retries_partial_failure(
     await set_instance_status(session_maker, second["id"])
     template = await create_template(
         client,
-        name="Application Python",
+        display_name="Application Python",
         scope="application",
         application="FIRST",
     )
@@ -171,8 +171,8 @@ async def test_applied_commit_skips_all_remote_calls(
     )
     snapshot = TemplateSourceSnapshot(
         id=template_id,
-        name="Python",
-        coder_name="python",
+        display_name="Python",
+        name="python",
         git_url="git@git.example.com:templates/python.git",
         source_path=".",
         branch="main",
@@ -325,8 +325,8 @@ async def test_target_sync_creates_first_remote_template(  # noqa: C901
     changed = sync_template_target(
         TemplateSourceSnapshot(
             id=template_id,
-            name="Python",
-            coder_name="python",
+            display_name="Python",
+            name="python",
             git_url="git@git.example.com:templates/python.git",
             source_path=".",
             branch="main",
@@ -370,7 +370,7 @@ async def test_new_instance_syncs_compatible_templates_before_success(
     job_id = UUID(str(instance["job_id"]))
     template = await create_template(
         client,
-        name="Bootstrap Python",
+        display_name="Bootstrap Python",
         scope="application",
         application="BOOTSTRAP",
     )

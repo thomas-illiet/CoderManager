@@ -23,7 +23,7 @@ NonEmptyString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
 ]
 GitUrl = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)]
-CoderName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+TemplateName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
 SourcePath = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
 BranchName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ModuleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
@@ -43,7 +43,7 @@ class TemplateMutableFields(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: NonEmptyString
+    display_name: NonEmptyString
     git_url: GitUrl
     source_path: SourcePath = "."
     branch: BranchName
@@ -153,18 +153,18 @@ class TemplateMutableFields(BaseModel):
 class TemplateCreate(TemplateMutableFields):
     """Payload accepted when creating a Coder template."""
 
-    coder_name: CoderName
+    name: TemplateName
     scope: TemplateScope
     application: ApplicationIdentifier | None = None
 
-    @field_validator("coder_name")
+    @field_validator("name")
     @classmethod
-    def normalize_coder_name(cls, value: str) -> str:
+    def normalize_name(cls, value: str) -> str:
         """Normalize and validate the stable technical Coder template name."""
 
         normalized = value.lower()
         if CODER_NAME_PATTERN.fullmatch(normalized) is None:
-            msg = "coder_name must be a lowercase Coder slug"
+            msg = "name must be a lowercase Coder slug"
             raise ValueError(msg)
         return normalized
 
@@ -191,8 +191,8 @@ class TemplateRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
+    display_name: str
     name: str
-    coder_name: str
     scope: TemplateScope
     application: str | None
     git_url: str
@@ -218,7 +218,7 @@ class TemplateListQuery(BaseModel):
     page_size: Annotated[int, Field(ge=1, le=100)] = 20
     scope: TemplateScope | None = None
     application: ApplicationIdentifier | None = None
-    name: Annotated[
+    display_name: Annotated[
         str | None,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=255),
     ] = None

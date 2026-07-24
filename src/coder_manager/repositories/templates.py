@@ -20,7 +20,7 @@ from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01, TEMPLATE_
 
 
 class TemplateAlreadyExistsError(Exception):
-    """Raised when a template name already exists in the target scope."""
+    """Raised when a template name or display name exists in the target scope."""
 
 
 class TemplateNotFoundError(Exception):
@@ -54,7 +54,7 @@ class TemplateRepository:
         page_size: int,
         scope: TemplateScope | None = None,
         application: str | None = None,
-        name: str | None = None,
+        display_name: str | None = None,
     ) -> tuple[list[Template], int]:
         """Return one deterministic filtered page and its matching total."""
 
@@ -75,16 +75,19 @@ class TemplateRepository:
             scope_condition = Template.scope == scope
             count_statement = count_statement.where(scope_condition)
             list_statement = list_statement.where(scope_condition)
-        if name is not None:
-            name_condition = Template.name.icontains(name, autoescape=True)
-            count_statement = count_statement.where(name_condition)
-            list_statement = list_statement.where(name_condition)
+        if display_name is not None:
+            display_name_condition = Template.display_name.icontains(
+                display_name,
+                autoescape=True,
+            )
+            count_statement = count_statement.where(display_name_condition)
+            list_statement = list_statement.where(display_name_condition)
 
         total = await self._session.scalar(count_statement)
         result = await self._session.scalars(
             list_statement.order_by(
-                func.lower(Template.name),
-                Template.name,
+                func.lower(Template.display_name),
+                Template.display_name,
                 Template.scope,
                 Template.application,
                 Template.id,
@@ -114,10 +117,10 @@ class TemplateRepository:
         """Create a validated global or application-scoped template."""
 
         template = Template(
+            display_name=payload.display_name,
             name=payload.name,
             scope=payload.scope,
             application=payload.application,
-            coder_name=payload.coder_name,
             git_url=payload.git_url,
             source_path=payload.source_path,
             branch=payload.branch,
@@ -154,7 +157,7 @@ class TemplateRepository:
 
         # Preserve an unchanged template without touching its update timestamp.
         changed = (
-            template.name != payload.name
+            template.display_name != payload.display_name
             or template.git_url != payload.git_url
             or template.source_path != payload.source_path
             or template.branch != payload.branch
@@ -186,7 +189,7 @@ class TemplateRepository:
                 raise TemplateWorkspaceCompatibilityError
 
         # Apply all mutable fields only after every dependent workspace passes validation.
-        template.name = payload.name
+        template.display_name = payload.display_name
         template.git_url = payload.git_url
         template.source_path = payload.source_path
         template.branch = payload.branch

@@ -250,8 +250,8 @@ Creation payload:
 
 ```json
 {
-  "name": "Python Development",
-  "coder_name": "python-development",
+  "display_name": "Python Development",
+  "name": "python-development",
   "scope": "application",
   "application": "MY-BUSINESS-APPLICATION",
   "git_url": "git@git.example.com:coder/python-template.git",
@@ -269,12 +269,13 @@ Creation payload:
 
 Set `scope` to `global` and `application` to `null` for a global template. Application identifiers
 are normalized like instance identifiers and are not checked against an internal catalog.
-`coder_name` is the immutable lowercase slug used inside Coder. Git URLs accept HTTPS, `ssh://`, or
+`display_name` is the mutable human-readable label. `name` is the immutable lowercase slug used
+inside Coder. Git URLs accept HTTPS, `ssh://`, or
 SCP-style SSH syntax. `source_path` is repository-relative and defaults to `.`, while `branch`
 targets one exact `refs/heads/...` branch. Modules must be a non-empty ordered list without
 duplicates. CPU counts, RAM GB, and disk GB are positive integers with inclusive minimum and
 maximum bounds. PUT replaces these limits together with `name`, `git_url`, `source_path`, `branch`,
-and `modules`; scope, application, and `coder_name` remain immutable. A change that would invalidate
+and `modules`; scope, application, and `name` remain immutable. A change that would invalidate
 an existing workspace returns HTTP 409. `GET /templates/{id}/modules` returns the module array
 directly.
 
@@ -293,8 +294,8 @@ import (1800 seconds by default). Template archives use USTAR, exclude Terraform
 and must not exceed 1 MiB.
 
 Filtering by `application` returns the global templates plus those attached to that application.
-The optional `scope` filter narrows that result, and `name` performs a case-insensitive literal
-substring search.
+The optional `scope` filter narrows that result, and `display_name` performs a case-insensitive
+literal substring search.
 
 ## Template Docker images API
 

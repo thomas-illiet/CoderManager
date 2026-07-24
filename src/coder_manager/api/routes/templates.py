@@ -34,14 +34,14 @@ async def list_templates(
     session: SessionDependency,
     query: Annotated[TemplateListQuery, Query()],
 ) -> TemplatePage:
-    """Return a filtered page ordered deterministically by template name."""
+    """Return a filtered page ordered deterministically by display name."""
 
     templates, total = await TemplateRepository(session).list(
         page=query.page,
         page_size=query.page_size,
         scope=query.scope,
         application=query.application,
-        name=query.name,
+        display_name=query.display_name,
     )
     pages = (total + query.page_size - 1) // query.page_size
     return TemplatePage(
@@ -103,14 +103,14 @@ async def get_template(template_id: UUID, session: SessionDependency) -> Templat
     summary="Create a Coder template",
 )
 async def create_template(payload: TemplateCreate, session: SessionDependency) -> TemplateRead:
-    """Create a template while enforcing its scope and name uniqueness."""
+    """Create a template while enforcing scoped name uniqueness."""
 
     try:
         template = await TemplateRepository(session).create(payload)
     except TemplateAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A template with this name already exists in this scope",
+            detail="A template with this name or display_name already exists in this scope",
         ) from error
     return TemplateRead.model_validate(template)
 
@@ -133,7 +133,7 @@ async def update_template(
     except TemplateAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A template with this name already exists in this scope",
+            detail="A template with this name or display_name already exists in this scope",
         ) from error
     except TemplateSyncInProgressError as error:
         raise HTTPException(

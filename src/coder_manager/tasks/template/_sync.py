@@ -36,8 +36,8 @@ class TemplateSourceSnapshot:
     """Source and display fields read atomically for one synchronization."""
 
     id: UUID
+    display_name: str
     name: str
-    coder_name: str
     git_url: str
     source_path: str
     branch: str
@@ -60,8 +60,8 @@ def template_source_snapshot(
             raise TemplateTargetSyncError(msg)
         return TemplateSourceSnapshot(
             id=template.id,
+            display_name=template.display_name,
             name=template.name,
-            coder_name=template.coder_name,
             git_url=template.git_url,
             source_path=template.source_path,
             branch=template.branch,
@@ -269,7 +269,7 @@ def sync_template_target(
             organization_id = client.default_organization_id()
             remote_template = client.template_by_name(
                 organization_id,
-                snapshot.coder_name,
+                snapshot.name,
             )
             coder_template_id = remote_template.id if remote_template is not None else None
             _store_remote_ids(
@@ -284,7 +284,7 @@ def sync_template_target(
             if remote_template is not None:
                 remote_version = client.template_version_by_name(
                     organization_id,
-                    snapshot.coder_name,
+                    snapshot.name,
                     version_name,
                 )
             if remote_version is None and reusable_version_id is not None:
@@ -317,8 +317,8 @@ def sync_template_target(
             if remote_template is None:
                 remote_template = client.create_template(
                     organization_id,
-                    name=snapshot.coder_name,
-                    display_name=snapshot.name,
+                    name=snapshot.name,
+                    display_name=snapshot.display_name,
                     version_id=remote_version.id,
                 )
                 _store_remote_ids(

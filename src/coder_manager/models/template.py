@@ -50,12 +50,13 @@ def enum_values(enum_type: type[StrEnum]) -> list[str]:
 
 
 class Template(Base):
-    """A versioned Coder template available globally or to one external application."""
+    """A branch-backed Coder template available globally or to one application."""
 
     __tablename__ = "templates"
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(64), nullable=False)
     scope: Mapped[TemplateScope] = mapped_column(
         Enum(TemplateScope, name="template_scope", values_callable=enum_values),
         nullable=False,
@@ -65,7 +66,6 @@ class Template(Base):
         nullable=True,
         index=True,
     )
-    coder_name: Mapped[str] = mapped_column(String(64), nullable=False)
     git_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     source_path: Mapped[str] = mapped_column(String(1024), nullable=False, default=".")
     branch: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -126,9 +126,9 @@ class Template(Base):
     job: Mapped["JobExecution | None"] = relationship(foreign_keys=[job_id])
 
     __table_args__ = (
+        CheckConstraint("length(trim(display_name)) > 0", name="display_name_not_empty"),
         CheckConstraint("length(trim(name)) > 0", name="name_not_empty"),
-        CheckConstraint("length(trim(coder_name)) > 0", name="coder_name_not_empty"),
-        CheckConstraint("coder_name = lower(trim(coder_name))", name="coder_name_normalized"),
+        CheckConstraint("name = lower(trim(name))", name="name_normalized"),
         CheckConstraint("length(trim(git_url)) > 0", name="git_url_not_empty"),
         CheckConstraint("length(trim(source_path)) > 0", name="source_path_not_empty"),
         CheckConstraint("length(trim(branch)) > 0", name="branch_not_empty"),
@@ -153,6 +153,21 @@ class Template(Base):
             name="application_normalized",
         ),
         Index(
+            "uq_templates_global_display_name_ci",
+            func.lower(display_name),
+            unique=True,
+            postgresql_where=scope == TemplateScope.GLOBAL,
+            sqlite_where=scope == TemplateScope.GLOBAL,
+        ),
+        Index(
+            "uq_templates_application_display_name_ci",
+            application,
+            func.lower(display_name),
+            unique=True,
+            postgresql_where=scope == TemplateScope.APPLICATION,
+            sqlite_where=scope == TemplateScope.APPLICATION,
+        ),
+        Index(
             "uq_templates_global_name_ci",
             func.lower(name),
             unique=True,
@@ -163,21 +178,6 @@ class Template(Base):
             "uq_templates_application_name_ci",
             application,
             func.lower(name),
-            unique=True,
-            postgresql_where=scope == TemplateScope.APPLICATION,
-            sqlite_where=scope == TemplateScope.APPLICATION,
-        ),
-        Index(
-            "uq_templates_global_coder_name_ci",
-            func.lower(coder_name),
-            unique=True,
-            postgresql_where=scope == TemplateScope.GLOBAL,
-            sqlite_where=scope == TemplateScope.GLOBAL,
-        ),
-        Index(
-            "uq_templates_application_coder_name_ci",
-            application,
-            func.lower(coder_name),
             unique=True,
             postgresql_where=scope == TemplateScope.APPLICATION,
             sqlite_where=scope == TemplateScope.APPLICATION,

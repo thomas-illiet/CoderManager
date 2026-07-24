@@ -43,8 +43,8 @@ def template_create_payload() -> TemplateCreate:
     """Build a valid template creation schema."""
 
     return TemplateCreate(
-        name="Python",
-        coder_name="python",
+        display_name="Python",
+        name="python",
         scope="global",
         application=None,
         git_url="https://git.example.com/template.git",
@@ -65,7 +65,7 @@ def template_update_payload() -> TemplateUpdate:
 
     create = template_create_payload()
     return TemplateUpdate.model_validate(
-        create.model_dump(exclude={"scope", "application", "coder_name"})
+        create.model_dump(exclude={"scope", "application", "name"})
     )
 
 
