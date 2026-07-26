@@ -209,6 +209,17 @@ class TemplateRead(BaseModel):
     updated_at: datetime
 
 
+class TemplateDeploymentStatistics(BaseModel):
+    """Current deployment counts for one Coder template."""
+
+    template_id: UUID
+    name: str
+    display_name: str
+    updated: int
+    outdated: int
+    missing: int
+
+
 class TemplateListQuery(BaseModel):
     """Validated filters and pagination for the template list."""
 

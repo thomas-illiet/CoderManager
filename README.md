@@ -66,6 +66,7 @@ All endpoints are under `/api/v1`:
 | `PUT` | `/instances/{id}/members/{member_id}` | Request a member role change |
 | `DELETE` | `/instances/{id}/members/{member_id}` | Request member deletion |
 | `GET` | `/templates?page=1&page_size=20&scope=global` | Paginated template list |
+| `GET` | `/templates/statistics` | Per-template deployment statistics |
 | `GET` | `/templates/{id}` | Get one template |
 | `GET` | `/templates/{id}/modules` | Get a template's module names |
 | `POST` | `/templates` | Create a template |
@@ -295,6 +296,12 @@ fire-and-forget job. The worker fetches the current branch HEAD once and synchro
 ready compatible instance. Global templates target all ready instances; application templates
 target only matching normalized application identifiers. CoderManager stores only the current
 per-instance deployment state and exposes no local template-version history.
+
+`GET /templates/statistics` returns one object per template with `updated`, `outdated`, and
+`missing` ready-server counts. `updated` means the durable deployment state is successful and its
+applied commit matches its non-null target commit. Any other existing deployment is `outdated`,
+while a compatible ready instance without a deployment is `missing`. The endpoint reads only the
+local database and does not contact Git or Coder.
 
 The worker image contains Git and OpenSSH. Mount the SSH identity read-only for `appuser`. SSH uses
 batch mode, disables host-key verification and `known_hosts`, uses identity-only authentication,

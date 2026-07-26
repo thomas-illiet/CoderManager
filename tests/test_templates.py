@@ -9,7 +9,16 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from coder_manager.models import JobExecution, JobStatus, Template, TemplateSyncStatus
+from coder_manager.models import (
+    Instance,
+    InstanceStatus,
+    JobExecution,
+    JobStatus,
+    Template,
+    TemplateDeployment,
+    TemplateDeploymentStatus,
+    TemplateSyncStatus,
+)
 from coder_manager.tasks import step_01_sync_template
 from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01_TASK
 
@@ -48,6 +57,17 @@ async def create_template(
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+async def create_instance(client: AsyncClient, application: str) -> dict[str, object]:
+    """Create an instance and return its API resource."""
+
+    response = await client.post(
+        "/api/v1/instances",
+        json={"application": application, "environment": "development"},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["resource"]
 
 
 async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
@@ -97,6 +117,169 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
     assert deleted.status_code == 204
     assert deleted.content == b""
     assert (await client.get(f"/api/v1/templates/{created['id']}")).status_code == 404
+
+
+async def test_template_statistics_is_empty_without_templates(client: AsyncClient) -> None:
+    """Return a direct empty array when no templates exist."""
+
+    response = await client.get("/api/v1/templates/statistics")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_template_statistics_classifies_compatible_ready_deployments(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Aggregate current deployment state without counting ineligible instances."""
+
+    global_template = await create_template(client, display_name="Zulu Global")
+    application_template = await create_template(
+        client,
+        display_name="alpha First",
+        scope="application",
+        application="FIRST",
+    )
+    no_ready_template = await create_template(
+        client,
+        display_name="Beta No Ready",
+        scope="application",
+        application="NO-READY",
+    )
+    instances = {
+        application: await create_instance(client, application)
+        for application in (
+            "FIRST",
+            "PENDING",
+            "RUNNING",
+            "ERROR",
+            "MISMATCH",
+            "INCOMPLETE",
+            "MISSING",
+            "NO-READY",
+            "DELETING",
+        )
+    }
+    instance_ids = {
+        application: UUID(str(instance["id"])) for application, instance in instances.items()
+    }
+    global_template_id = UUID(str(global_template["id"]))
+    application_template_id = UUID(str(application_template["id"]))
+    target_commit = "a" * 40
+    previous_commit = "b" * 40
+
+    async with session_maker() as session:
+        for application in (
+            "FIRST",
+            "PENDING",
+            "RUNNING",
+            "ERROR",
+            "MISMATCH",
+            "INCOMPLETE",
+            "MISSING",
+        ):
+            instance = await session.get(Instance, instance_ids[application])
+            assert instance is not None
+            instance.status = InstanceStatus.SUCCESS
+        deleting = await session.get(Instance, instance_ids["DELETING"])
+        assert deleting is not None
+        deleting.status = InstanceStatus.SUCCESS
+        deleting.action = "deleting"
+        session.add_all(
+            [
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["FIRST"],
+                    target_commit=target_commit,
+                    applied_commit=target_commit,
+                    status=TemplateDeploymentStatus.SUCCESS,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["PENDING"],
+                    target_commit=target_commit,
+                    status=TemplateDeploymentStatus.PENDING,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["RUNNING"],
+                    target_commit=target_commit,
+                    status=TemplateDeploymentStatus.RUNNING,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["ERROR"],
+                    target_commit=target_commit,
+                    applied_commit=target_commit,
+                    status=TemplateDeploymentStatus.ERROR,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["MISMATCH"],
+                    target_commit=target_commit,
+                    applied_commit=previous_commit,
+                    status=TemplateDeploymentStatus.SUCCESS,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["INCOMPLETE"],
+                    status=TemplateDeploymentStatus.SUCCESS,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["NO-READY"],
+                    target_commit=target_commit,
+                    applied_commit=target_commit,
+                    status=TemplateDeploymentStatus.SUCCESS,
+                ),
+                TemplateDeployment(
+                    template_id=global_template_id,
+                    instance_id=instance_ids["DELETING"],
+                    target_commit=target_commit,
+                    applied_commit=target_commit,
+                    status=TemplateDeploymentStatus.SUCCESS,
+                ),
+                TemplateDeployment(
+                    template_id=application_template_id,
+                    instance_id=instance_ids["FIRST"],
+                    target_commit=target_commit,
+                    applied_commit=target_commit,
+                    status=TemplateDeploymentStatus.SUCCESS,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/v1/templates/statistics")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "template_id": application_template["id"],
+            "name": application_template["name"],
+            "display_name": "alpha First",
+            "updated": 1,
+            "outdated": 0,
+            "missing": 0,
+        },
+        {
+            "template_id": no_ready_template["id"],
+            "name": no_ready_template["name"],
+            "display_name": "Beta No Ready",
+            "updated": 0,
+            "outdated": 0,
+            "missing": 0,
+        },
+        {
+            "template_id": global_template["id"],
+            "name": global_template["name"],
+            "display_name": "Zulu Global",
+            "updated": 1,
+            "outdated": 5,
+            "missing": 1,
+        },
+    ]
 
 
 async def test_template_sync_is_fire_and_forget_and_locks_mutations(

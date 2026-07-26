@@ -17,6 +17,7 @@ from coder_manager.repositories import (
 )
 from coder_manager.schemas import (
     TemplateCreate,
+    TemplateDeploymentStatistics,
     TemplateListQuery,
     TemplatePage,
     TemplateRead,
@@ -51,6 +52,26 @@ async def list_templates(
         total=total,
         pages=pages,
     )
+
+
+@router.get("/statistics", summary="Get template deployment statistics")
+async def get_template_statistics(
+    session: SessionDependency,
+) -> list[TemplateDeploymentStatistics]:
+    """Return current ready-server deployment counts for every template."""
+
+    statistics = await TemplateRepository(session).list_deployment_statistics()
+    return [
+        TemplateDeploymentStatistics(
+            template_id=item.template_id,
+            name=item.name,
+            display_name=item.display_name,
+            updated=item.updated,
+            outdated=item.outdated,
+            missing=item.missing,
+        )
+        for item in statistics
+    ]
 
 
 @router.get("/{template_id}/modules", summary="List a template's modules")

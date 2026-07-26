@@ -23,6 +23,7 @@ from coder_manager.schemas.managed_database import (
 from coder_manager.schemas.member import MemberCreate, MemberPage, MemberRead, MemberRoleUpdate
 from coder_manager.schemas.template import (
     TemplateCreate,
+    TemplateDeploymentStatistics,
     TemplateListQuery,
     TemplatePage,
     TemplateRead,
@@ -65,6 +66,7 @@ __all__ = [
     "MemberRead",
     "MemberRoleUpdate",
     "TemplateCreate",
+    "TemplateDeploymentStatistics",
     "TemplateImageCreate",
     "TemplateImagePage",
     "TemplateImageRead",

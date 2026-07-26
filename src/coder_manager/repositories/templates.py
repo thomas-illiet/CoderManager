@@ -1,15 +1,21 @@
 """Persistence operations for Coder templates."""
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.models import (
+    Instance,
+    InstanceStatus,
     JobExecution,
     Template,
+    TemplateDeployment,
+    TemplateDeploymentStatus,
     TemplateScope,
     TemplateSyncStatus,
     Workspace,
@@ -37,6 +43,18 @@ class TemplateWorkspaceCompatibilityError(Exception):
 
 class TemplateSyncInProgressError(Exception):
     """Raised when a mutation conflicts with an active template synchronization."""
+
+
+@dataclass(frozen=True, slots=True)
+class TemplateDeploymentStatisticsRow:
+    """Aggregated deployment counts for one template."""
+
+    template_id: UUID
+    name: str
+    display_name: str
+    updated: int
+    outdated: int
+    missing: int
 
 
 class TemplateRepository:
@@ -96,6 +114,78 @@ class TemplateRepository:
             .limit(page_size)
         )
         return list(result), total or 0
+
+    async def list_deployment_statistics(
+        self,
+    ) -> Sequence[TemplateDeploymentStatisticsRow]:
+        """Return current deployment counts for every template in one query."""
+
+        compatible_instance = and_(
+            Instance.status == InstanceStatus.SUCCESS,
+            Instance.action != "deleting",
+            or_(
+                Template.scope == TemplateScope.GLOBAL,
+                and_(
+                    Template.scope == TemplateScope.APPLICATION,
+                    Template.application == Instance.application,
+                ),
+            ),
+        )
+        matching_deployment = and_(
+            TemplateDeployment.template_id == Template.id,
+            TemplateDeployment.instance_id == Instance.id,
+        )
+        updated_deployment = and_(
+            Instance.id.is_not(None),
+            TemplateDeployment.id.is_not(None),
+            TemplateDeployment.status == TemplateDeploymentStatus.SUCCESS,
+            TemplateDeployment.applied_commit.is_not(None),
+            TemplateDeployment.target_commit == TemplateDeployment.applied_commit,
+        )
+        outdated_deployment = and_(
+            Instance.id.is_not(None),
+            TemplateDeployment.id.is_not(None),
+            or_(
+                TemplateDeployment.status != TemplateDeploymentStatus.SUCCESS,
+                TemplateDeployment.target_commit.is_(None),
+                TemplateDeployment.applied_commit.is_(None),
+                TemplateDeployment.target_commit != TemplateDeployment.applied_commit,
+            ),
+        )
+        missing_deployment = and_(
+            Instance.id.is_not(None),
+            TemplateDeployment.id.is_(None),
+        )
+        rows = await self._session.execute(
+            select(
+                Template.id,
+                Template.name,
+                Template.display_name,
+                func.sum(case((updated_deployment, 1), else_=0)),
+                func.sum(case((outdated_deployment, 1), else_=0)),
+                func.sum(case((missing_deployment, 1), else_=0)),
+            )
+            .select_from(Template)
+            .outerjoin(Instance, compatible_instance)
+            .outerjoin(TemplateDeployment, matching_deployment)
+            .group_by(Template.id, Template.name, Template.display_name)
+            .order_by(
+                func.lower(Template.display_name),
+                Template.display_name,
+                Template.id,
+            )
+        )
+        return [
+            TemplateDeploymentStatisticsRow(
+                template_id=template_id,
+                name=name,
+                display_name=display_name,
+                updated=updated,
+                outdated=outdated,
+                missing=missing,
+            )
+            for template_id, name, display_name, updated, outdated, missing in rows
+        ]
 
     async def get(self, template_id: UUID) -> Template | None:
         """Find a template by its identifier."""
