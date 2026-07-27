@@ -129,6 +129,7 @@ def application_payload(
                                 "appId": cyberark.app_id,
                                 "certName": cyberark.cert_name,
                                 "keyName": cyberark.key_name,
+                                "region": config.region,
                                 "safe": cyberark.safe,
                             },
                         }

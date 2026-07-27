@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     argocd_skip_ssl_verify: bool = False
     argocd_project: str | None = None
     argocd_application_prefix: str = "coder"
+    argocd_region: str | None = None
     argocd_repository_url: str | None = None
     argocd_repository_path: str | None = None
     argocd_target_revision: str | None = None

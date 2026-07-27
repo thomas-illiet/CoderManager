@@ -41,6 +41,7 @@ class ArgoCdConfig:
     skip_ssl_verify: bool
     project: str
     application_prefix: str
+    region: str
     repository_url: str
     repository_path: str
     target_revision: str
@@ -58,6 +59,7 @@ class ArgoCdConfig:
                 settings.argocd_token.get_secret_value() if settings.argocd_token else None
             ),
             "CODER_MANAGER_ARGOCD_PROJECT": settings.argocd_project,
+            "CODER_MANAGER_ARGOCD_REGION": settings.argocd_region,
             "CODER_MANAGER_ARGOCD_REPOSITORY_URL": settings.argocd_repository_url,
             "CODER_MANAGER_ARGOCD_REPOSITORY_PATH": settings.argocd_repository_path,
             "CODER_MANAGER_ARGOCD_TARGET_REVISION": settings.argocd_target_revision,
@@ -82,6 +84,7 @@ class ArgoCdConfig:
             skip_ssl_verify=settings.argocd_skip_ssl_verify,
             project=_required_value(required, "CODER_MANAGER_ARGOCD_PROJECT"),
             application_prefix=prefix,
+            region=_required_value(required, "CODER_MANAGER_ARGOCD_REGION").upper(),
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
             target_revision=_required_value(required, "CODER_MANAGER_ARGOCD_TARGET_REVISION"),

@@ -42,6 +42,7 @@ def configured_settings(**overrides: object) -> Settings:
         "argocd_token": "super-secret-token",
         "argocd_project": "coder",
         "argocd_application_prefix": "managed",
+        "argocd_region": " emea ",
         "argocd_repository_url": "https://git.test/platform.git",
         "argocd_repository_path": "charts/coder",
         "argocd_target_revision": "v1.2.3",
@@ -148,6 +149,7 @@ def test_create_application_and_sync_contract() -> None:
                         "appId": "development-app",
                         "certName": "development-cert",
                         "keyName": "development-key",
+                        "region": "EMEA",
                         "safe": "development-safe",
                     },
                 }
@@ -314,6 +316,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         "appId": "staging-app",
         "certName": "staging-cert",
         "keyName": "staging-key",
+        "region": "EMEA",
         "safe": "staging-safe",
     }
     assert update["spec"]["destination"] == {
@@ -646,6 +649,10 @@ def test_client_tls_and_timeout_configuration(
         (
             configured_settings(argocd_production_destination_name=" "),
             "CODER_MANAGER_ARGOCD_PRODUCTION_DESTINATION_NAME",
+        ),
+        (
+            configured_settings(argocd_region=" "),
+            "CODER_MANAGER_ARGOCD_REGION",
         ),
         (
             configured_settings(cyberark_production_safe=" "),
