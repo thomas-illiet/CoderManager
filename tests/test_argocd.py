@@ -26,8 +26,8 @@ TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 EXPECTED_INSTANCE_HELM_ARGS = (
     f"--set global.baseDomain={TEST_INSTANCE_SLUG}.code-studio.dev.echonet\n"
     f"--set global.identifier={TEST_INSTANCE_SLUG}\n"
-    "--set server.config.postgres.username=<secret:coder#username>\n"
-    "--set server.config.postgres.password=<secret:coder#password>\n"
+    "--set server.config.postgres.username=<secret:managed-database#username>\n"
+    "--set server.config.postgres.password=<secret:managed-database#password>\n"
     "--set server.config.postgres.host=postgres.internal\n"
     "--set server.config.postgres.database=coder\n"
     "--set server.config.postgres.schema=coder_instance\n"
@@ -76,6 +76,7 @@ def instance_helm_values(**overrides: object) -> InstanceHelmValues:
         "database_password": SecretStr("managed, secret"),
         "database_host": "postgres.internal",
         "database_name": "coder",
+        "managed_database_name": "managed-database",
         "database_schema": "coder_instance",
     }
     values.update(overrides)
@@ -160,8 +161,8 @@ def test_create_application_and_sync_contract() -> None:
     assert "'" not in helm_arguments
     assert "db-user" not in helm_arguments
     assert "managed\\, secret" not in helm_arguments
-    assert "<secret:coder#username>" in helm_arguments
-    assert "<secret:coder#password>" in helm_arguments
+    assert "<secret:managed-database#username>" in helm_arguments
+    assert "<secret:managed-database#password>" in helm_arguments
     assert payload["spec"]["destination"] == {
         "name": "development-cluster",
         "namespace": "app-coder-system",
@@ -225,7 +226,10 @@ def test_database_secret_references_use_managed_database_name() -> None:
         TEST_APPLICATION_NAME,
         uuid4(),
         (),
-        instance_helm_values(database_name="managed-database-42"),
+        instance_helm_values(
+            database_name="actual-postgres-database",
+            managed_database_name="managed-database-42",
+        ),
     )
 
     helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
@@ -237,6 +241,7 @@ def test_database_secret_references_use_managed_database_name() -> None:
         "--set server.config.postgres.password=<secret:managed-database-42#password>\n"
         in helm_arguments
     )
+    assert "--set server.config.postgres.database=actual-postgres-database\n" in helm_arguments
 
 
 def test_policy_username_lists_escape_helm_commas() -> None:

@@ -25,6 +25,19 @@ def database_target(
 ) -> SchemaTarget | None:
     """Load and decrypt the database allocation for one instance."""
 
+    loaded = _managed_database_target(instance_id, session_factory)
+    if loaded is None:
+        return None
+    target, _ = loaded
+    return target
+
+
+def _managed_database_target(
+    instance_id: UUID,
+    session_factory: sessionmaker[Session],
+) -> tuple[SchemaTarget, str] | None:
+    """Load the connection target and managed database secret name."""
+
     with session_factory() as session:
         row = session.execute(
             select(DatabaseAllocation, Database)
@@ -38,13 +51,16 @@ def database_target(
             database.password_enc,
             database.id,
         )
-        return SchemaTarget(
-            host=database.host,
-            port=database.port,
-            database_name=database.database_name,
-            username=database.username,
-            password=password,
-            schema_name=allocation.schema_name,
+        return (
+            SchemaTarget(
+                host=database.host,
+                port=database.port,
+                database_name=database.database_name,
+                username=database.username,
+                password=password,
+                schema_name=allocation.schema_name,
+            ),
+            database.name,
         )
 
 
@@ -57,10 +73,11 @@ def instance_helm_values(
 ) -> InstanceHelmValues:
     """Load one instance's public URL and decrypted database Helm values."""
 
-    target = database_target(instance_id, session_factory)
-    if target is None:
+    loaded = _managed_database_target(instance_id, session_factory)
+    if loaded is None:
         msg = "Instance database allocation is missing"
         raise RuntimeError(msg)
+    target, managed_database_name = loaded
     with session_factory() as session:
         provider = session.get(InstanceKubernetes, instance_id)
         kubeconfig = (
@@ -81,6 +98,7 @@ def instance_helm_values(
         database_password=target.password,
         database_host=target.host,
         database_name=target.database_name,
+        managed_database_name=managed_database_name,
         database_schema=target.schema_name,
         kubeconfig=kubeconfig,
     )

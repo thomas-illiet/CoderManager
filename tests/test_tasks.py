@@ -268,6 +268,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     assert reconciled_values[0].database_password.get_secret_value() == "managed-secret"
     assert reconciled_values[0].database_host == "postgres.internal"
     assert reconciled_values[0].database_name == "coder"
+    assert reconciled_values[0].managed_database_name == "test"
     assert reconciled_values[0].database_schema == f"coder_{instance_id.hex}"
     tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
     async with session_maker() as session:

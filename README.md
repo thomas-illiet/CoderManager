@@ -160,10 +160,9 @@ staging, or production respectively.
 `https://` scheme, sets `global.identifier` to the immutable instance slug (or the UUID hex for a
 historical instance without a slug), and supplies the allocated managed database's
 `server.config.postgres.host`, `database`, and `schema` values. The PostgreSQL username and password
-use the CyberArk references `<secret:<database_name>#username>` and
-`<secret:<database_name>#password>`, where `<database_name>` is the real name stored on the
-allocated managed database, so neither credential value is included in the Argo CD Application
-payload.
+use the CyberArk references `<secret:<name>#username>` and `<secret:<name>#password>`, where
+`<name>` comes from the allocated managed database's `name` field, not its `database_name` field.
+Neither credential value is included in the Argo CD Application payload.
 When a Kubernetes provider is configured, it also supplies the uploaded file as a single-line
 RFC 4648 Base64 value through `server.config.kube`.
 The slug names the Argo CD Application metadata; Coder Manager does not add Helm

@@ -74,11 +74,11 @@ def application_payload(
         _helm_scalar_argument("global.identifier", identifier),
         _helm_scalar_argument(
             "server.config.postgres.username",
-            f"<secret:{helm_values.database_name}#username>",
+            f"<secret:{helm_values.managed_database_name}#username>",
         ),
         _helm_scalar_argument(
             "server.config.postgres.password",
-            f"<secret:{helm_values.database_name}#password>",
+            f"<secret:{helm_values.managed_database_name}#password>",
         ),
         _helm_scalar_argument(
             "server.config.postgres.host",

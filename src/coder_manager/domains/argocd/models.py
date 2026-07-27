@@ -17,6 +17,7 @@ class InstanceHelmValues:
     database_password: SecretStr
     database_host: str
     database_name: str
+    managed_database_name: str
     database_schema: str
     kubeconfig: SecretBytes | None = None
 
