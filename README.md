@@ -159,12 +159,15 @@ staging, or production respectively.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
 `https://` scheme, sets `global.identifier` to the immutable instance slug (or the UUID hex for a
 historical instance without a slug), and supplies the allocated managed database's
-`server.config.postgres.username`, `password`, `host`, `database`, and `schema` values.
+`server.config.postgres.host`, `database`, and `schema` values. The PostgreSQL username and password
+use the CyberArk references `<secret:<database_name>#username>` and
+`<secret:<database_name>#password>`, where `<database_name>` is the real name stored on the
+allocated managed database, so neither credential value is included in the Argo CD Application
+payload.
 When a Kubernetes provider is configured, it also supplies the uploaded file as a single-line
 RFC 4648 Base64 value through `server.config.kube`.
 The slug names the Argo CD Application metadata; Coder Manager does not add Helm
 `--name-template`, `nameOverride`, or `fullnameOverride` arguments.
-The database password is decrypted only inside the worker while constructing the Argo CD payload.
 `CODER_MANAGER_DEFAULT_ADMINS` is a comma-separated list that is always included in both Helm
 values without creating API member records. The static bootstrap username `admin` is always
 included in the allowed-user and administrator values.

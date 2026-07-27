@@ -26,8 +26,8 @@ TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 EXPECTED_INSTANCE_HELM_ARGS = (
     f"--set global.baseDomain={TEST_INSTANCE_SLUG}.code-studio.dev.echonet\n"
     f"--set global.identifier={TEST_INSTANCE_SLUG}\n"
-    "--set server.config.postgres.username=db-user\n"
-    "--set server.config.postgres.password=managed\\, secret\n"
+    "--set server.config.postgres.username=<secret:coder#username>\n"
+    "--set server.config.postgres.password=<secret:coder#password>\n"
     "--set server.config.postgres.host=postgres.internal\n"
     "--set server.config.postgres.database=coder\n"
     "--set server.config.postgres.schema=coder_instance\n"
@@ -156,7 +156,12 @@ def test_create_application_and_sync_contract() -> None:
             ],
         },
     }
-    assert "'" not in payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert "'" not in helm_arguments
+    assert "db-user" not in helm_arguments
+    assert "managed\\, secret" not in helm_arguments
+    assert "<secret:coder#username>" in helm_arguments
+    assert "<secret:coder#password>" in helm_arguments
     assert payload["spec"]["destination"] == {
         "name": "development-cluster",
         "namespace": "app-coder-system",
@@ -209,6 +214,29 @@ def test_helm_identifier_uses_uuid_fallback_without_persisted_slug() -> None:
 
     helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
     assert "--set global.identifier=12345678123456781234567812345678\n" in helm_arguments
+
+
+def test_database_secret_references_use_managed_database_name() -> None:
+    """Resolve database credentials from the allocated managed database secret."""
+
+    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    payload = application_payload(
+        config,
+        TEST_APPLICATION_NAME,
+        uuid4(),
+        (),
+        instance_helm_values(database_name="managed-database-42"),
+    )
+
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert (
+        "--set server.config.postgres.username=<secret:managed-database-42#username>\n"
+        in helm_arguments
+    )
+    assert (
+        "--set server.config.postgres.password=<secret:managed-database-42#password>\n"
+        in helm_arguments
+    )
 
 
 def test_policy_username_lists_escape_helm_commas() -> None:
