@@ -11,7 +11,11 @@ from coder_manager.domains.coder.errors import (
     CoderRequestError,
 )
 from coder_manager.domains.coder.models import CoderTemplate, CoderTemplateVersion
-from coder_manager.domains.coder.service import bootstrap_admin_account
+from coder_manager.domains.coder.service import (
+    bootstrap_admin_account,
+    cleanup_user_accounts,
+    delete_user_accounts,
+)
 
 __all__ = [
     "ADMIN_EMAIL",
@@ -23,4 +27,6 @@ __all__ = [
     "CoderTemplate",
     "CoderTemplateVersion",
     "bootstrap_admin_account",
+    "cleanup_user_accounts",
+    "delete_user_accounts",
 ]

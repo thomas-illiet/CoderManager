@@ -14,7 +14,7 @@ from coder_manager.tasks.instance.delete import (
     step_03_remove_schema,
     step_04_remove_local_configuration,
 )
-from coder_manager.tasks.instance.update import step_01_update_instance
+from coder_manager.tasks.instance.update import step_01_update_instance, step_02_cleanup_users
 from coder_manager.tasks.retry_job_executions import retry_job_executions
 from coder_manager.tasks.template.sync import step_01_sync_template
 from coder_manager.tasks.workspace.create import step_01_create_workspace
@@ -32,6 +32,7 @@ __all__ = [
     "step_01_sync_template",
     "step_01_update_instance",
     "step_01_update_workspace",
+    "step_02_cleanup_users",
     "step_02_create_instance",
     "step_02_remove_instance",
     "step_03_bootstrap_admin",

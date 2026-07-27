@@ -87,7 +87,7 @@ class ArgoCdConfig:
             target_revision=_required_value(required, "CODER_MANAGER_ARGOCD_TARGET_REVISION"),
             destination_names=_destination_names(required),
             cyberark_parameters=_cyberark_parameters(required),
-            default_admins=_parse_default_admins(settings.default_admins),
+            default_admins=parse_default_admins(settings.default_admins),
         )
 
     def destination_for(self, environment: str) -> str:
@@ -198,7 +198,7 @@ def _cyberark_environment_name(environment: str, field_name: str) -> str:
     return f"CODER_MANAGER_CYBERARK_{environment}_{field_name}".upper()
 
 
-def _parse_default_admins(raw_value: str) -> tuple[str, ...]:
+def parse_default_admins(raw_value: str) -> tuple[str, ...]:
     """Normalize, validate, deduplicate, and sort default administrator names."""
 
     if not raw_value.strip():

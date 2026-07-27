@@ -34,6 +34,7 @@ from coder_manager.models import (
     JobExecution,
     JobStatus,
     Member,
+    MemberRole,
     MemberStatus,
     Workspace,
     WorkspaceStatus,
@@ -55,6 +56,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_DELETE_STEP_04_TASK,
     INSTANCE_UPDATE_STEP_01,
     INSTANCE_UPDATE_STEP_01_TASK,
+    INSTANCE_UPDATE_STEP_02,
+    INSTANCE_UPDATE_STEP_02_TASK,
     REGISTERED_STEP_NAMES,
     dispatch_registered_step,
 )
@@ -89,6 +92,17 @@ def configure_worker(
         bootstrap_helpers,
         "get_settings",
         lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
+    cleanup_module = import_module("coder_manager.tasks.instance.update.step_02_cleanup_users")
+    monkeypatch.setattr(
+        cleanup_module,
+        "get_settings",
+        lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
+    monkeypatch.setattr(
+        coder,
+        "cleanup_user_accounts",
+        lambda _url, _password, _expected, *, heartbeat: heartbeat(),
     )
 
 
@@ -158,6 +172,7 @@ def test_registered_step_names_and_beat_schedule() -> None:
             tasks.step_03_bootstrap_admin,
             tasks.step_04_sync_templates,
             tasks.step_01_update_instance,
+            tasks.step_02_cleanup_users,
             tasks.step_01_remove_workspaces,
             tasks.step_02_remove_instance,
             tasks.step_03_remove_schema,
@@ -504,13 +519,22 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     )
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
-    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "success"}
+    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "pending"}
+    async with session_maker() as session:
+        advanced_job = await session.get(JobExecution, job_id)
+        assert advanced_job is not None
+        assert advanced_job.attempt == first_claim.attempt + 1
+        assert advanced_job.task_name == INSTANCE_UPDATE_STEP_02_TASK
+        assert advanced_job.step == INSTANCE_UPDATE_STEP_02
+        assert advanced_job.status is JobStatus.PENDING
+
+    assert tasks.step_02_cleanup_users.run(str(job_id)) == {"status": "success"}
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
         member = await session.scalar(select(Member).where(Member.username == "retry-member"))
         assert job is not None
         assert member is not None
-        assert job.attempt == first_claim.attempt + 1
+        assert job.attempt == first_claim.attempt + 2
         assert job.status is JobStatus.SUCCESS
         assert member.status is MemberStatus.SUCCESS
 
@@ -557,12 +581,15 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
         return successful_reconcile(remote_id, slug, attached_name, members, helm_values)
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
+    tasks.step_02_cleanup_users.delay.reset_mock()
     tasks.step_03_bootstrap_admin.delay.reset_mock()
 
     assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "pending"}
     assert len(reconciled_values) == 1
     assert reconciled_values[0].kubeconfig is not None
     assert reconciled_values[0].kubeconfig.get_secret_value() == kubeconfig
+    tasks.step_02_cleanup_users.delay.assert_called_once_with(str(job_id))
+    assert tasks.step_02_cleanup_users.run(str(job_id)) == {"status": "pending"}
     tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
@@ -633,6 +660,21 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
     )
     assert response.status_code == 201
     first_job_id = UUID(response.json()["job"]["id"])
+    cleanup_snapshots: list[frozenset[str]] = []
+
+    def capture_cleanup_snapshot(
+        _instance_url: str,
+        _password: SecretStr,
+        expected_usernames: tuple[str, ...],
+        *,
+        heartbeat: object,
+    ) -> tuple[str, ...]:
+        """Capture references seen after changes coalesced during reconciliation."""
+
+        cleanup_snapshots.append(frozenset(expected_usernames))
+        assert callable(heartbeat)
+        heartbeat()
+        return ()
 
     def add_late_member(
         reconciled_id: UUID,
@@ -650,8 +692,13 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         return attached_name or f"coder-{suffix}"
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", add_late_member)
+    monkeypatch.setattr(coder, "cleanup_user_accounts", capture_cleanup_snapshot)
     tasks.step_01_update_instance.delay.reset_mock()
+    tasks.step_02_cleanup_users.delay.reset_mock()
     assert tasks.step_01_update_instance.run(str(first_job_id)) == {"status": "pending"}
+    tasks.step_02_cleanup_users.delay.assert_called_once_with(str(first_job_id))
+    assert tasks.step_02_cleanup_users.run(str(first_job_id)) == {"status": "pending"}
+    assert cleanup_snapshots == [frozenset({"admin", "first", "late"})]
     async with session_maker() as session:
         instance_record = await session.get(Instance, instance_id)
         first_job = await session.get(JobExecution, first_job_id)
@@ -671,7 +718,12 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
     tasks.step_01_update_instance.delay.assert_called_once_with(str(next_job_id))
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
-    assert tasks.step_01_update_instance.run(str(next_job_id)) == {"status": "success"}
+    assert tasks.step_01_update_instance.run(str(next_job_id)) == {"status": "pending"}
+    assert tasks.step_02_cleanup_users.run(str(next_job_id)) == {"status": "success"}
+    assert cleanup_snapshots == [
+        frozenset({"admin", "first", "late"}),
+        frozenset({"admin", "first", "late"}),
+    ]
     async with session_maker() as session:
         late_member = await session.scalar(select(Member).where(Member.username == "late"))
         instance_record = await session.get(Instance, instance_id)
@@ -679,6 +731,192 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         assert instance_record is not None
         assert late_member.status is MemberStatus.SUCCESS
         assert instance_record.status is InstanceStatus.SUCCESS
+
+
+async def test_update_deletes_remote_accounts_before_local_members(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Revoke Argo CD access, delete a batch in Coder, then remove local rows."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    cleanup_module = import_module("coder_manager.tasks.instance.update.step_02_cleanup_users")
+    monkeypatch.setattr(
+        cleanup_module,
+        "get_settings",
+        lambda: Settings(
+            crypto_key=TEST_CRYPTO_KEY,
+            default_admins=" Root.Admin ",
+        ),
+    )
+    instance = await create_instance(client, "REMOTE MEMBER DELETE")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    await mark_bootstrap_succeeded(session_maker, instance_id)
+    async with session_maker() as session:
+        members = [
+            Member(
+                instance_id=instance_id,
+                username=username,
+                role=MemberRole.USER,
+                action="creating",
+                status=MemberStatus.SUCCESS,
+            )
+            for username in ("alice", "bob", "root.admin")
+        ]
+        session.add_all(members)
+        await session.commit()
+        member_ids = {member.username: member.id for member in members}
+
+    first = await client.delete(f"/api/v1/instances/{instance_id}/members/{member_ids['alice']}")
+    second = await client.delete(f"/api/v1/instances/{instance_id}/members/{member_ids['bob']}")
+    assert first.status_code == 202
+    assert second.status_code == 202
+    job_id = UUID(first.json()["job"]["id"])
+    async with session_maker() as session:
+        protected = await session.get(Member, member_ids["root.admin"])
+        assert protected is not None
+        protected.action = "deleting"
+        protected.status = MemberStatus.PENDING
+        await session.commit()
+
+    events: list[tuple[str, object]] = []
+
+    def capture_reconcile(
+        remote_id: UUID,
+        slug: str | None,
+        attached_name: str | None,
+        members: tuple[tuple[str, str], ...],
+        helm_values: argocd.InstanceHelmValues,
+    ) -> str:
+        """Record that policy reconciliation precedes account deletion."""
+
+        events.append(("argocd", members))
+        return successful_reconcile(
+            remote_id,
+            slug,
+            attached_name,
+            members,
+            helm_values,
+        )
+
+    def capture_cleanup(
+        _instance_url: str,
+        _password: SecretStr,
+        expected_usernames: tuple[str, ...],
+        *,
+        heartbeat: object,
+    ) -> tuple[str, ...]:
+        """Record the expected set and exercise the cleanup heartbeat."""
+
+        events.append(("coder", frozenset(expected_usernames)))
+        assert callable(heartbeat)
+        heartbeat()
+        return ("alice", "bob")
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
+    monkeypatch.setattr(coder, "cleanup_user_accounts", capture_cleanup)
+
+    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_02_cleanup_users.run(str(job_id)) == {"status": "success"}
+
+    assert events == [
+        ("argocd", ()),
+        ("coder", frozenset({"admin", "root.admin"})),
+    ]
+    async with session_maker() as session:
+        remaining = list(
+            await session.scalars(select(Member).where(Member.instance_id == instance_id))
+        )
+        job = await session.get(JobExecution, job_id)
+        stored_instance = await session.get(Instance, instance_id)
+        assert remaining == []
+        assert job is not None
+        assert job.status is JobStatus.SUCCESS
+        assert stored_instance is not None
+        assert stored_instance.status is InstanceStatus.SUCCESS
+
+
+async def test_failed_remote_account_deletion_is_retried_before_local_removal(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep failed deletion state, then converge safely on the next attempt."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "REMOTE MEMBER RETRY")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    await mark_bootstrap_succeeded(session_maker, instance_id)
+    async with session_maker() as session:
+        member = Member(
+            instance_id=instance_id,
+            username="alice",
+            role=MemberRole.USER,
+            action="creating",
+            status=MemberStatus.SUCCESS,
+        )
+        session.add(member)
+        await session.commit()
+        member_id = member.id
+
+    deletion = await client.delete(f"/api/v1/instances/{instance_id}/members/{member_id}")
+    job_id = UUID(deletion.json()["job"]["id"])
+    attempts = 0
+
+    def cleanup_with_transient_failure(
+        _instance_url: str,
+        _password: SecretStr,
+        _expected_usernames: tuple[str, ...],
+        *,
+        heartbeat: object,
+    ) -> tuple[str, ...]:
+        """Fail the first remote attempt and complete the retry."""
+
+        nonlocal attempts
+        attempts += 1
+        assert callable(heartbeat)
+        heartbeat()
+        if attempts == 1:
+            raise coder.CoderRequestError("Coder DELETE returned HTTP 417")
+        return ("alice",)
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    monkeypatch.setattr(coder, "cleanup_user_accounts", cleanup_with_transient_failure)
+
+    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "pending"}
+    with pytest.raises(coder.CoderRequestError):
+        tasks.step_02_cleanup_users.run(str(job_id))
+
+    async with session_maker() as session:
+        failed_member = await session.get(Member, member_id)
+        failed_job = await session.get(JobExecution, job_id)
+        failed_instance = await session.get(Instance, instance_id)
+        assert failed_member is not None
+        assert failed_member.action == "deleting"
+        assert failed_member.status is MemberStatus.ERROR
+        assert failed_job is not None
+        assert failed_job.status is JobStatus.ERROR
+        assert failed_instance is not None
+        assert failed_instance.status is InstanceStatus.ERROR
+
+    assert tasks.step_02_cleanup_users.run(str(job_id)) == {"status": "success"}
+    assert attempts == 2
+    async with session_maker() as session:
+        assert await session.get(Member, member_id) is None
+        retried_job = await session.get(JobExecution, job_id)
+        retried_instance = await session.get(Instance, instance_id)
+        assert retried_job is not None
+        assert retried_job.status is JobStatus.SUCCESS
+        assert retried_job.attempt == 3
+        assert retried_instance is not None
+        assert retried_instance.status is InstanceStatus.SUCCESS
 
 
 async def test_delete_steps_keep_local_state_until_step_04(

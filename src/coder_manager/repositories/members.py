@@ -1,5 +1,6 @@
 """Persistence operations for instance members."""
 
+from collections.abc import Collection
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -39,6 +40,10 @@ class MemberActionConflictError(Exception):
 
 class MemberHasWorkspacesError(Exception):
     """Raised when a member still owns workspaces."""
+
+
+class MemberProtectedAdministratorError(Exception):
+    """Raised when deletion targets a reserved administrator account."""
 
 
 class InvalidMemberActionError(Exception):
@@ -135,11 +140,20 @@ class MemberRepository:
         await self._session.refresh(member)
         return member, True
 
-    async def request_deletion(self, instance_id: UUID, member_id: UUID) -> Member:
+    async def request_deletion(
+        self,
+        instance_id: UUID,
+        member_id: UUID,
+        *,
+        protected_usernames: Collection[str] = (),
+    ) -> Member:
         """Move a member to deleting/pending and request reconciliation."""
 
         instance = await self._lock_available_instance(instance_id)
         member = await self._lock_member(instance_id, member_id)
+        if member.username in protected_usernames:
+            await self._session.rollback()
+            raise MemberProtectedAdministratorError
         if member.status is not MemberStatus.SUCCESS:
             await self._session.rollback()
             raise MemberActionConflictError
@@ -198,10 +212,15 @@ class MemberRepository:
         if instance is None:
             await self._session.rollback()
             raise MemberInstanceNotFoundError
-        update_in_progress = instance.action == "updating" and instance.status in {
-            InstanceStatus.PENDING,
-            InstanceStatus.RUNNING,
-        }
+        update_in_progress = (
+            instance.action == "updating"
+            and instance.step == INSTANCE_UPDATE_STEP_01
+            and instance.status
+            in {
+                InstanceStatus.PENDING,
+                InstanceStatus.RUNNING,
+            }
+        )
         if not update_in_progress and instance.status is not InstanceStatus.SUCCESS:
             await self._session.rollback()
             raise MemberInstanceBusyError

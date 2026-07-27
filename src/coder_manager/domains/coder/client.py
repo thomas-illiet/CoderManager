@@ -1,9 +1,10 @@
-"""Synchronous HTTP client for the unauthenticated Coder bootstrap API."""
+"""Synchronous HTTP client for managed Coder instance workflows."""
 
 from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING, Any, Self
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -31,7 +32,7 @@ READ_TIMEOUT_SECONDS = 30.0
 
 
 class CoderClient:
-    """Small synchronous client for first-user creation and recovery."""
+    """Small synchronous client for administrator-driven Coder API workflows."""
 
     def __init__(
         self,
@@ -137,6 +138,42 @@ class CoderClient:
             msg = "Coder already has a first user that does not match prepared credentials"
             raise CoderFirstUserConflictError(msg)
         self._client.headers["Coder-Session-Token"] = token
+
+    def delete_user(self, username: str) -> None:
+        """Delete one user account, treating an absent account as converged."""
+
+        path = f"api/v2/users/{quote(username, safe='')}"
+        response = self._client.delete(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return
+        self._raise_for_response(response, "DELETE", path, httpx.codes.OK)
+
+    def usernames(self) -> tuple[str, ...]:
+        """Return every non-deleted Coder username from the unpaginated endpoint."""
+
+        path = "api/v2/users"
+        response = self._client.get(path)
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        payload = self._json_object(response, path)
+        users = payload.get("users")
+        count = payload.get("count")
+        if not isinstance(users, list) or type(count) is not int:
+            msg = "Coder GET api/v2/users returned an invalid users page"
+            raise CoderRequestError(msg)
+        usernames = tuple(
+            user.get("username")
+            for user in users
+            if isinstance(user, dict) and isinstance(user.get("username"), str)
+        )
+        if (
+            len(usernames) != len(users)
+            or len(usernames) != count
+            or any(not username for username in usernames)
+            or len(set(usernames)) != len(usernames)
+        ):
+            msg = "Coder GET api/v2/users returned an incomplete users page"
+            raise CoderRequestError(msg)
+        return usernames
 
     def default_organization_id(self) -> UUID:
         """Return the single organization marked as the deployment default."""

@@ -254,7 +254,12 @@ Member creation, role changes, and deletion return HTTP 409 while the parent ins
 or `running`; member reads remain available. A member can only be changed after its previous action
 has succeeded. Repeating a successful member's current role with PUT is an idempotent HTTP 200
 response and does not change `updated_at`; accepted role changes return HTTP 202. A member cannot
-be deleted while it still owns workspaces.
+be deleted while it still owns workspaces. Deletion first removes the username from the Argo CD
+access policy. The dedicated `step_02_cleanup_users` then compares every Coder account with the
+active instance members, deletes all unreferenced accounts, and only then removes locally deleting
+members. Accounts missing from Coder are already converged; any other remote failure leaves the
+member and job retryable. The bootstrap `admin` account and usernames configured through
+`CODER_MANAGER_DEFAULT_ADMINS` are always referenced and cannot be removed through the members API.
 
 ## Templates API
 
@@ -395,9 +400,11 @@ pool after the process starts and disposes it during process shutdown. The worke
 driver from `CODER_MANAGER_DATABASE_URL`, so the API, migrations, and worker continue to share one
 database URL setting.
 
-Member changes are reconciled by `coder_manager.instance.update.step_01_update_instance` rather
-than individual member tasks. One pass claims the currently pending members, finalizes member
-creations and role changes, deletes members marked for deletion, and creates a new `instance.update`
-job when changes arrived while it was running. Otherwise member, provider, and workspace mutations
-require a successful parent, so they cannot overwrite a failed creation or deletion before Beat
-retries it.
+Member changes are reconciled by a two-step `instance.update` workflow rather than individual
+member tasks. `step_01_update_instance` claims pending members and reconciles the Argo CD access
+policy. `step_02_cleanup_users` lists every Coder account, preserves active local members plus the
+configured protected administrators, deletes every other account, and then finalizes local member
+creations, role changes, and deletions. Member writes may coalesce during step 1 but return HTTP 409
+during the cleanup snapshot; changes already queued by then create a new `instance.update` job.
+Otherwise member, provider, and workspace mutations require a successful parent, so they cannot
+overwrite a failed creation or deletion before Beat retries it.

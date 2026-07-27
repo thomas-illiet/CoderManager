@@ -6,7 +6,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from coder_manager.config import Settings, get_settings
 from coder_manager.database import get_session
+from coder_manager.domains import argocd, coder
 from coder_manager.repositories import (
     JobExecutionRepository,
     MemberActionConflictError,
@@ -15,6 +17,7 @@ from coder_manager.repositories import (
     MemberInstanceBusyError,
     MemberInstanceNotFoundError,
     MemberNotFoundError,
+    MemberProtectedAdministratorError,
     MemberRepository,
 )
 from coder_manager.schemas import (
@@ -30,6 +33,7 @@ from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/instances/{instance_id}/members", tags=["members"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
+SettingsDependency = Annotated[Settings, Depends(get_settings)]
 
 
 @router.get("", summary="List instance members")
@@ -139,11 +143,20 @@ async def delete_member(
     instance_id: UUID,
     member_id: UUID,
     session: SessionDependency,
+    settings: SettingsDependency,
 ) -> JobResourceResponse[MemberRead]:
     """Move a successfully processed member to deleting/pending."""
 
+    protected_usernames = {
+        coder.ADMIN_USERNAME,
+        *argocd.parse_default_admins(settings.default_admins),
+    }
     try:
-        member = await MemberRepository(session).request_deletion(instance_id, member_id)
+        member = await MemberRepository(session).request_deletion(
+            instance_id,
+            member_id,
+            protected_usernames=protected_usernames,
+        )
     except MemberInstanceNotFoundError as error:
         raise _instance_not_found() from error
     except MemberInstanceBusyError as error:
@@ -156,6 +169,11 @@ async def delete_member(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Member still owns workspaces",
+        ) from error
+    except MemberProtectedAdministratorError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Protected administrator cannot be removed",
         ) from error
     job = await _consume_instance_update_request(session)
     if job is not None:

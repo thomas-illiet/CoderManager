@@ -14,6 +14,8 @@ from coder_manager.domains.coder import (
     CoderClient,
     CoderFirstUserConflictError,
     CoderRequestError,
+    cleanup_user_accounts,
+    delete_user_accounts,
 )
 from coder_manager.domains.coder import client as coder_client
 
@@ -109,6 +111,207 @@ def test_recover_prepared_first_user_without_persisting_session() -> None:
 
     assert requests[2].headers["coder-session-token"] == "ephemeral"
     assert "coder-session-token" not in requests[0].headers
+
+
+def test_delete_user_accounts_authenticates_encodes_and_accepts_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delete a batch with one session and accept an already absent account."""
+
+    requests: list[httpx.Request] = []
+    heartbeats: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return successful authentication and idempotent deletion responses."""
+
+        requests.append(request)
+        if request.url.path.endswith("/users/first"):
+            return httpx.Response(httpx.codes.OK, json={})
+        if request.url.path.endswith("/users/login"):
+            return httpx.Response(httpx.codes.CREATED, json={"session_token": "ephemeral"})
+        if request.url.path.endswith("/users/me"):
+            return httpx.Response(
+                httpx.codes.OK,
+                json={"username": ADMIN_USERNAME, "email": ADMIN_EMAIL},
+            )
+        if request.url.raw_path.endswith(b"/already-missing"):
+            return httpx.Response(httpx.codes.NOT_FOUND, text="private missing response")
+        return httpx.Response(httpx.codes.OK, json={"message": "deleted"})
+
+    original_client = coder_client.CoderClient
+
+    def client_factory(instance_url: str) -> CoderClient:
+        """Create the service client with a deterministic mock transport."""
+
+        return original_client(instance_url, transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr("coder_manager.domains.coder.service.CoderClient", client_factory)
+    delete_user_accounts(
+        "https://coder.example.test/root",
+        PASSWORD,
+        ("alice/example", "already-missing"),
+        heartbeat=lambda: heartbeats.append("heartbeat"),
+    )
+
+    assert [request.method for request in requests] == ["GET", "POST", "GET", "DELETE", "DELETE"]
+    assert requests[3].url.raw_path.endswith(b"/api/v2/users/alice%2Fexample")
+    assert all(request.headers["coder-session-token"] == "ephemeral" for request in requests[3:])
+    assert heartbeats == ["heartbeat", "heartbeat"]
+
+
+def test_delete_user_rejects_remote_errors_without_response_body() -> None:
+    """Raise a sanitized error when Coder refuses account deletion."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return the workspace ownership conflict emitted by Coder."""
+
+        return httpx.Response(httpx.codes.EXPECTATION_FAILED, text="private workspace details")
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(CoderRequestError) as raised,
+    ):
+        client.delete_user("alice")
+
+    assert str(raised.value) == "Coder DELETE api/v2/users/alice returned HTTP 417"
+    assert "private workspace details" not in str(raised.value)
+
+
+def test_delete_user_accounts_bootstraps_a_missing_administrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Create and authenticate the prepared administrator before deletion."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return the empty deployment bootstrap and deletion sequence."""
+
+        requests.append(request)
+        if request.url.path.endswith("/users/first") and request.method == "GET":
+            return httpx.Response(
+                httpx.codes.NOT_FOUND,
+                headers={"X-Coder-Build-Version": "v2.35.2"},
+            )
+        if request.url.path.endswith("/users/first"):
+            return httpx.Response(httpx.codes.CREATED, json={"user_id": "ignored"})
+        if request.url.path.endswith("/users/login"):
+            return httpx.Response(httpx.codes.CREATED, json={"session_token": "ephemeral"})
+        if request.url.path.endswith("/users/me"):
+            return httpx.Response(
+                httpx.codes.OK,
+                json={"username": ADMIN_USERNAME, "email": ADMIN_EMAIL},
+            )
+        return httpx.Response(httpx.codes.OK, json={"message": "deleted"})
+
+    original_client = coder_client.CoderClient
+    monkeypatch.setattr(
+        "coder_manager.domains.coder.service.CoderClient",
+        lambda instance_url: original_client(
+            instance_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    delete_user_accounts("https://coder.example.test", PASSWORD, ("alice",))
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v2/users/first"),
+        ("POST", "/api/v2/users/first"),
+        ("POST", "/api/v2/users/login"),
+        ("GET", "/api/v2/users/me"),
+        ("DELETE", "/api/v2/users/alice"),
+    ]
+
+
+def test_cleanup_user_accounts_deletes_every_unreferenced_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """List all Coder users and delete only accounts absent from the manager set."""
+
+    requests: list[httpx.Request] = []
+    heartbeats: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return authentication, the complete user page, and deletions."""
+
+        requests.append(request)
+        if request.url.path.endswith("/users/first"):
+            return httpx.Response(httpx.codes.OK, json={})
+        if request.url.path.endswith("/users/login"):
+            return httpx.Response(httpx.codes.CREATED, json={"session_token": "ephemeral"})
+        if request.url.path.endswith("/users/me"):
+            return httpx.Response(
+                httpx.codes.OK,
+                json={"username": ADMIN_USERNAME, "email": ADMIN_EMAIL},
+            )
+        if request.url.path.endswith("/users") and request.method == "GET":
+            return httpx.Response(
+                httpx.codes.OK,
+                json={
+                    "count": 4,
+                    "users": [
+                        {"username": "service-account"},
+                        {"username": "alice"},
+                        {"username": "orphan"},
+                        {"username": "admin"},
+                    ],
+                },
+            )
+        return httpx.Response(httpx.codes.OK, json={"message": "deleted"})
+
+    original_client = coder_client.CoderClient
+    monkeypatch.setattr(
+        "coder_manager.domains.coder.service.CoderClient",
+        lambda instance_url: original_client(
+            instance_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    deleted = cleanup_user_accounts(
+        "https://coder.example.test",
+        PASSWORD,
+        ("admin", "alice"),
+        heartbeat=lambda: heartbeats.append("heartbeat"),
+    )
+
+    assert deleted == ("orphan", "service-account")
+    delete_paths = [request.url.path for request in requests if request.method == "DELETE"]
+    assert delete_paths == [
+        "/api/v2/users/orphan",
+        "/api/v2/users/service-account",
+    ]
+    assert heartbeats == ["heartbeat", "heartbeat", "heartbeat"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"count": 2, "users": [{"username": "alice"}]},
+        {"count": 1, "users": [{"id": "missing-username"}]},
+        {"count": 2, "users": [{"username": "alice"}, {"username": "alice"}]},
+    ],
+)
+def test_usernames_rejects_incomplete_or_invalid_pages(payload: object) -> None:
+    """Fail closed when Coder does not return one complete unique user page."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return the invalid page under test."""
+
+        return httpx.Response(httpx.codes.OK, json=payload)
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(CoderRequestError, match="incomplete users page"),
+    ):
+        client.usernames()
 
 
 @pytest.mark.parametrize(

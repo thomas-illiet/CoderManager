@@ -10,6 +10,8 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coder_manager.api.routes import members as member_routes
+from coder_manager.config import Settings, get_settings
+from coder_manager.main import app
 from coder_manager.models import Instance, InstanceStatus, Member, MemberRole, MemberStatus
 from coder_manager.repositories import (
     InstanceRepository,
@@ -19,9 +21,11 @@ from coder_manager.repositories import (
     MemberInstanceBusyError,
     MemberInstanceNotFoundError,
     MemberNotFoundError,
+    MemberProtectedAdministratorError,
     MemberRepository,
 )
 from coder_manager.schemas import MemberCreate, MemberRoleUpdate
+from coder_manager.tasks.common.registry import INSTANCE_UPDATE_STEP_02
 
 
 async def create_instance(client: AsyncClient, application: str) -> dict[str, object]:
@@ -249,6 +253,69 @@ async def test_instance_busy_blocks_mutations_but_not_reads(
     assert blocked_update.status_code == 409
     assert blocked_delete.status_code == 409
     assert readable_member.status_code == 200
+
+
+async def test_cleanup_step_blocks_new_member_mutations(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Freeze membership while the remote account comparison is running."""
+
+    instance = await create_ready_instance(client, session_maker, suffix="cleanup")
+    member = await create_member(client, instance["id"])
+    await set_member_status(session_maker, str(member["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, UUID(str(instance["id"])))
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.RUNNING
+        stored.step = INSTANCE_UPDATE_STEP_02
+        await session.commit()
+
+    created = await client.post(
+        f"/api/v1/instances/{instance['id']}/members",
+        json={"username": "bob", "role": "user"},
+    )
+    updated = await client.put(
+        f"/api/v1/instances/{instance['id']}/members/{member['id']}",
+        json={"role": "admin"},
+    )
+    deleted = await client.delete(f"/api/v1/instances/{instance['id']}/members/{member['id']}")
+
+    assert created.status_code == 409
+    assert updated.status_code == 409
+    assert deleted.status_code == 409
+    assert created.json() == {"detail": "Instance has an action in progress"}
+
+
+@pytest.mark.parametrize("username", ["admin", "root.admin"])
+async def test_protected_administrators_cannot_be_removed(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    username: str,
+) -> None:
+    """Reject protected accounts without changing member or instance state."""
+
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        crypto_key="MDAxMTIyMzM0NDU1NjY3Nzg4ODlhYWJiY2NkZGVlZmY=",
+        default_admins=" Root.Admin, another.admin ",
+    )
+    instance = await create_ready_instance(client, session_maker, suffix=username)
+    member = await create_member(client, instance["id"], username=username)
+    await set_member_status(session_maker, str(member["id"]))
+    before = await client.get(f"/api/v1/instances/{instance['id']}")
+
+    deletion = await client.delete(f"/api/v1/instances/{instance['id']}/members/{member['id']}")
+    after_member = await client.get(f"/api/v1/instances/{instance['id']}/members/{member['id']}")
+    after_instance = await client.get(f"/api/v1/instances/{instance['id']}")
+
+    assert deletion.status_code == 409
+    assert deletion.json() == {"detail": "Protected administrator cannot be removed"}
+    assert after_member.status_code == 200
+    assert after_member.json()["action"] == "creating"
+    assert after_member.json()["status"] == "success"
+    assert after_instance.json()["job_id"] == before.json()["job_id"]
+    assert after_instance.json()["status"] == "success"
 
 
 async def test_instance_error_blocks_member_creation_until_retry(
@@ -551,9 +618,12 @@ async def test_member_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -> 
             self,
             _instance_id: UUID,
             _member_id: UUID,
+            *,
+            protected_usernames: object,
         ) -> SimpleNamespace:
             """Simulate the repository request deletion operation."""
 
+            assert protected_usernames == {"admin"}
             return record
 
     monkeypatch.setattr(member_routes, "MemberRepository", SuccessfulRepository)
@@ -571,7 +641,12 @@ async def test_member_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -> 
         None,
         response,
     )
-    deleted = await member_routes.delete_member(record.instance_id, record.id, None)
+    deleted = await member_routes.delete_member(
+        record.instance_id,
+        record.id,
+        None,
+        Settings(),
+    )
 
     assert page.total == 1
     assert (
@@ -733,6 +808,7 @@ async def test_update_member_route_error_mapping(
         MemberInstanceBusyError,
         MemberNotFoundError,
         MemberActionConflictError,
+        MemberProtectedAdministratorError,
     ],
 )
 async def test_delete_member_route_error_mapping(
@@ -747,7 +823,11 @@ async def test_delete_member_route_error_mapping(
         def __init__(self, _session: object) -> None:
             """Initialize the test double used by this scenario."""
 
-        async def request_deletion(self, *_args: object) -> None:
+        async def request_deletion(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
             """Simulate the repository request deletion operation."""
 
             raise repository_error
@@ -755,7 +835,7 @@ async def test_delete_member_route_error_mapping(
     monkeypatch.setattr(member_routes, "MemberRepository", FailingRepository)
 
     with pytest.raises(HTTPException) as caught:
-        await member_routes.delete_member(uuid4(), uuid4(), None)
+        await member_routes.delete_member(uuid4(), uuid4(), None, Settings())
 
     assert caught.value.status_code in {404, 409}
 
@@ -866,3 +946,30 @@ async def test_member_repository_rejects_missing_members(
             )
         with pytest.raises(MemberNotFoundError):
             await repository.request_deletion(instance_id, missing_member_id)
+
+
+async def test_member_repository_rejects_protected_administrator(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Reject a protected username before staging an instance update."""
+
+    instance = await create_ready_instance(client, session_maker, suffix="protected")
+    member = await create_member(client, instance["id"], username="root.admin")
+    await set_member_status(session_maker, str(member["id"]))
+
+    async with session_maker() as session:
+        repository = MemberRepository(session)
+        with pytest.raises(MemberProtectedAdministratorError):
+            await repository.request_deletion(
+                UUID(str(instance["id"])),
+                UUID(str(member["id"])),
+                protected_usernames={"admin", "root.admin"},
+            )
+        stored = await repository.get(
+            UUID(str(instance["id"])),
+            UUID(str(member["id"])),
+        )
+        assert stored is not None
+        assert stored.action == "creating"
+        assert stored.status is MemberStatus.SUCCESS

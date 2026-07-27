@@ -20,6 +20,7 @@ from coder_manager.models import (
 )
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
+    advance_execution,
     fail_execution,
     owned_execution,
     required_resource_id,
@@ -30,6 +31,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_UPDATE_STEP_01,
     INSTANCE_UPDATE_STEP_01_TASK,
+    INSTANCE_UPDATE_STEP_02,
+    INSTANCE_UPDATE_STEP_02_TASK,
     dispatch_registered_step,
 )
 from coder_manager.tasks.instance._bootstrap import bootstrap_succeeded
@@ -50,10 +53,14 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Claim members, reconcile Argo CD, and finalize the pass."""
 
-        member_ids, members, slug, attached_name, environment, public_url = _claim_members(
-            claim,
-            session_factory,
-        )
+        (
+            member_ids,
+            members,
+            slug,
+            attached_name,
+            environment,
+            public_url,
+        ) = _claim_members(claim, session_factory)
         try:
             helm_values = instance_helm_values(
                 required_resource_id(claim),
@@ -76,9 +83,31 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
                 mutate=lambda session: _fail_members(session, member_ids),
             )
             raise
-        return _finalize_update(claim, member_ids, application_name, session_factory)
+        advanced = advance_execution(
+            claim,
+            next_task_name=INSTANCE_UPDATE_STEP_02_TASK,
+            next_step=INSTANCE_UPDATE_STEP_02,
+            session_factory=session_factory,
+            mutate=lambda _session, resource: _store_application_name(
+                resource,
+                application_name,
+            ),
+        )
+        return {"status": "pending" if advanced else "noop"}
 
     return run_claimed_step(job_id, INSTANCE_UPDATE_STEP_01_TASK, session_factory, operation)
+
+
+def _store_application_name(
+    resource: object,
+    application_name: str,
+) -> None:
+    """Persist the reconciled Argo CD name before the cleanup step."""
+
+    if not isinstance(resource, Instance):
+        msg = "Instance update resource is missing"
+        raise TypeError(msg)
+    resource.argocd_application_name = application_name
 
 
 def _claim_members(

@@ -34,6 +34,7 @@ from coder_manager.repositories.members import (
     MemberInstanceBusyError,
     MemberInstanceNotFoundError,
     MemberNotFoundError,
+    MemberProtectedAdministratorError,
     MemberRepository,
 )
 from coder_manager.repositories.template_images import (
@@ -95,6 +96,7 @@ __all__ = [
     "MemberInstanceBusyError",
     "MemberInstanceNotFoundError",
     "MemberNotFoundError",
+    "MemberProtectedAdministratorError",
     "MemberRepository",
     "TemplateAlreadyExistsError",
     "TemplateHasWorkspacesError",
