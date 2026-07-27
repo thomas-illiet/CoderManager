@@ -15,8 +15,35 @@ from coder_manager.domains.coder import (
     CoderFirstUserConflictError,
     CoderRequestError,
 )
+from coder_manager.domains.coder import client as coder_client
 
 PASSWORD = SecretStr("prepared-secret-password")
+
+
+def test_client_disables_tls_verification(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable certificate verification for calls to managed Coder instances."""
+
+    captured: dict[str, object] = {}
+
+    class StubClient:
+        """Capture the HTTP client configuration."""
+
+        def __init__(self, **kwargs: object) -> None:
+            """Record the arguments passed to the HTTP client."""
+
+            captured.update(kwargs)
+
+        def close(self) -> None:
+            """Record that the client was closed."""
+
+            captured["closed"] = True
+
+    monkeypatch.setattr(coder_client.httpx, "Client", StubClient)
+    client = CoderClient("https://coder.example.test")
+    client.close()
+
+    assert captured["verify"] is False
+    assert captured["closed"] is True
 
 
 def test_create_first_user_contract() -> None:

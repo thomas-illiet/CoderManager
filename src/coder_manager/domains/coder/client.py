@@ -39,11 +39,12 @@ class CoderClient:
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        """Create a strict-TLS client with bounded connection and read timeouts."""
+        """Create a client with disabled TLS verification and bounded timeouts."""
 
         self._client = httpx.Client(
             base_url=f"{instance_url.rstrip('/')}/",
             timeout=httpx.Timeout(READ_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
+            verify=False,  # noqa: S501 - managed instances use private certificates.
             follow_redirects=False,
             transport=transport,
         )
