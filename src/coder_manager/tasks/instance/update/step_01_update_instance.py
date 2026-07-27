@@ -35,7 +35,6 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_UPDATE_STEP_02_TASK,
     dispatch_registered_step,
 )
-from coder_manager.tasks.instance._bootstrap import bootstrap_succeeded
 from coder_manager.tasks.instance._database import instance_helm_values
 
 if TYPE_CHECKING:
@@ -60,6 +59,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             attached_name,
             environment,
             public_url,
+            password_configured,
         ) = _claim_members(claim, session_factory)
         try:
             helm_values = instance_helm_values(
@@ -85,8 +85,12 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             raise
         advanced = advance_execution(
             claim,
-            next_task_name=INSTANCE_UPDATE_STEP_02_TASK,
-            next_step=INSTANCE_UPDATE_STEP_02,
+            next_task_name=(
+                INSTANCE_UPDATE_STEP_02_TASK
+                if password_configured
+                else INSTANCE_CREATE_STEP_03_TASK
+            ),
+            next_step=(INSTANCE_UPDATE_STEP_02 if password_configured else INSTANCE_CREATE_STEP_03),
             session_factory=session_factory,
             mutate=lambda _session, resource: _store_application_name(
                 resource,
@@ -120,6 +124,7 @@ def _claim_members(
     str | None,
     str,
     str,
+    bool,
 ]:
     """Claim the currently pending or failed member changes."""
 
@@ -158,6 +163,7 @@ def _claim_members(
             instance.argocd_application_name,
             instance.environment.value,
             instance.instance_url,
+            instance.password_enc is not None,
         )
 
 
@@ -217,16 +223,7 @@ def _finalize_update(
             )
             .limit(1)
         )
-        if pending_member is None and not bootstrap_succeeded(session, instance.id):
-            job.task_name = INSTANCE_CREATE_STEP_03_TASK
-            job.step = INSTANCE_CREATE_STEP_03
-            job.status = JobStatus.PENDING
-            job.claimed_at = None
-            instance.step = INSTANCE_CREATE_STEP_03
-            instance.status = InstanceStatus.PENDING
-            dispatch = (INSTANCE_CREATE_STEP_03_TASK, job.id)
-            result = {"status": "pending"}
-        elif pending_member is None:
+        if pending_member is None:
             job.status = JobStatus.SUCCESS
             job.claimed_at = None
             instance.status = InstanceStatus.SUCCESS

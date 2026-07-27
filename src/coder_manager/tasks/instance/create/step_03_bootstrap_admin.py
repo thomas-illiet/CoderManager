@@ -1,8 +1,13 @@
 """Bootstrap the static administrator account on a managed Coder instance."""
 
+from secrets import token_urlsafe
+
+from pydantic import SecretStr
+
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
 from coder_manager.domains import coder
+from coder_manager.models import Instance, JobExecution
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
     advance_execution,
@@ -13,11 +18,10 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_CREATE_STEP_04,
     INSTANCE_CREATE_STEP_04_TASK,
+    INSTANCE_UPDATE_STEP_02,
+    INSTANCE_UPDATE_STEP_02_TASK,
 )
-from coder_manager.tasks.instance._bootstrap import (
-    bootstrap_succeeded,
-    prepared_admin_password,
-)
+from coder_manager.tasks.instance._bootstrap import store_verified_admin_password
 
 
 @celery_app.task(name=INSTANCE_CREATE_STEP_03_TASK)
@@ -27,27 +31,44 @@ def step_03_bootstrap_admin(job_id: str) -> dict[str, str]:
     session_factory = worker_database.get_worker_session_maker()
 
     def operation(claim: ExecutionClaim) -> dict[str, str]:
-        """Reuse prepared credentials and finish only after remote verification."""
+        """Bootstrap only missing credentials and persist them after remote success."""
 
         instance_id = required_resource_id(claim)
         with session_factory() as session:
-            already_succeeded = bootstrap_succeeded(session, instance_id)
-        if already_succeeded:
-            advanced = advance_execution(
-                claim,
-                next_task_name=INSTANCE_CREATE_STEP_04_TASK,
-                next_step=INSTANCE_CREATE_STEP_04,
-                session_factory=session_factory,
-            )
-            return {"status": "pending" if advanced else "noop"}
+            instance = session.get(Instance, instance_id)
+            job = session.get(JobExecution, claim.job_id)
+            if instance is None:
+                msg = "Instance is missing"
+                raise RuntimeError(msg)
+            if job is None:
+                msg = "Job execution is missing"
+                raise RuntimeError(msg)
+            password_configured = instance.password_enc is not None
+            instance_url = instance.instance_url
+            is_update = job.name == "instance.update"
 
-        instance_url, password = prepared_admin_password(instance_id, session_factory)
-        coder.bootstrap_admin_account(instance_url, password)
+        password: SecretStr | None = None
+        if not password_configured:
+            password = SecretStr(token_urlsafe(32))
+            coder.bootstrap_admin_account(instance_url, password)
+
+        def store_password(_session: object, resource: object | None) -> None:
+            """Store the verified password in the same transaction as advancement."""
+
+            if not isinstance(resource, Instance):
+                msg = "Instance is missing"
+                raise TypeError(msg)
+            if password is not None:
+                store_verified_admin_password(resource, password)
+
         advanced = advance_execution(
             claim,
-            next_task_name=INSTANCE_CREATE_STEP_04_TASK,
-            next_step=INSTANCE_CREATE_STEP_04,
+            next_task_name=(
+                INSTANCE_UPDATE_STEP_02_TASK if is_update else INSTANCE_CREATE_STEP_04_TASK
+            ),
+            next_step=INSTANCE_UPDATE_STEP_02 if is_update else INSTANCE_CREATE_STEP_04,
             session_factory=session_factory,
+            mutate=store_password,
         )
         return {"status": "pending" if advanced else "noop"}
 

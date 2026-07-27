@@ -193,12 +193,15 @@ at a time; there is no parallel force mode.
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.
 
 The bootstrap account has the static username `admin`, email `admin@coder.local`, and display name
-`Coder Admin`. Coder Manager generates a unique password, encrypts it in
+`Coder Admin`. Coder Manager generates a unique password and, only after Coder confirms a successful
+bootstrap, encrypts it in
 `instances.password_enc` with `CODER_MANAGER_CRYPTO_KEY`, and binds the ciphertext to the instance
 UUID. `GET /api/v1/instances/{id}/admin` returns the static username and email with the decrypted
-password only after a successful `step_03_bootstrap_admin`; prepared credentials from a failed or
-running attempt remain unavailable. The response uses `Cache-Control: no-store`. This is a
-breaking migration: existing instances are not reconciled or bootstrapped automatically.
+password whenever `password_enc` is present; it does not depend on `job_executions`. A bootstrap job
+skips the remote bootstrap when the instance already has a stored password. Failed or running
+bootstrap attempts leave the password unset and unavailable. The response uses
+`Cache-Control: no-store`. This is a breaking migration: existing instances are not reconciled or
+bootstrapped automatically.
 
 `POST /api/v1/instances/{id}/provider` is a create-only `multipart/form-data` upload whose required
 file field is named `kubeconfig`. Coder Manager does not validate the filename, media type, size,

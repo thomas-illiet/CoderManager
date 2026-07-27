@@ -128,22 +128,18 @@ async def encrypt_allocated_database(
         await session.commit()
 
 
-async def mark_bootstrap_succeeded(
+async def store_admin_password(
     session_maker: async_sessionmaker[AsyncSession],
     instance_id: UUID,
 ) -> None:
-    """Persist the historical successful bootstrap expected by normal updates."""
+    """Persist the administrator password expected by normal updates."""
 
     async with session_maker() as session:
-        session.add(
-            JobExecution(
-                name="instance.create",
-                task_name=INSTANCE_CREATE_STEP_04_TASK,
-                resource_type="instance",
-                resource_id=instance_id,
-                step=INSTANCE_CREATE_STEP_04,
-                status=JobStatus.SUCCESS,
-            )
+        instance = await session.get(Instance, instance_id)
+        assert instance is not None
+        instance.password_enc = InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
+            SecretStr("stored-admin-password"),
+            instance_id,
         )
         await session.commit()
 
@@ -373,13 +369,13 @@ async def test_create_failure_is_exactly_retryable_and_dispatch_loss_stays_pendi
     tasks.step_02_create_instance.delay.assert_any_call(str(job_id))
 
 
-async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
+async def test_bootstrap_stores_password_only_after_success_and_never_reprocesses_it(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reuse prepared credentials after failure and short-circuit redundant jobs."""
+    """Persist only verified credentials and short-circuit redundant bootstrap jobs."""
 
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "BOOTSTRAP RETRY")
@@ -414,16 +410,22 @@ async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
         assert failed_instance is not None
         assert failed_job.status is JobStatus.ERROR
         assert failed_instance.status is InstanceStatus.ERROR
-        assert failed_instance.password_enc is not None
-        prepared_envelope = failed_instance.password_enc
+        assert failed_instance.password_enc is None
 
     assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
-    assert observed_passwords == [observed_passwords[0], observed_passwords[0]]
-    assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
+    assert len(observed_passwords) == 2
+    assert observed_passwords[0] != observed_passwords[1]
     async with session_maker() as session:
-        completed_instance = await session.get(Instance, instance_id)
-        assert completed_instance is not None
-        assert completed_instance.password_enc == prepared_envelope
+        bootstrapped_instance = await session.get(Instance, instance_id)
+        assert bootstrapped_instance is not None
+        assert bootstrapped_instance.password_enc is not None
+        assert (
+            InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY))
+            .decrypt(bootstrapped_instance.password_enc, instance_id)
+            .get_secret_value()
+            == observed_passwords[1]
+        )
+    assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
 
     redundant_job_id = uuid4()
     with sync_session_maker() as session:
@@ -432,7 +434,7 @@ async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
         session.add(
             JobExecution(
                 id=redundant_job_id,
-                name="instance.update",
+                name="instance.create",
                 task_name=INSTANCE_CREATE_STEP_03_TASK,
                 resource_type="instance",
                 resource_id=instance_id,
@@ -440,7 +442,7 @@ async def test_bootstrap_retry_reuses_password_and_success_is_never_reprocessed(
                 status=JobStatus.PENDING,
             )
         )
-        stored.action = "updating"
+        stored.action = "creating"
         stored.status = InstanceStatus.PENDING
         stored.job_id = redundant_job_id
         stored.step = INSTANCE_CREATE_STEP_03
@@ -499,7 +501,7 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
-    await mark_bootstrap_succeeded(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
     response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
         json={"username": "retry-member", "role": "user"},
@@ -582,6 +584,7 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
         return successful_reconcile(remote_id, slug, attached_name, members, helm_values)
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
+    monkeypatch.setattr(coder, "bootstrap_admin_account", lambda _url, _password: None)
     tasks.step_02_cleanup_users.delay.reset_mock()
     tasks.step_03_bootstrap_admin.delay.reset_mock()
 
@@ -589,9 +592,8 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
     assert len(reconciled_values) == 1
     assert reconciled_values[0].kubeconfig is not None
     assert reconciled_values[0].kubeconfig.get_secret_value() == kubeconfig
-    tasks.step_02_cleanup_users.delay.assert_called_once_with(str(job_id))
-    assert tasks.step_02_cleanup_users.run(str(job_id)) == {"status": "pending"}
     tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
+    tasks.step_02_cleanup_users.delay.assert_not_called()
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
         stored = await session.get(Instance, instance_id)
@@ -603,6 +605,18 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
         assert stored.job_id == job_id
         assert stored.step == INSTANCE_CREATE_STEP_03
         assert stored.status is InstanceStatus.PENDING
+
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
+    tasks.step_02_cleanup_users.delay.assert_called_once_with(str(job_id))
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_UPDATE_STEP_02_TASK
+        assert job.step == INSTANCE_UPDATE_STEP_02
+        assert job.status is JobStatus.PENDING
+        assert stored.password_enc is not None
 
 
 async def test_update_fails_when_kubeconfig_cannot_be_decrypted(
@@ -654,7 +668,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
-    await mark_bootstrap_succeeded(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
     response = await client.post(
         f"/api/v1/instances/{instance_id}/members",
         json={"username": "first", "role": "user"},
@@ -756,7 +770,7 @@ async def test_update_deletes_remote_accounts_before_local_members(
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
-    await mark_bootstrap_succeeded(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
     async with session_maker() as session:
         members = [
             Member(
@@ -854,7 +868,7 @@ async def test_failed_remote_account_deletion_is_retried_before_local_removal(
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
-    await mark_bootstrap_succeeded(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
     async with session_maker() as session:
         member = Member(
             instance_id=instance_id,

@@ -13,13 +13,18 @@ from coder_manager.domains import argocd, coder
 from coder_manager.models import Instance, Member, MemberStatus
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
+    advance_execution,
     fail_execution,
     heartbeat_execution,
     required_resource_id,
     run_claimed_step,
 )
-from coder_manager.tasks.common.registry import INSTANCE_UPDATE_STEP_02_TASK
-from coder_manager.tasks.instance._bootstrap import prepared_admin_password
+from coder_manager.tasks.common.registry import (
+    INSTANCE_CREATE_STEP_03,
+    INSTANCE_CREATE_STEP_03_TASK,
+    INSTANCE_UPDATE_STEP_02_TASK,
+)
+from coder_manager.tasks.instance._bootstrap import stored_admin_password
 from coder_manager.tasks.instance.update.step_01_update_instance import (
     _fail_members,
     _finalize_update,
@@ -44,15 +49,24 @@ def step_02_cleanup_users(job_id: str) -> dict[str, str]:
             claim,
             session_factory,
         )
+        credentials = stored_admin_password(
+            required_resource_id(claim),
+            session_factory,
+        )
+        if credentials is None:
+            advanced = advance_execution(
+                claim,
+                next_task_name=INSTANCE_CREATE_STEP_03_TASK,
+                next_step=INSTANCE_CREATE_STEP_03,
+                session_factory=session_factory,
+            )
+            return {"status": "pending" if advanced else "noop"}
         try:
             protected_usernames = {
                 coder.ADMIN_USERNAME,
                 *argocd.parse_default_admins(get_settings().default_admins),
             }
-            instance_url, password = prepared_admin_password(
-                required_resource_id(claim),
-                session_factory,
-            )
+            instance_url, password = credentials
             coder.cleanup_user_accounts(
                 instance_url,
                 password,

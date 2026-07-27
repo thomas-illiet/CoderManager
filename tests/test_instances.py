@@ -10,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient
 from pydantic import SecretStr
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coder_manager.api.routes import instances as instance_routes
@@ -25,7 +26,6 @@ from coder_manager.models import (
     InstanceEnvironment,
     InstanceStatus,
     JobExecution,
-    JobStatus,
 )
 from coder_manager.repositories import (
     InstanceActionConflictError,
@@ -37,10 +37,6 @@ from coder_manager.repositories import (
 )
 from coder_manager.repositories import instances as instance_repositories
 from coder_manager.schemas import InstanceCreate
-from coder_manager.tasks.common.registry import (
-    INSTANCE_CREATE_STEP_04,
-    INSTANCE_CREATE_STEP_04_TASK,
-)
 from tests.conftest import TEST_CRYPTO_KEY
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
@@ -119,7 +115,7 @@ async def test_instance_admin_endpoint_returns_static_identity_and_stored_passwo
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Expose credentials only after a successful durable bootstrap step."""
+    """Expose stored credentials without depending on job execution history."""
 
     created = await create_instance(client, "ADMIN ENDPOINT")
     instance_id = UUID(created["id"])
@@ -131,16 +127,9 @@ async def test_instance_admin_endpoint_returns_static_identity_and_stored_passwo
             password,
             instance_id,
         )
-        session.add(
-            JobExecution(
-                name="instance.create",
-                task_name=INSTANCE_CREATE_STEP_04_TASK,
-                resource_type="instance",
-                resource_id=instance_id,
-                step=INSTANCE_CREATE_STEP_04,
-                status=JobStatus.SUCCESS,
-            )
-        )
+        instance.job_id = None
+        await session.flush()
+        await session.execute(delete(JobExecution))
         await session.commit()
 
     response = await client.get(f"/api/v1/instances/{instance_id}/admin")
@@ -157,21 +146,17 @@ async def test_instance_admin_endpoint_returns_static_identity_and_stored_passwo
     assert "password_enc" not in regular.json()
 
 
-async def test_instance_admin_endpoint_requires_completed_bootstrap(
+async def test_instance_admin_endpoint_requires_stored_password(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Keep prepared passwords unavailable until the bootstrap job succeeds."""
+    """Block credential retrieval only while the password is absent."""
 
     created = await create_instance(client, "ADMIN PENDING")
     instance_id = UUID(created["id"])
     async with session_maker() as session:
         instance = await session.get(Instance, instance_id)
         assert instance is not None
-        instance.password_enc = InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
-            SecretStr("prepared-but-not-created"),
-            instance_id,
-        )
         await session.commit()
 
     pending = await client.get(f"/api/v1/instances/{instance_id}/admin")
@@ -196,16 +181,6 @@ async def test_instance_admin_endpoint_redacts_crypto_failures(
         instance = await session.get(Instance, instance_id)
         assert instance is not None
         instance.password_enc = b"invalid-envelope"
-        session.add(
-            JobExecution(
-                name="instance.create",
-                task_name=INSTANCE_CREATE_STEP_04_TASK,
-                resource_type="instance",
-                resource_id=instance_id,
-                step=INSTANCE_CREATE_STEP_04,
-                status=JobStatus.SUCCESS,
-            )
-        )
         await session.commit()
 
     invalid = await client.get(f"/api/v1/instances/{instance_id}/admin")
