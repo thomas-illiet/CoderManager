@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 MANAGED_LABEL = "coder-manager/managed"
 INSTANCE_ID_LABEL = "coder-manager/instance-id"
 APPLICATION_NAMESPACE = "app-coder-system"
+ENVIRONMENT_VALUE_FILES = {
+    "development": "values-dev.yaml",
+    "staging": "values-stg.yaml",
+    "production": "values-prd.yaml",
+}
 
 
 def application_name(
@@ -53,7 +58,9 @@ def application_payload(
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(helm_values.environment)
+    identifier = helm_values.slug or instance_id.hex
     helm_argument_lines = [
+        f"--values {ENVIRONMENT_VALUE_FILES[helm_values.environment]}",
         f"--namespace {APPLICATION_NAMESPACE}",
         _helm_scalar_argument(
             "policy.config.allowedUsernames",
@@ -64,24 +71,25 @@ def application_payload(
             ",".join(admins),
         ),
         _helm_scalar_argument("global.baseDomain", helm_values.base_domain),
+        _helm_scalar_argument("global.identifier", identifier),
         _helm_scalar_argument(
-            "server.config.database.username",
+            "server.config.postgres.username",
             helm_values.database_username,
         ),
         _helm_scalar_argument(
-            "server.config.database.password",
+            "server.config.postgres.password",
             helm_values.database_password.get_secret_value(),
         ),
         _helm_scalar_argument(
-            "server.config.database.host",
+            "server.config.postgres.host",
             helm_values.database_host,
         ),
         _helm_scalar_argument(
-            "server.config.database.database",
+            "server.config.postgres.database",
             helm_values.database_name,
         ),
         _helm_scalar_argument(
-            "server.config.database.schema",
+            "server.config.postgres.schema",
             helm_values.database_schema,
         ),
     ]

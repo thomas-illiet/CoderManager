@@ -55,6 +55,7 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
 
         helm_values = instance_helm_values(
             instance_id,
+            slug,
             environment,
             public_url,
             session_factory,

@@ -10,6 +10,7 @@ from pydantic import SecretBytes, SecretStr
 class InstanceHelmValues:
     """Instance-specific public endpoint and managed database Helm values."""
 
+    slug: str | None
     environment: str
     public_url: str
     database_username: str

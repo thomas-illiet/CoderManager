@@ -50,6 +50,7 @@ def database_target(
 
 def instance_helm_values(
     instance_id: UUID,
+    slug: str | None,
     environment: str,
     public_url: str,
     session_factory: sessionmaker[Session],
@@ -73,6 +74,7 @@ def instance_helm_values(
             )
         )
     return InstanceHelmValues(
+        slug=slug,
         environment=environment,
         public_url=public_url,
         database_username=target.username,

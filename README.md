@@ -153,9 +153,12 @@ The plugin receives comma-separated `users` and `admins` values through `HELM_AR
 two Helm scalar assignments are backslash-escaped so Helm keeps each list as one value; the chart
 still receives the comma-separated string.
 Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.
+`HELM_ARGS` loads `values-dev.yaml`, `values-stg.yaml`, or `values-prd.yaml` for development,
+staging, or production respectively.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
-`https://` scheme and supplies the allocated managed database's
-`server.config.database.username`, `password`, `host`, `database`, and `schema` values.
+`https://` scheme, sets `global.identifier` to the immutable instance slug (or the UUID hex for a
+historical instance without a slug), and supplies the allocated managed database's
+`server.config.postgres.username`, `password`, `host`, `database`, and `schema` values.
 When a Kubernetes provider is configured, it also supplies the uploaded file as a single-line
 RFC 4648 Base64 value through `server.config.kube`.
 The slug names the Argo CD Application metadata; Coder Manager does not add Helm

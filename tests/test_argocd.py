@@ -25,11 +25,12 @@ TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 EXPECTED_INSTANCE_HELM_ARGS = (
     f"--set global.baseDomain={TEST_INSTANCE_SLUG}.code-studio.dev.echonet\n"
-    "--set server.config.database.username=db-user\n"
-    "--set server.config.database.password=managed\\, secret\n"
-    "--set server.config.database.host=postgres.internal\n"
-    "--set server.config.database.database=coder\n"
-    "--set server.config.database.schema=coder_instance\n"
+    f"--set global.identifier={TEST_INSTANCE_SLUG}\n"
+    "--set server.config.postgres.username=db-user\n"
+    "--set server.config.postgres.password=managed\\, secret\n"
+    "--set server.config.postgres.host=postgres.internal\n"
+    "--set server.config.postgres.database=coder\n"
+    "--set server.config.postgres.schema=coder_instance\n"
 )
 
 
@@ -67,6 +68,7 @@ def instance_helm_values(**overrides: object) -> InstanceHelmValues:
     """Build complete instance-specific Helm values with optional overrides."""
 
     values: dict[str, object] = {
+        "slug": TEST_INSTANCE_SLUG,
         "environment": "development",
         "public_url": f"https://{TEST_INSTANCE_SLUG}.code-studio.dev.echonet",
         "database_username": "db-user",
@@ -130,6 +132,7 @@ def test_create_application_and_sync_contract() -> None:
                 {
                     "name": "HELM_ARGS",
                     "value": (
+                        "--values values-dev.yaml\n"
                         "--namespace app-coder-system\n"
                         "--set policy.config.allowedUsernames="
                         "admin\\,alice\\,root.admin\\,zoe\n"
@@ -162,6 +165,48 @@ def test_create_application_and_sync_contract() -> None:
             "selfHeal": True,
         }
     }
+
+
+@pytest.mark.parametrize(
+    ("environment", "values_file"),
+    [
+        ("development", "values-dev.yaml"),
+        ("staging", "values-stg.yaml"),
+        ("production", "values-prd.yaml"),
+    ],
+)
+def test_helm_values_file_matches_environment(environment: str, values_file: str) -> None:
+    """Select exactly one environment-specific Helm values file."""
+
+    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    payload = application_payload(
+        config,
+        TEST_APPLICATION_NAME,
+        uuid4(),
+        (),
+        instance_helm_values(environment=environment),
+    )
+
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert helm_arguments.startswith(f"--values {values_file}\n")
+    assert helm_arguments.count("--values ") == 1
+
+
+def test_helm_identifier_uses_uuid_fallback_without_persisted_slug() -> None:
+    """Keep historical instances without a slug reconcilable."""
+
+    instance_id = UUID("12345678-1234-5678-1234-567812345678")
+    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    payload = application_payload(
+        config,
+        TEST_APPLICATION_NAME,
+        instance_id,
+        (),
+        instance_helm_values(slug=None),
+    )
+
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert "--set global.identifier=12345678123456781234567812345678\n" in helm_arguments
 
 
 def test_policy_username_lists_escape_helm_commas() -> None:
@@ -257,6 +302,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
+                "--values values-stg.yaml\n"
                 "--namespace app-coder-system\n"
                 "--set policy.config.allowedUsernames=admin\n"
                 "--set policy.config.adminUsernames=admin\n"
@@ -313,6 +359,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
+                "--values values-prd.yaml\n"
                 "--namespace app-coder-system\n"
                 "--set policy.config.allowedUsernames=admin\\,alice\\,root.admin\n"
                 "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
