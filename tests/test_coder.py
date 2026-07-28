@@ -1,7 +1,8 @@
 """Coder first-user bootstrap HTTP contract tests."""
 
 import json
-from uuid import UUID
+from typing import Self
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -14,10 +15,15 @@ from coder_manager.domains.coder import (
     CoderClient,
     CoderFirstUserConflictError,
     CoderRequestError,
+    CoderWorkspace,
+    CoderWorkspaceBuild,
+    CoderWorkspacePage,
     cleanup_user_accounts,
     delete_user_accounts,
+    stop_active_workspaces,
 )
 from coder_manager.domains.coder import client as coder_client
+from coder_manager.domains.coder import service as coder_service
 
 PASSWORD = SecretStr("prepared-secret-password")
 
@@ -46,6 +52,448 @@ def test_client_disables_tls_verification(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert captured["verify"] is False
     assert captured["closed"] is True
+
+
+def test_workspace_stop_http_contract_and_strict_response_validation() -> None:
+    """List active workspaces, submit a stop build, and observe its result."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return strict workspace and build payloads."""
+
+        requests.append(request)
+        if request.url.path.endswith("/workspaces"):
+            return httpx.Response(
+                200,
+                json={
+                    "workspaces": [
+                        {
+                            "id": str(workspace_id),
+                            "latest_build": {
+                                "id": str(build_id),
+                                "status": "running",
+                            },
+                        }
+                    ],
+                    "count": 1,
+                },
+            )
+        if request.method == "POST":
+            return httpx.Response(
+                201,
+                json={"id": str(build_id), "status": "stopping"},
+            )
+        return httpx.Response(
+            200,
+            json={"id": str(build_id), "status": "stopped"},
+        )
+
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        page = client.workspaces(status="running", offset=0, limit=100)
+        submitted = client.create_workspace_stop_build(workspace_id)
+        completed = client.workspace_build(submitted.id)
+
+    assert page == CoderWorkspacePage(
+        items=(
+            CoderWorkspace(
+                id=workspace_id,
+                status="running",
+                latest_build_id=build_id,
+            ),
+        ),
+        count=1,
+    )
+    assert completed == CoderWorkspaceBuild(id=build_id, status="stopped")
+    assert requests[0].url.params["q"] == 'status:"running"'
+    assert requests[0].url.params["offset"] == "0"
+    assert requests[0].url.params["limit"] == "100"
+    assert json.loads(requests[1].content) == {"transition": "stop"}
+
+
+def test_workspace_page_rejects_incomplete_coder_response() -> None:
+    """Reject a page whose item count contradicts Coder's total count."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return one item while claiming that two should be present."""
+
+        return httpx.Response(
+            200,
+            json={
+                "workspaces": [
+                    {
+                        "id": str(workspace_id),
+                        "latest_build": {
+                            "id": str(build_id),
+                            "status": "running",
+                        },
+                    }
+                ],
+                "count": 2,
+            },
+        )
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(CoderRequestError, match="incomplete workspace page"),
+    ):
+        client.workspaces(status="running", offset=0, limit=100)
+
+
+def test_stop_active_workspaces_waits_and_rechecks_until_none_are_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submit all running and starting stops, wait, then perform a final scan."""
+
+    running_id = uuid4()
+    starting_id = uuid4()
+    build_ids = {running_id: uuid4(), starting_id: uuid4()}
+    status_reads = {"running": 0, "starting": 0, "stopping": 0}
+    heartbeats: list[str] = []
+
+    class StubClient:
+        """Simulate two active workspaces followed by an empty final scan."""
+
+        def __init__(self, instance_url: str) -> None:
+            """Capture the strict instance URL."""
+
+            assert instance_url == "https://coder.example.test"
+
+        def __enter__(self) -> Self:
+            """Enter the fake client."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the fake client."""
+
+        def authenticate_prepared_admin(self, password: SecretStr) -> None:
+            """Require the prepared password."""
+
+            assert password.get_secret_value() == PASSWORD.get_secret_value()
+
+        def workspaces(self, *, status: str, offset: int, limit: int) -> CoderWorkspacePage:
+            """Return one matching active workspace only on the first scan."""
+
+            assert offset == 0
+            assert limit == 100
+            status_reads[status] += 1
+            if status == "stopping" or status_reads[status] > 1:
+                return CoderWorkspacePage(items=(), count=0)
+            workspace_id = running_id if status == "running" else starting_id
+            return CoderWorkspacePage(
+                items=(
+                    CoderWorkspace(
+                        id=workspace_id,
+                        status=status,
+                        latest_build_id=build_ids[workspace_id],
+                    ),
+                ),
+                count=1,
+            )
+
+        def create_workspace_stop_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Queue one strict stop build."""
+
+            return CoderWorkspaceBuild(id=build_ids[workspace_id], status="stopping")
+
+        def workspace_build(self, build_id: UUID) -> CoderWorkspaceBuild:
+            """Complete every submitted stop build."""
+
+            assert build_id in build_ids.values()
+            return CoderWorkspaceBuild(id=build_id, status="stopped")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    stopped = stop_active_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+        heartbeat=lambda: heartbeats.append("beat"),
+    )
+
+    assert set(stopped) == {str(running_id), str(starting_id)}
+    assert status_reads == {"running": 2, "starting": 2, "stopping": 2}
+    assert heartbeats
+
+
+def test_stop_active_workspaces_waits_for_build_submitted_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait for an existing stopping build without submitting a duplicate."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+    stopping_reads = 0
+
+    class StubClient:
+        """Expose one stopping workspace from an earlier attempt."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def __enter__(self) -> Self:
+            """Enter the fake client."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept the configured password."""
+
+        def workspaces(self, *, status: str, offset: int, limit: int) -> CoderWorkspacePage:
+            """Return the existing stopping build only during the first scan."""
+
+            nonlocal stopping_reads
+            assert offset == 0
+            assert limit == 100
+            if status != "stopping":
+                return CoderWorkspacePage(items=(), count=0)
+            stopping_reads += 1
+            if stopping_reads > 1:
+                return CoderWorkspacePage(items=(), count=0)
+            return CoderWorkspacePage(
+                items=(
+                    CoderWorkspace(
+                        id=workspace_id,
+                        status=status,
+                        latest_build_id=build_id,
+                    ),
+                ),
+                count=1,
+            )
+
+        def create_workspace_stop_build(self, _workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Reject a duplicate stop submission."""
+
+            pytest.fail("stopping workspace must not receive another build")
+
+        def workspace_build(self, observed_build_id: UUID) -> CoderWorkspaceBuild:
+            """Complete the build created by the earlier attempt."""
+
+            assert observed_build_id == build_id
+            return CoderWorkspaceBuild(id=build_id, status="stopped")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    assert stop_active_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+    ) == (str(workspace_id),)
+
+
+def test_stop_active_workspaces_paginates_every_active_workspace(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submit stop builds for all pages before the final empty rescan."""
+
+    workspace_ids = (uuid4(), uuid4())
+    running_scan = 0
+    submitted: list[UUID] = []
+
+    class StubClient:
+        """Expose two one-item pages during the first running scan."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def __enter__(self) -> Self:
+            """Enter the fake client."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept the configured password."""
+
+        def workspaces(self, *, status: str, offset: int, limit: int) -> CoderWorkspacePage:
+            """Return each running page once and empty subsequent scans."""
+
+            nonlocal running_scan
+            assert limit == 1
+            if status != "running":
+                return CoderWorkspacePage(items=(), count=0)
+            if offset == 0:
+                running_scan += 1
+            if running_scan > 1:
+                return CoderWorkspacePage(items=(), count=0)
+            return CoderWorkspacePage(
+                items=(
+                    CoderWorkspace(
+                        id=workspace_ids[offset],
+                        status=status,
+                        latest_build_id=uuid4(),
+                    ),
+                ),
+                count=2,
+            )
+
+        def create_workspace_stop_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Record one stop per paginated workspace."""
+
+            submitted.append(workspace_id)
+            return CoderWorkspaceBuild(id=uuid4(), status="stopped")
+
+        def workspace_build(self, _build_id: UUID) -> CoderWorkspaceBuild:
+            """Reject polling because submitted builds are already stopped."""
+
+            pytest.fail("completed builds must not be polled")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    monkeypatch.setattr(coder_service, "WORKSPACE_PAGE_SIZE", 1)
+    stopped = stop_active_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+    )
+
+    assert set(submitted) == set(workspace_ids)
+    assert set(stopped) == {str(workspace_id) for workspace_id in workspace_ids}
+
+
+def test_stop_active_workspaces_rejects_terminal_build_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep the instance running when a submitted stop build fails terminally."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+
+    class StubClient:
+        """Expose one running workspace whose stop build fails."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def __enter__(self) -> Self:
+            """Enter the fake client."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept the configured password."""
+
+        def workspaces(self, *, status: str, offset: int, limit: int) -> CoderWorkspacePage:
+            """Return one running workspace and no starting workspace."""
+
+            assert offset == 0
+            assert limit == 100
+            if status == "running":
+                return CoderWorkspacePage(
+                    items=(
+                        CoderWorkspace(
+                            id=workspace_id,
+                            status=status,
+                            latest_build_id=build_id,
+                        ),
+                    ),
+                    count=1,
+                )
+            return CoderWorkspacePage(items=(), count=0)
+
+        def create_workspace_stop_build(self, _workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Return the submitted build."""
+
+            return CoderWorkspaceBuild(id=build_id, status="stopping")
+
+        def workspace_build(self, _build_id: UUID) -> CoderWorkspaceBuild:
+            """Return a terminal failure."""
+
+            return CoderWorkspaceBuild(id=build_id, status="failed")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    with pytest.raises(CoderRequestError, match="workspace stop failed"):
+        stop_active_workspaces(
+            "https://coder.example.test",
+            PASSWORD,
+            timeout_seconds=5,
+            poll_interval_seconds=0.001,
+        )
+
+
+def test_stop_active_workspaces_uses_one_global_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply the configured deadline while polling submitted stop builds."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+    monotonic_values = iter((0.0, 0.0, 1.0))
+
+    class StubClient:
+        """Expose one build that remains in progress until the deadline."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def __enter__(self) -> Self:
+            """Enter the fake client."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept the configured password."""
+
+        def workspaces(self, *, status: str, offset: int, limit: int) -> CoderWorkspacePage:
+            """Return one running workspace and no starting workspace."""
+
+            assert offset == 0
+            assert limit == 100
+            if status == "running":
+                return CoderWorkspacePage(
+                    items=(
+                        CoderWorkspace(
+                            id=workspace_id,
+                            status=status,
+                            latest_build_id=build_id,
+                        ),
+                    ),
+                    count=1,
+                )
+            return CoderWorkspacePage(items=(), count=0)
+
+        def create_workspace_stop_build(self, _workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Return the submitted build."""
+
+            return CoderWorkspaceBuild(id=build_id, status="stopping")
+
+        def workspace_build(self, _build_id: UUID) -> CoderWorkspaceBuild:
+            """Keep the build pending."""
+
+            return CoderWorkspaceBuild(id=build_id, status="stopping")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    monkeypatch.setattr(coder_service.time, "monotonic", lambda: next(monotonic_values))
+    with pytest.raises(CoderRequestError, match="workspace stop timed out"):
+        stop_active_workspaces(
+            "https://coder.example.test",
+            PASSWORD,
+            timeout_seconds=1,
+            poll_interval_seconds=0.001,
+        )
 
 
 def test_create_first_user_contract() -> None:

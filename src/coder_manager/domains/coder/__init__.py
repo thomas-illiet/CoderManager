@@ -10,11 +10,18 @@ from coder_manager.domains.coder.errors import (
     CoderFirstUserConflictError,
     CoderRequestError,
 )
-from coder_manager.domains.coder.models import CoderTemplate, CoderTemplateVersion
+from coder_manager.domains.coder.models import (
+    CoderTemplate,
+    CoderTemplateVersion,
+    CoderWorkspace,
+    CoderWorkspaceBuild,
+    CoderWorkspacePage,
+)
 from coder_manager.domains.coder.service import (
     bootstrap_admin_account,
     cleanup_user_accounts,
     delete_user_accounts,
+    stop_active_workspaces,
 )
 
 __all__ = [
@@ -26,7 +33,11 @@ __all__ = [
     "CoderRequestError",
     "CoderTemplate",
     "CoderTemplateVersion",
+    "CoderWorkspace",
+    "CoderWorkspaceBuild",
+    "CoderWorkspacePage",
     "bootstrap_admin_account",
     "cleanup_user_accounts",
     "delete_user_accounts",
+    "stop_active_workspaces",
 ]

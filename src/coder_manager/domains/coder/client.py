@@ -18,7 +18,13 @@ from coder_manager.domains.coder.errors import (
     CoderFirstUserConflictError,
     CoderRequestError,
 )
-from coder_manager.domains.coder.models import CoderTemplate, CoderTemplateVersion
+from coder_manager.domains.coder.models import (
+    CoderTemplate,
+    CoderTemplateVersion,
+    CoderWorkspace,
+    CoderWorkspaceBuild,
+    CoderWorkspacePage,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -174,6 +180,72 @@ class CoderClient:
             msg = "Coder GET api/v2/users returned an incomplete users page"
             raise CoderRequestError(msg)
         return usernames
+
+    def workspaces(
+        self,
+        *,
+        status: str,
+        offset: int,
+        limit: int,
+    ) -> CoderWorkspacePage:
+        """Return one validated page of workspaces matching a remote status."""
+
+        path = "api/v2/workspaces"
+        response = self._client.get(
+            path,
+            params={
+                "q": f'status:"{status}"',
+                "offset": offset,
+                "limit": limit,
+            },
+        )
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        payload = self._json_object(response, path)
+        raw_workspaces = payload.get("workspaces")
+        count = payload.get("count")
+        if not isinstance(raw_workspaces, list) or type(count) is not int or count < 0:
+            msg = "Coder GET api/v2/workspaces returned an invalid workspace page"
+            raise CoderRequestError(msg)
+        workspaces: list[CoderWorkspace] = []
+        for item in raw_workspaces:
+            if not isinstance(item, dict):
+                msg = "Coder GET api/v2/workspaces returned an invalid workspace"
+                raise CoderRequestError(msg)
+            latest_build = item.get("latest_build")
+            if not isinstance(latest_build, dict) or not isinstance(
+                latest_build.get("status"),
+                str,
+            ):
+                msg = "Coder GET api/v2/workspaces returned an invalid latest build"
+                raise CoderRequestError(msg)
+            workspaces.append(
+                CoderWorkspace(
+                    id=self._uuid_field(item, "id", path),
+                    status=latest_build["status"],
+                    latest_build_id=self._uuid_field(latest_build, "id", path),
+                )
+            )
+        expected_items = min(limit, max(count - offset, 0))
+        if len(workspaces) != expected_items:
+            msg = "Coder GET api/v2/workspaces returned an incomplete workspace page"
+            raise CoderRequestError(msg)
+        return CoderWorkspacePage(items=tuple(workspaces), count=count)
+
+    def create_workspace_stop_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+        """Queue a stop build for one remote workspace."""
+
+        path = f"api/v2/workspaces/{workspace_id}/builds"
+        response = self._client.post(path, json={"transition": "stop"})
+        self._raise_for_response(response, "POST", path, httpx.codes.CREATED)
+        return self._workspace_build(response, path)
+
+    def workspace_build(self, build_id: UUID) -> CoderWorkspaceBuild:
+        """Read one remote workspace build."""
+
+        path = f"api/v2/workspacebuilds/{build_id}"
+        response = self._client.get(path)
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        return self._workspace_build(response, path)
 
     def default_organization_id(self) -> UUID:
         """Return the single organization marked as the deployment default."""
@@ -396,4 +468,22 @@ class CoderClient:
             id=cls._uuid_field(payload, "id", path),
             status=job["status"],
             archived=payload.get("archived") is True,
+        )
+
+    @classmethod
+    def _workspace_build(
+        cls,
+        response: httpx.Response,
+        path: str,
+    ) -> CoderWorkspaceBuild:
+        """Decode the fields required to wait for a workspace stop build."""
+
+        payload = cls._json_object(response, path)
+        status = payload.get("status")
+        if not isinstance(status, str):
+            msg = f"Coder {path} returned an invalid workspace build status"
+            raise CoderRequestError(msg)
+        return CoderWorkspaceBuild(
+            id=cls._uuid_field(payload, "id", path),
+            status=status,
         )

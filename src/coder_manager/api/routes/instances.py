@@ -45,6 +45,8 @@ from coder_manager.schemas import (
 from coder_manager.tasks import (
     step_01_create_schema,
     step_01_remove_workspaces,
+    step_01_start_instance,
+    step_01_stop_workspaces,
     step_01_update_instance,
 )
 from coder_manager.tasks.common.registry import dispatch_registered_step
@@ -298,7 +300,6 @@ async def get_instance_status(
     try:
         remote = await run_in_threadpool(
             argocd.read_instance_application_status,
-            instance.id,
             instance.slug,
             instance.argocd_application_name,
             settings,
@@ -359,6 +360,64 @@ async def create_instance(
     job = await _job_read(session, getattr(instance, "job_id", None))
     if job is not None:
         dispatch_registered_step(step_01_create_schema.name, job.id)
+    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+
+
+@router.post(
+    "/{instance_id}/start",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start a Coder instance",
+)
+async def start_instance(
+    instance_id: UUID,
+    session: SessionDependency,
+) -> JobResourceResponse[InstanceRead]:
+    """Request a strict full reconciliation for one idle instance."""
+
+    try:
+        instance = await InstanceRepository(session).request_start(instance_id)
+    except InstanceNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+        ) from error
+    except InstanceActionConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Instance has an action in progress or is deleting",
+        ) from error
+    job = await _job_read(session, instance.job_id)
+    if job is not None:
+        dispatch_registered_step(step_01_start_instance.name, job.id)
+    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+
+
+@router.post(
+    "/{instance_id}/stop",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Stop a Coder instance",
+)
+async def stop_instance(
+    instance_id: UUID,
+    session: SessionDependency,
+) -> JobResourceResponse[InstanceRead]:
+    """Stop active workspaces before deleting only the remote Application."""
+
+    try:
+        instance = await InstanceRepository(session).request_stop(instance_id)
+    except InstanceNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Instance not found",
+        ) from error
+    except InstanceActionConflictError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Instance has an action in progress or is deleting",
+        ) from error
+    job = await _job_read(session, instance.job_id)
+    if job is not None:
+        dispatch_registered_step(step_01_stop_workspaces.name, job.id)
     return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
 
 

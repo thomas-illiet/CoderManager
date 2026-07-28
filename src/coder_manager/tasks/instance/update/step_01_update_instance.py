@@ -12,6 +12,7 @@ from coder_manager.celery_app import celery_app
 from coder_manager.domains import argocd
 from coder_manager.models import (
     Instance,
+    InstanceState,
     InstanceStatus,
     JobExecution,
     JobStatus,
@@ -27,8 +28,6 @@ from coder_manager.tasks.common.execution import (
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import (
-    INSTANCE_CREATE_STEP_03,
-    INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_UPDATE_STEP_01,
     INSTANCE_UPDATE_STEP_01_TASK,
     INSTANCE_UPDATE_STEP_02,
@@ -59,7 +58,6 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             attached_name,
             environment,
             public_url,
-            password_configured,
         ) = _claim_members(claim, session_factory)
         try:
             helm_values = instance_helm_values(
@@ -85,12 +83,8 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             raise
         advanced = advance_execution(
             claim,
-            next_task_name=(
-                INSTANCE_UPDATE_STEP_02_TASK
-                if password_configured
-                else INSTANCE_CREATE_STEP_03_TASK
-            ),
-            next_step=(INSTANCE_UPDATE_STEP_02 if password_configured else INSTANCE_CREATE_STEP_03),
+            next_task_name=INSTANCE_UPDATE_STEP_02_TASK,
+            next_step=INSTANCE_UPDATE_STEP_02,
             session_factory=session_factory,
             mutate=lambda _session, resource: _store_application_name(
                 resource,
@@ -112,6 +106,7 @@ def _store_application_name(
         msg = "Instance update resource is missing"
         raise TypeError(msg)
     resource.argocd_application_name = application_name
+    resource.state = InstanceState.STARTED
 
 
 def _claim_members(
@@ -120,11 +115,10 @@ def _claim_members(
 ) -> tuple[
     tuple[UUID, ...],
     tuple[tuple[str, str], ...],
-    str | None,
+    str,
     str | None,
     str,
     str,
-    bool,
 ]:
     """Claim the currently pending or failed member changes."""
 
@@ -163,7 +157,6 @@ def _claim_members(
             instance.argocd_application_name,
             instance.environment.value,
             instance.instance_url,
-            instance.password_enc is not None,
         )
 
 
@@ -244,6 +237,7 @@ def _finalize_update(
             )
             session.add(next_job)
             instance.job_id = next_job_id
+            instance.action = "updating"
             instance.step = INSTANCE_UPDATE_STEP_01
             instance.status = InstanceStatus.PENDING
             dispatch = (INSTANCE_UPDATE_STEP_01_TASK, next_job_id)

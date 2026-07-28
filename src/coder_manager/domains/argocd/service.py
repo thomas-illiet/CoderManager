@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 def reconcile_instance_application(
     instance_id: UUID,
-    slug: str | None,
+    slug: str,
     attached_name: str | None,
     members: Iterable[tuple[str, str]],
     helm_values: InstanceHelmValues,
@@ -39,20 +39,30 @@ def reconcile_instance_application(
 
 
 def delete_instance_application(
-    instance_id: UUID,
-    slug: str | None,
+    slug: str,
     attached_name: str | None,
 ) -> None:
     """Delete one instance's Application using the process-wide configuration."""
 
     config = ArgoCdConfig.from_settings(get_settings())
     with ArgoCdClient(config) as client:
-        client.delete_application(instance_id, slug, attached_name)
+        client.delete_application(slug, attached_name)
+
+
+def instance_application_exists(
+    slug: str,
+    attached_name: str | None,
+    settings: Settings | None = None,
+) -> bool:
+    """Return whether one strict instance Application currently exists."""
+
+    config = ArgoCdConfig.from_settings(settings or get_settings())
+    with ArgoCdClient(config) as client:
+        return client.application_exists(slug, attached_name)
 
 
 def read_instance_application_status(
-    instance_id: UUID,
-    slug: str | None,
+    slug: str,
     attached_name: str | None,
     settings: Settings,
 ) -> ArgoCdApplicationStatus:
@@ -60,4 +70,4 @@ def read_instance_application_status(
 
     config = ArgoCdConfig.from_settings(settings)
     with ArgoCdClient(config) as client:
-        return client.get_application_status(instance_id, slug, attached_name)
+        return client.get_application_status(slug, attached_name)

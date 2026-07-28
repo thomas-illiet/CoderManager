@@ -200,23 +200,6 @@ def test_helm_values_file_matches_environment(environment: str, values_file: str
     assert helm_arguments.count("--values ") == 1
 
 
-def test_helm_identifier_uses_uuid_fallback_without_persisted_slug() -> None:
-    """Keep historical instances without a slug reconcilable."""
-
-    instance_id = UUID("12345678-1234-5678-1234-567812345678")
-    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
-    payload = application_payload(
-        config,
-        TEST_APPLICATION_NAME,
-        instance_id,
-        (),
-        instance_helm_values(slug=None),
-    )
-
-    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
-    assert "--set global.identifier=12345678123456781234567812345678\n" in helm_arguments
-
-
 def test_database_secret_references_use_managed_database_name() -> None:
     """Resolve database credentials from the allocated managed database secret."""
 
@@ -430,9 +413,8 @@ def test_application_status_is_read_without_triggering_sync() -> None:
         return httpx.Response(200, json=response_payload)
 
     config = ArgoCdConfig.from_settings(configured_settings())
-    instance_id = uuid4()
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        remote = client.get_application_status(instance_id, TEST_INSTANCE_SLUG, "attached")
+        remote = client.get_application_status(TEST_INSTANCE_SLUG, "attached")
 
     assert remote.application_name == "attached"
     assert remote.sync_status == "Synced"
@@ -462,9 +444,9 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        partial = client.get_application_status(uuid4(), TEST_INSTANCE_SLUG, None)
+        partial = client.get_application_status(TEST_INSTANCE_SLUG, None)
         with pytest.raises(ArgoCdApplicationNotFoundError):
-            client.get_application_status(uuid4(), TEST_INSTANCE_SLUG, "missing")
+            client.get_application_status(TEST_INSTANCE_SLUG, "missing")
 
     assert partial.application_name == TEST_APPLICATION_NAME
     assert partial.sync_status is None
@@ -487,10 +469,9 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
         return next(responses)
 
     config = ArgoCdConfig.from_settings(configured_settings())
-    instance_id = uuid4()
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        client.delete_application(instance_id, TEST_INSTANCE_SLUG, "attached")
-        client.delete_application(instance_id, TEST_INSTANCE_SLUG, "attached")
+        client.delete_application(TEST_INSTANCE_SLUG, "attached")
+        client.delete_application(TEST_INSTANCE_SLUG, "attached")
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("DELETE", "/root/api/v1/applications/attached"),
@@ -520,8 +501,7 @@ def test_delete_instance_application_uses_process_configuration(
 ) -> None:
     """Use the configured client when the worker invokes the deletion service."""
 
-    deleted: list[tuple[UUID, str | None, str | None]] = []
-    instance_id = uuid4()
+    deleted: list[tuple[str, str | None]] = []
 
     class StubClient:
         """Capture calls made by the process-wide deletion service."""
@@ -539,20 +519,19 @@ def test_delete_instance_application_uses_process_configuration(
 
         def delete_application(
             self,
-            deleted_id: UUID,
-            slug: str | None,
+            slug: str,
             attached_name: str | None,
         ) -> None:
             """Capture the requested Application deletion."""
 
-            deleted.append((deleted_id, slug, attached_name))
+            deleted.append((slug, attached_name))
 
     monkeypatch.setattr(argocd_service, "get_settings", configured_settings)
     monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
 
-    argocd_service.delete_instance_application(instance_id, TEST_INSTANCE_SLUG, "attached")
+    argocd_service.delete_instance_application(TEST_INSTANCE_SLUG, "attached")
 
-    assert deleted == [(instance_id, TEST_INSTANCE_SLUG, "attached")]
+    assert deleted == [(TEST_INSTANCE_SLUG, "attached")]
 
 
 @pytest.mark.parametrize(
@@ -613,18 +592,13 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
     assert "super-secret-token" not in repr(config)
 
 
-def test_application_name_prefers_attachment_then_slug_then_legacy_fallback() -> None:
-    """Resolve current and historical Application names without renaming attachments."""
+def test_application_name_prefers_attachment_then_strict_slug() -> None:
+    """Resolve attached and strict slug Application names."""
 
     config = ArgoCdConfig.from_settings(configured_settings())
-    instance_id = UUID("12345678-1234-5678-1234-567812345678")
 
-    assert application_name(config, instance_id, TEST_INSTANCE_SLUG, "attached") == "attached"
-    assert application_name(config, instance_id, TEST_INSTANCE_SLUG, None) == TEST_APPLICATION_NAME
-    assert (
-        application_name(config, instance_id, None, None)
-        == "managed-12345678123456781234567812345678"
-    )
+    assert application_name(config, TEST_INSTANCE_SLUG, "attached") == "attached"
+    assert application_name(config, TEST_INSTANCE_SLUG, None) == TEST_APPLICATION_NAME
 
 
 @pytest.mark.parametrize("skip_ssl_verify", [False, True])

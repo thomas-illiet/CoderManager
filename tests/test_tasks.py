@@ -30,6 +30,7 @@ from coder_manager.models import (
     DatabaseAllocation,
     Instance,
     InstanceKubernetes,
+    InstanceState,
     InstanceStatus,
     JobExecution,
     JobStatus,
@@ -145,16 +146,15 @@ async def store_admin_password(
 
 
 def successful_reconcile(
-    instance_id: UUID,
-    slug: str | None,
+    _instance_id: UUID,
+    slug: str,
     attached_name: str | None,
     _members: tuple[tuple[str, str], ...],
     _helm_values: argocd.InstanceHelmValues,
 ) -> str:
     """Return a deterministic Argo CD Application name."""
 
-    suffix = slug or instance_id.hex
-    return attached_name or f"coder-{suffix}"
+    return attached_name or f"coder-{slug}"
 
 
 def test_registered_step_names_and_beat_schedule() -> None:
@@ -169,6 +169,9 @@ def test_registered_step_names_and_beat_schedule() -> None:
             tasks.step_04_sync_templates,
             tasks.step_01_update_instance,
             tasks.step_02_cleanup_users,
+            tasks.step_01_start_instance,
+            tasks.step_01_stop_workspaces,
+            tasks.step_02_stop_instance,
             tasks.step_01_remove_workspaces,
             tasks.step_02_remove_instance,
             tasks.step_03_remove_schema,
@@ -184,8 +187,317 @@ def test_registered_step_names_and_beat_schedule() -> None:
     schedule = celery_app.conf.beat_schedule["retry-job-executions"]
     assert schedule["task"] == "coder_manager.retry_job_executions"
     assert schedule["schedule"] == timedelta(seconds=get_settings().job_retry_interval_seconds)
+    state_schedule = celery_app.conf.beat_schedule["check-instance-states"]
+    assert state_schedule["task"] == "coder_manager.check_instance_states"
+    assert state_schedule["schedule"] == timedelta(hours=1)
     task_source = Path(tasks.__file__).parent
     assert all("chain(" not in path.read_text() for path in task_source.rglob("*.py"))
+
+
+async def test_start_and_stop_jobs_reconcile_workspaces_before_application_deletion(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start strictly, stop active workspaces, then delete only the Application."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "POWER JOBS")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STOPPED
+        stored.step = None
+        await session.commit()
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    started = await client.post(f"/api/v1/instances/{instance_id}/start")
+    start_job_id = UUID(started.json()["job"]["id"])
+    assert tasks.step_01_start_instance.run(str(start_job_id)) == {"status": "pending"}
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.state is InstanceState.STARTED
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.step == INSTANCE_UPDATE_STEP_02
+    assert tasks.step_02_cleanup_users.run(str(start_job_id)) == {"status": "success"}
+
+    events: list[str] = []
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+    monkeypatch.setattr(
+        coder,
+        "stop_active_workspaces",
+        lambda *_args, **_kwargs: events.append("workspaces"),
+    )
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda *_args: events.append("application"),
+    )
+    stopped = await client.post(f"/api/v1/instances/{instance_id}/stop")
+    stop_job_id = UUID(stopped.json()["job"]["id"])
+    assert tasks.step_01_stop_workspaces.run(str(stop_job_id)) == {"status": "pending"}
+    assert events == ["workspaces"]
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.state is InstanceState.STARTED
+        assert stored.step == "step_02_stop_instance"
+        allocation = await session.scalar(
+            select(DatabaseAllocation).where(DatabaseAllocation.instance_id == instance_id)
+        )
+        assert allocation is not None
+
+    assert tasks.step_02_stop_instance.run(str(stop_job_id)) == {"status": "success"}
+    assert events == ["workspaces", "application"]
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.action == "stopping"
+        assert stored.status is InstanceStatus.SUCCESS
+        assert stored.state is InstanceState.STOPPED
+        assert stored.step is None
+
+
+async def test_stop_workspace_failure_keeps_application_and_started_state(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail safely before Application deletion when a workspace cannot stop."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "STOP FAILURE")
+    instance_id = UUID(str(instance["id"]))
+    await store_admin_password(session_maker, instance_id)
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STARTED
+        stored.step = None
+        await session.commit()
+
+    deleted: list[str] = []
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+
+    def fail_workspaces(*_args: object, **_kwargs: object) -> None:
+        """Simulate one terminal remote workspace stop failure."""
+
+        raise RuntimeError("workspace stop failed")
+
+    monkeypatch.setattr(coder, "stop_active_workspaces", fail_workspaces)
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda *_args: deleted.append("application"),
+    )
+    response = await client.post(f"/api/v1/instances/{instance_id}/stop")
+    job_id = UUID(response.json()["job"]["id"])
+
+    with pytest.raises(RuntimeError, match="workspace stop failed"):
+        tasks.step_01_stop_workspaces.run(str(job_id))
+    assert deleted == []
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored is not None
+        assert job is not None
+        assert stored.state is InstanceState.STARTED
+        assert stored.status is InstanceStatus.ERROR
+        assert stored.step == "step_01_stop_workspaces"
+        assert job.status is JobStatus.ERROR
+
+
+async def test_stop_already_absent_skips_coder_and_converges(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Converge an absent Application without requiring Coder credentials."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "STOP ABSENT")
+    instance_id = UUID(str(instance["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STARTED
+        stored.step = None
+        assert stored.password_enc is None
+        await session.commit()
+
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: False)
+    monkeypatch.setattr(
+        coder,
+        "stop_active_workspaces",
+        lambda *_args, **_kwargs: pytest.fail("Coder must not be called"),
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda *_args: deleted.append("idempotent-delete"),
+    )
+    response = await client.post(f"/api/v1/instances/{instance_id}/stop")
+    job_id = UUID(response.json()["job"]["id"])
+
+    assert tasks.step_01_stop_workspaces.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_02_stop_instance.run(str(job_id)) == {"status": "success"}
+    assert deleted == ["idempotent-delete"]
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.state is InstanceState.STOPPED
+        assert stored.status is InstanceStatus.SUCCESS
+
+
+async def test_start_fails_without_admin_credentials(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail a strict start before Argo reconciliation when credentials are absent."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "START CREDENTIALS")
+    instance_id = UUID(str(instance["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.step = None
+        assert stored.password_enc is None
+        await session.commit()
+
+    monkeypatch.setattr(
+        argocd,
+        "reconcile_instance_application",
+        lambda *_args: pytest.fail("Argo must not be called"),
+    )
+    response = await client.post(f"/api/v1/instances/{instance_id}/start")
+    job_id = UUID(response.json()["job"]["id"])
+
+    with pytest.raises(RuntimeError, match="administrator password is missing"):
+        tasks.step_01_start_instance.run(str(job_id))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored is not None
+        assert job is not None
+        assert stored.state is InstanceState.STOPPED
+        assert stored.status is InstanceStatus.ERROR
+        assert job.status is JobStatus.ERROR
+
+
+async def test_hourly_state_audit_observes_idle_instances_and_isolates_errors(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Observe present and absent Applications while skipping busy instances."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    records = [await create_instance(client, f"AUDIT {index}") for index in range(4)]
+    ids = [UUID(str(record["id"])) for record in records]
+    async with session_maker() as session:
+        stored = [await session.get(Instance, instance_id) for instance_id in ids]
+        assert all(instance is not None for instance in stored)
+        for instance in stored[:3]:
+            assert instance is not None
+            instance.action = "updating"
+            instance.status = InstanceStatus.SUCCESS
+            instance.step = None
+        assert stored[0] is not None
+        assert stored[1] is not None
+        assert stored[2] is not None
+        assert stored[3] is not None
+        stored[0].state = InstanceState.STOPPED
+        stored[1].state = InstanceState.STARTED
+        stored[2].state = InstanceState.STARTED
+        stored[3].action = "starting"
+        stored[3].status = InstanceStatus.PENDING
+        await session.commit()
+
+    slug_results = {
+        records[0]["slug"]: True,
+        records[1]["slug"]: False,
+    }
+
+    def observe(slug: str, _attached_name: str | None) -> bool:
+        """Return two observations and fail one independently."""
+
+        if slug == records[2]["slug"]:
+            raise RuntimeError("Argo unavailable")
+        if slug == records[3]["slug"]:
+            pytest.fail("busy instance must not be observed")
+        return slug_results[slug]
+
+    monkeypatch.setattr(argocd, "instance_application_exists", observe)
+    result = tasks.check_instance_states.run()
+    assert result == {"checked": 2, "changed": 2, "errors": 1}
+    async with session_maker() as session:
+        observed = [await session.get(Instance, instance_id) for instance_id in ids]
+        assert all(instance is not None for instance in observed)
+        assert observed[0].state is InstanceState.STARTED
+        assert observed[1].state is InstanceState.STOPPED
+        assert observed[2].state is InstanceState.STARTED
+        assert observed[3].state is InstanceState.STOPPED
+
+
+async def test_hourly_state_audit_discards_concurrent_lifecycle_change(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discard a remote observation when lifecycle ownership changes mid-request."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    record = await create_instance(client, "AUDIT FENCE")
+    instance_id = UUID(str(record["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STOPPED
+        stored.step = None
+        await session.commit()
+
+    def observe(_slug: str, _attached_name: str | None) -> bool:
+        """Change lifecycle state while the Argo observation is in flight."""
+
+        with sync_session_maker() as session:
+            stored = session.get(Instance, instance_id)
+            assert stored is not None
+            stored.action = "starting"
+            stored.status = InstanceStatus.PENDING
+            session.commit()
+        return True
+
+    monkeypatch.setattr(argocd, "instance_application_exists", observe)
+    assert tasks.check_instance_states.run() == {"checked": 1, "changed": 0, "errors": 0}
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        assert stored.action == "starting"
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.state is InstanceState.STOPPED
 
 
 async def test_create_steps_advance_after_commit_and_finish_instance(
@@ -207,7 +519,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
 
     def capture_reconcile(
         remote_id: UUID,
-        slug: str | None,
+        slug: str,
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
@@ -542,13 +854,13 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
         assert member.status is MemberStatus.SUCCESS
 
 
-async def test_update_advances_to_bootstrap_when_admin_is_missing(
+async def test_update_fails_without_admin_credentials(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     sync_session_maker: sessionmaker[Session],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Load an encrypted kubeconfig while reconciling before administrator bootstrap."""
+    """Reject an update with no administrator credentials and no bootstrap fallback."""
 
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "EXISTING ADMIN BACKFILL")
@@ -573,7 +885,7 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
 
     def capture_reconcile(
         remote_id: UUID,
-        slug: str | None,
+        slug: str,
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
@@ -584,7 +896,6 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
         return successful_reconcile(remote_id, slug, attached_name, members, helm_values)
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", capture_reconcile)
-    monkeypatch.setattr(coder, "bootstrap_admin_account", lambda _url, _password: None)
     tasks.step_02_cleanup_users.delay.reset_mock()
     tasks.step_03_bootstrap_admin.delay.reset_mock()
 
@@ -592,22 +903,8 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
     assert len(reconciled_values) == 1
     assert reconciled_values[0].kubeconfig is not None
     assert reconciled_values[0].kubeconfig.get_secret_value() == kubeconfig
-    tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
-    tasks.step_02_cleanup_users.delay.assert_not_called()
-    async with session_maker() as session:
-        job = await session.get(JobExecution, job_id)
-        stored = await session.get(Instance, instance_id)
-        assert job is not None
-        assert stored is not None
-        assert job.task_name == INSTANCE_CREATE_STEP_03_TASK
-        assert job.step == INSTANCE_CREATE_STEP_03
-        assert job.status is JobStatus.PENDING
-        assert stored.job_id == job_id
-        assert stored.step == INSTANCE_CREATE_STEP_03
-        assert stored.status is InstanceStatus.PENDING
-
-    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
     tasks.step_02_cleanup_users.delay.assert_called_once_with(str(job_id))
+    tasks.step_03_bootstrap_admin.delay.assert_not_called()
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
         stored = await session.get(Instance, instance_id)
@@ -616,7 +913,20 @@ async def test_update_advances_to_bootstrap_when_admin_is_missing(
         assert job.task_name == INSTANCE_UPDATE_STEP_02_TASK
         assert job.step == INSTANCE_UPDATE_STEP_02
         assert job.status is JobStatus.PENDING
-        assert stored.password_enc is not None
+        assert stored.job_id == job_id
+        assert stored.step == INSTANCE_UPDATE_STEP_02
+        assert stored.status is InstanceStatus.PENDING
+
+    with pytest.raises(RuntimeError, match="administrator password is missing"):
+        tasks.step_02_cleanup_users.run(str(job_id))
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.status is JobStatus.ERROR
+        assert stored.status is InstanceStatus.ERROR
+        assert stored.password_enc is None
 
 
 async def test_update_fails_when_kubeconfig_cannot_be_decrypted(
@@ -693,7 +1003,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
 
     def add_late_member(
         reconciled_id: UUID,
-        slug: str | None,
+        slug: str,
         attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
         _helm_values: argocd.InstanceHelmValues,
@@ -703,8 +1013,7 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         with sync_session_maker() as session:
             session.add(Member(instance_id=reconciled_id, username="late", role="user"))
             session.commit()
-        suffix = slug or reconciled_id.hex
-        return attached_name or f"coder-{suffix}"
+        return attached_name or f"coder-{slug}"
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", add_late_member)
     monkeypatch.setattr(coder, "cleanup_user_accounts", capture_cleanup_snapshot)
@@ -802,7 +1111,7 @@ async def test_update_deletes_remote_accounts_before_local_members(
 
     def capture_reconcile(
         remote_id: UUID,
-        slug: str | None,
+        slug: str,
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
@@ -975,7 +1284,7 @@ async def test_delete_steps_keep_local_state_until_step_04(
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda remote_id, slug, name: deleted_remote.append((remote_id, slug, name)),
+        lambda slug, name: deleted_remote.append((instance_id, slug, name)),
     )
     monkeypatch.setattr(postgresql, "drop_schema", dropped_targets.append)
 

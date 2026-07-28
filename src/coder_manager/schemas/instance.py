@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from coder_manager.models import InstanceEnvironment, InstanceStatus
+from coder_manager.models import InstanceEnvironment, InstanceState, InstanceStatus
 from coder_manager.schemas.application_identifier import ApplicationIdentifier
 
 
@@ -25,10 +25,11 @@ class InstanceRead(BaseModel):
 
     id: UUID
     application: str
-    slug: str | None
+    slug: str
     environment: InstanceEnvironment
     action: str
     status: InstanceStatus
+    state: InstanceState
     instance_url: str
     argocd_application_name: str | None = None
     job_id: UUID | None = None

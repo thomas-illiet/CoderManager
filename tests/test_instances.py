@@ -11,6 +11,7 @@ from fastapi import HTTPException
 from httpx import AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coder_manager.api.routes import instances as instance_routes
@@ -24,6 +25,7 @@ from coder_manager.main import app
 from coder_manager.models import (
     Instance,
     InstanceEnvironment,
+    InstanceState,
     InstanceStatus,
     JobExecution,
 )
@@ -82,6 +84,7 @@ async def test_create_instance_get_and_missing(
         "environment",
         "action",
         "status",
+        "state",
         "instance_url",
         "argocd_application_name",
         "job_id",
@@ -95,6 +98,7 @@ async def test_create_instance_get_and_missing(
     assert created["slug"] == TEST_INSTANCE_SLUG
     assert created["action"] == "creating"
     assert created["status"] == "pending"
+    assert created["state"] == "stopped"
     assert created["argocd_application_name"] is None
     assert created["instance_url"] == f"https://{TEST_INSTANCE_SLUG}.code-studio.dev.echonet"
     assert UUID(created["database_id"])
@@ -390,12 +394,12 @@ async def test_placement_conflicts_and_previous_slug_collisions_are_allowed(
     assert first["instance_url"] != second["instance_url"]
 
 
-async def test_slug_collision_regenerates_and_legacy_null_slugs_coexist(
+async def test_slug_collision_regenerates_and_null_slugs_are_rejected(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regenerate an occupied slug while allowing nullable historical rows."""
+    """Regenerate an occupied slug and reject the removed historical fallback."""
 
     monkeypatch.setattr(
         instance_repositories,
@@ -419,8 +423,10 @@ async def test_slug_collision_regenerates_and_legacy_null_slugs_coexist(
         assert first_record is not None
         assert second_record is not None
         first_record.slug = None
-        second_record.slug = None
-        await session.commit()
+        second_record.slug = None  # type: ignore[assignment]
+        with pytest.raises(IntegrityError):
+            await session.commit()
+        await session.rollback()
 
 
 async def test_same_placement_is_allowed_for_different_applications(client: AsyncClient) -> None:
@@ -430,6 +436,55 @@ async def test_same_placement_is_allowed_for_different_applications(client: Asyn
     second = await create_instance(client, "Second App")
 
     assert first["environment"] == second["environment"] == "development"
+
+
+async def test_start_and_stop_endpoints_create_strict_durable_jobs(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Persist explicit starting and stopping transitions without changing observed state."""
+
+    created = await create_instance(client, "POWER ACTIONS")
+    instance_id = UUID(created["id"])
+    async with session_maker() as session:
+        instance = await session.get(Instance, instance_id)
+        assert instance is not None
+        instance.action = "updating"
+        instance.status = InstanceStatus.SUCCESS
+        instance.state = InstanceState.STOPPED
+        instance.step = None
+        await session.commit()
+
+    started = await client.post(f"/api/v1/instances/{instance_id}/start")
+    assert started.status_code == 202
+    start_body = started.json()
+    assert start_body["resource"]["action"] == "starting"
+    assert start_body["resource"]["status"] == "pending"
+    assert start_body["resource"]["state"] == "stopped"
+    assert start_body["resource"]["step"] == "step_01_start_instance"
+    assert start_body["job"]["name"] == "instance.start"
+
+    busy = await client.post(f"/api/v1/instances/{instance_id}/stop")
+    assert busy.status_code == 409
+    async with session_maker() as session:
+        instance = await session.get(Instance, instance_id)
+        assert instance is not None
+        instance.status = InstanceStatus.SUCCESS
+        instance.state = InstanceState.STARTED
+        instance.step = None
+        await session.commit()
+
+    stopped = await client.post(f"/api/v1/instances/{instance_id}/stop")
+    assert stopped.status_code == 202
+    stop_body = stopped.json()
+    assert stop_body["resource"]["action"] == "stopping"
+    assert stop_body["resource"]["status"] == "pending"
+    assert stop_body["resource"]["state"] == "started"
+    assert stop_body["resource"]["step"] == "step_01_stop_workspaces"
+    assert stop_body["job"]["name"] == "instance.stop"
+
+    assert (await client.post(f"/api/v1/instances/{uuid4()}/start")).status_code == 404
+    assert (await client.post(f"/api/v1/instances/{uuid4()}/stop")).status_code == 404
 
 
 async def test_delete_requires_creation_success_and_marks_deleting(
@@ -532,6 +587,7 @@ def instance_record() -> SimpleNamespace:
         environment=InstanceEnvironment.DEVELOPMENT,
         action="creating",
         status=InstanceStatus.PENDING,
+        state=InstanceState.STOPPED,
         instance_url="https://app.code-studio.dev.echonet",
         argocd_application_name="managed-attached",
         created_at=now,
@@ -668,14 +724,12 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     instance_id = UUID(instance["id"])
 
     def remote_status(
-        observed_id: UUID,
-        slug: str | None,
+        slug: str,
         attached_name: str | None,
         _settings: Settings,
     ) -> argocd.ArgoCdApplicationStatus:
         """Simulate the remote status operation used by this scenario."""
 
-        assert observed_id == instance_id
         assert slug == instance["slug"]
         assert attached_name is None
         return argocd.ArgoCdApplicationStatus(
@@ -734,8 +788,7 @@ async def test_instance_status_route_error_mapping(
             return record
 
     def fail_status(
-        _instance_id: UUID,
-        _slug: str | None,
+        _slug: str,
         _attached_name: str | None,
         _settings: Settings,
     ) -> None:

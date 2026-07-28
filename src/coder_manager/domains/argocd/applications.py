@@ -30,16 +30,14 @@ ENVIRONMENT_VALUE_FILES = {
 
 def application_name(
     config: ArgoCdConfig,
-    instance_id: UUID,
-    slug: str | None,
+    slug: str,
     attached_name: str | None,
 ) -> str:
-    """Return an attached, slug-based, or legacy deterministic Application name."""
+    """Return the attached or strict slug-based Application name."""
 
     if attached_name:
         return attached_name
-    suffix = slug or instance_id.hex
-    return f"{config.application_prefix}-{suffix}"
+    return f"{config.application_prefix}-{slug}"
 
 
 def application_payload(
@@ -58,7 +56,7 @@ def application_payload(
 
     users, admins = _member_values(config.default_admins, members)
     cyberark = config.cyberark_for(helm_values.environment)
-    identifier = helm_values.slug or instance_id.hex
+    identifier = helm_values.slug
     helm_argument_lines = [
         f"--values {ENVIRONMENT_VALUE_FILES[helm_values.environment]}",
         f"--namespace {APPLICATION_NAMESPACE}",

@@ -1,4 +1,4 @@
-"""Create or adopt the Argo CD Application for a new instance."""
+"""Reconcile a stopped instance's Argo CD Application."""
 
 from __future__ import annotations
 
@@ -16,30 +16,31 @@ from coder_manager.tasks.common.execution import (
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import (
-    INSTANCE_CREATE_STEP_02_TASK,
-    INSTANCE_CREATE_STEP_03,
-    INSTANCE_CREATE_STEP_03_TASK,
+    INSTANCE_START_STEP_01_TASK,
+    INSTANCE_UPDATE_STEP_02,
+    INSTANCE_UPDATE_STEP_02_TASK,
 )
+from coder_manager.tasks.instance._bootstrap import stored_admin_password
 from coder_manager.tasks.instance._database import instance_helm_values
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
 
-@celery_app.task(name=INSTANCE_CREATE_STEP_02_TASK)
-def step_02_create_instance(job_id: str) -> dict[str, str]:
-    """Reconcile the remote instance and finish the creation job."""
+@celery_app.task(name=INSTANCE_START_STEP_01_TASK)
+def step_01_start_instance(job_id: str) -> dict[str, str]:
+    """Strictly reconcile one instance before cleaning remote users."""
 
     session_factory = worker_database.get_worker_session_maker()
 
     def operation(claim: ExecutionClaim) -> dict[str, str]:
-        """Reconcile Argo CD and finalize the instance."""
+        """Require complete local state and ensure the remote Application."""
 
         with session_factory() as session:
             instance = session.get(Instance, claim.resource_id)
             if instance is None:
                 msg = "Instance is missing"
-                raise TypeError(msg)
+                raise RuntimeError(msg)
             members = tuple(
                 session.execute(
                     select(Member.username, Member.role)
@@ -53,6 +54,10 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
             environment = instance.environment.value
             public_url = instance.instance_url
 
+        credentials = stored_admin_password(instance_id, session_factory)
+        if credentials is None:
+            msg = "Instance administrator password is missing"
+            raise RuntimeError(msg)
         helm_values = instance_helm_values(
             instance_id,
             slug,
@@ -68,8 +73,8 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
             helm_values,
         )
 
-        def store_name(_session: Session, resource: object | None) -> None:
-            """Persist the deterministic Argo CD Application name."""
+        def store_started(_session: Session, resource: object | None) -> None:
+            """Persist the confirmed remote Application identity and state."""
 
             if not isinstance(resource, Instance):
                 msg = "Instance is missing"
@@ -79,11 +84,11 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
 
         advanced = advance_execution(
             claim,
-            next_task_name=INSTANCE_CREATE_STEP_03_TASK,
-            next_step=INSTANCE_CREATE_STEP_03,
+            next_task_name=INSTANCE_UPDATE_STEP_02_TASK,
+            next_step=INSTANCE_UPDATE_STEP_02,
             session_factory=session_factory,
-            mutate=store_name,
+            mutate=store_started,
         )
         return {"status": "pending" if advanced else "noop"}
 
-    return run_claimed_step(job_id, INSTANCE_CREATE_STEP_02_TASK, session_factory, operation)
+    return run_claimed_step(job_id, INSTANCE_START_STEP_01_TASK, session_factory, operation)

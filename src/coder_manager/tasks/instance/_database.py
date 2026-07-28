@@ -66,7 +66,7 @@ def _managed_database_target(
 
 def instance_helm_values(
     instance_id: UUID,
-    slug: str | None,
+    slug: str,
     environment: str,
     public_url: str,
     session_factory: sessionmaker[Session],

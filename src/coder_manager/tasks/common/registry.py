@@ -18,6 +18,9 @@ INSTANCE_CREATE_STEP_03 = "step_03_bootstrap_admin"
 INSTANCE_CREATE_STEP_04 = "step_04_sync_templates"
 INSTANCE_UPDATE_STEP_01 = "step_01_update_instance"
 INSTANCE_UPDATE_STEP_02 = "step_02_cleanup_users"
+INSTANCE_START_STEP_01 = "step_01_start_instance"
+INSTANCE_STOP_STEP_01 = "step_01_stop_workspaces"
+INSTANCE_STOP_STEP_02 = "step_02_stop_instance"
 INSTANCE_DELETE_STEP_01 = "step_01_remove_workspaces"
 INSTANCE_DELETE_STEP_02 = "step_02_remove_instance"
 INSTANCE_DELETE_STEP_03 = "step_03_remove_schema"
@@ -34,6 +37,9 @@ INSTANCE_CREATE_STEP_03_TASK = "coder_manager.instance.create.step_03_bootstrap_
 INSTANCE_CREATE_STEP_04_TASK = "coder_manager.instance.create.step_04_sync_templates"
 INSTANCE_UPDATE_STEP_01_TASK = "coder_manager.instance.update.step_01_update_instance"
 INSTANCE_UPDATE_STEP_02_TASK = "coder_manager.instance.update.step_02_cleanup_users"
+INSTANCE_START_STEP_01_TASK = "coder_manager.instance.start.step_01_start_instance"
+INSTANCE_STOP_STEP_01_TASK = "coder_manager.instance.stop.step_01_stop_workspaces"
+INSTANCE_STOP_STEP_02_TASK = "coder_manager.instance.stop.step_02_stop_instance"
 INSTANCE_DELETE_STEP_01_TASK = "coder_manager.instance.delete.step_01_remove_workspaces"
 INSTANCE_DELETE_STEP_02_TASK = "coder_manager.instance.delete.step_02_remove_instance"
 INSTANCE_DELETE_STEP_03_TASK = "coder_manager.instance.delete.step_03_remove_schema"
@@ -52,6 +58,9 @@ REGISTERED_STEP_NAMES = frozenset(
         INSTANCE_CREATE_STEP_04_TASK,
         INSTANCE_UPDATE_STEP_01_TASK,
         INSTANCE_UPDATE_STEP_02_TASK,
+        INSTANCE_START_STEP_01_TASK,
+        INSTANCE_STOP_STEP_01_TASK,
+        INSTANCE_STOP_STEP_02_TASK,
         INSTANCE_DELETE_STEP_01_TASK,
         INSTANCE_DELETE_STEP_02_TASK,
         INSTANCE_DELETE_STEP_03_TASK,

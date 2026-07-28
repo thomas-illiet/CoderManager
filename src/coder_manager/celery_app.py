@@ -25,7 +25,11 @@ celery_app.conf.update(
         "retry-job-executions": {
             "task": "coder_manager.retry_job_executions",
             "schedule": timedelta(seconds=settings.job_retry_interval_seconds),
-        }
+        },
+        "check-instance-states": {
+            "task": "coder_manager.check_instance_states",
+            "schedule": timedelta(hours=1),
+        },
     },
 )
 

@@ -4,6 +4,7 @@ from coder_manager.models.instance import (
     INSTANCE_SLUG_LENGTH,
     Instance,
     InstanceEnvironment,
+    InstanceState,
     InstanceStatus,
 )
 from coder_manager.models.instance_kubernetes import InstanceKubernetes
@@ -25,6 +26,7 @@ __all__ = [
     "Instance",
     "InstanceEnvironment",
     "InstanceKubernetes",
+    "InstanceState",
     "InstanceStatus",
     "JobExecution",
     "JobStatus",

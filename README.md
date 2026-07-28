@@ -23,6 +23,11 @@ The API is then available at <http://localhost:8000>, with interactive documenta
 <http://localhost:8000/docs>. The migration container applies pending migrations before the API,
 worker, and Beat scheduler start.
 
+The instance state migration is intentionally incompatible with existing instance rows. Before
+upgrading to this version, delete every instance through the API and verify that the `instances`
+table is empty. The migration aborts when any row remains; it does not backfill state, purge local
+data, or enqueue reconciliation.
+
 To run Python tooling directly on the host:
 
 ```bash
@@ -55,6 +60,8 @@ All endpoints are under `/api/v1`:
 | `GET` | `/instances/{id}/admin` | Get the initialized Coder administrator credentials |
 | `GET` | `/instances/{id}/status` | Get the live Argo CD status |
 | `POST` | `/instances` | Request instance creation |
+| `POST` | `/instances/{id}/start` | Start or resynchronize an instance |
+| `POST` | `/instances/{id}/stop` | Stop remote workspaces and remove only the Argo CD Application |
 | `POST` | `/instances/{id}/sync` | Force Argo CD reconciliation |
 | `GET` | `/instances/{id}/provider` | Get the Kubernetes provider upload status |
 | `GET` | `/instances/{id}/provider/configuration` | Download the decrypted kubeconfig |
@@ -132,9 +139,11 @@ Creation payload:
 ```
 
 Supported environments are `development`, `staging`, and `production`. A new instance starts with
-`action` set to `creating` and `status` set to `pending`. Actions are otherwise free-form strings
-for future provisioning workflows, while statuses are limited to `pending`, `running`, `success`,
-and `error`.
+`state` set to `stopped`, `action` set to `creating`, and `status` set to `pending`. `state` is an
+observed value stored only by Coder Manager: `started` means that the Argo CD Application exists,
+while `stopped` means that it is absent. It does not describe Argo health or pod readiness. Actions
+include `starting` and `stopping`; statuses are limited to `pending`, `running`, `success`, and
+`error`.
 
 `application` is an externally managed free-form identifier. It is trimmed, converted to uppercase,
 and limited to 255 characters. Coder Manager does not verify it against an internal catalog. The
@@ -143,11 +152,11 @@ combination of application and environment remains unique.
 Instance creation is split into three durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
-`metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. Existing attached
-Application names are retained; the instance UUID without dashes replaces the slug only for a
-historical instance with neither a slug nor an attached name. The Application uses a Helm chart
-from the configured Git repository through the `argocd-cyberark-plugin-helm` plugin. The third
-creates or recovers Coder's first administrator account before the instance reaches success.
+`metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. The slug is required;
+there is no UUID fallback. Existing attached Application names are retained after their first
+successful reconciliation. The Application uses a Helm chart from the configured Git repository
+through the `argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's first
+administrator account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters. The
 `region` value comes from `CODER_MANAGER_ARGOCD_REGION` and is normalized to uppercase. Commas in
@@ -157,8 +166,8 @@ Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` names
 `HELM_ARGS` loads `values-dev.yaml`, `values-stg.yaml`, or `values-prd.yaml` for development,
 staging, or production respectively.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
-`https://` scheme, sets `global.identifier` to the immutable instance slug (or the UUID hex for a
-historical instance without a slug), and supplies the allocated managed database's
+`https://` scheme, sets `global.identifier` to the required immutable instance slug, and supplies
+the allocated managed database's
 `server.config.postgres.host`, `database`, and `schema` values. The PostgreSQL username and password
 use the CyberArk references `<secret:<name>#username>` and `<secret:<name>#password>`, where
 `<name>` comes from the allocated managed database's `name` field, not its `database_name` field.
@@ -188,6 +197,29 @@ worker requests synchronization but does not wait for Argo CD health convergence
 `POST /api/v1/instances/{id}/sync` creates an `instance.update` job for an idle successful or failed
 instance. Pending, running, and deleting instances return HTTP 409. Only one job can own an instance
 at a time; there is no parallel force mode.
+
+`POST /api/v1/instances/{id}/start` creates an `instance.start` job and moves the lifecycle action
+to `starting` without changing `state`. The worker requires the slug, managed PostgreSQL allocation,
+and stored Coder administrator credentials. It performs the complete Argo reconciliation even when
+the Application already exists, cleans up unreferenced Coder accounts, and sets `state=started`
+only after Argo confirms creation or adoption. Missing data fails the job; no bootstrap or
+credential fallback is attempted.
+
+`POST /api/v1/instances/{id}/stop` creates an `instance.stop` job and moves the lifecycle action to
+`stopping` without changing `state`. If the Application exists, the worker retrieves every remote
+Coder workspace whose latest build is `running` or `starting`, including paginated results, submits
+a stop build for each one, and waits until all submitted builds are `stopped`. It repeats the
+workspace scan before continuing. Retries also wait for an already `stopping` latest build without
+submitting a duplicate. Only then does it delete the Argo CD Application in cascade and set
+`state=stopped`. If the Application is already absent, the workflow is already converged and
+finishes idempotently. A Coder error or timeout preserves the Application and previous state.
+`CODER_MANAGER_WORKSPACE_STOP_POLL_INTERVAL_SECONDS` controls polling (2 seconds by default), and
+`CODER_MANAGER_WORKSPACE_STOP_TIMEOUT_SECONDS` sets the global deadline (1800 seconds by default).
+Stop never deletes the local instance, database schema or allocation, members, workspace rows,
+provider configuration, or secrets.
+
+Both power routes return HTTP 202 with `{ "resource": ..., "job": ... }`, return 404 for an unknown
+instance, and return 409 while another transition is active or deletion is in progress.
 
 `GET /api/v1/instances/{id}/status` reads Argo CD directly and returns the Application name, sync
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.
@@ -226,8 +258,8 @@ environment; for example, slug `k7m4p2x9q3ab` in `development` receives
 `cib` for development, staging, and production respectively. The `code-studio` DNS label defaults
 from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
 
-Deletion is asynchronous. It is accepted after `creating/success` or `updating/success`, returns
-HTTP 202, and changes the state to `deleting/pending`. Its four steps reserve workspace cleanup,
+Deletion is asynchronous. It is accepted after a successful create, update, start, or stop, returns
+HTTP 202, and changes the lifecycle to `deleting/pending`. Its four steps reserve workspace cleanup,
 remove the Argo CD Application idempotently, execute `DROP SCHEMA IF EXISTS ... CASCADE`, then
 transactionally remove the local workspaces, members, database allocation, provider configuration,
 and instance. Local configuration is retained until the fourth step succeeds.
@@ -236,9 +268,9 @@ Every endpoint that starts a resource job returns `{ "resource": ..., "job": ...
 synchronization returns `{ "job": ... }`. `GET /api/v1/jobs/{job_id}` exposes the current step,
 status, attempt, resource reference, and timestamps. Instance and workspace reads also expose their
 latest `job_id` and active `step`; the step becomes null after successful completion.
-Instance responses expose `slug`, `created_at`, and `updated_at`; the latter changes whenever the
-instance action or status changes. They also expose the assigned `database_id` and deterministic
-`schema_name`; no database password is returned.
+Instance responses expose `slug`, `state`, `created_at`, and `updated_at`; the latter changes
+whenever the instance lifecycle changes. They also expose the assigned `database_id` and
+deterministic `schema_name`; no database password is returned.
 
 ## Instance members API
 
@@ -382,8 +414,8 @@ deleted after their parent is successful. The list supports `instance_id`, `temp
 Every business operation is represented by a `job_executions` row and an explicitly named Celery
 step. No Celery chain is used. A step locks and claims its job, increments its attempt, performs its
 operation, persists the next step as `pending`, commits, and only then sends the next task. The
-registry contains the exact allowlisted task names for instance create/update/delete, workspace
-create/update/delete, and database synchronization.
+registry contains the exact allowlisted task names for instance create/update/start/stop/delete,
+workspace create/update/delete, and database synchronization.
 
 The API creates a resource and its job in the same transaction. It attempts the first delivery only
 after commit; a broker failure therefore leaves a recoverable `pending` job. Step completion is
@@ -396,6 +428,13 @@ running threshold with `CODER_MANAGER_JOB_STALE_AFTER_SECONDS` (300 seconds by d
 redelivers the exact allowlisted step for `pending` and `error` jobs and first returns expired
 `running` jobs to `pending`. Unknown task names are logged and ignored. The healthcheck and scanner
 are intentionally not tracked as jobs.
+
+Beat also runs `coder_manager.check_instance_states` every hour. It observes only idle instances
+that are not being deleted: an Argo `2xx` stores `started`, and a `404` stores `stopped`. Missing
+configuration, transport failures, and any other response retain the previous state and are logged.
+The result is committed only when the instance job, action, and status still match the snapshot
+taken before the remote request. This scanner performs no remote mutation and creates no
+`JobExecution`.
 
 The initial Alembic baseline creates job rows and lifecycle columns directly. Deploy schema changes
 with the same image as the API, worker, and Beat so every process uses the matching task registry

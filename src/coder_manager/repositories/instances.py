@@ -15,6 +15,7 @@ from coder_manager.models import (
     DatabaseAllocation,
     Instance,
     InstanceEnvironment,
+    InstanceState,
     InstanceStatus,
     Member,
     MemberStatus,
@@ -26,6 +27,10 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_01_TASK,
     INSTANCE_DELETE_STEP_01,
     INSTANCE_DELETE_STEP_01_TASK,
+    INSTANCE_START_STEP_01,
+    INSTANCE_START_STEP_01_TASK,
+    INSTANCE_STOP_STEP_01,
+    INSTANCE_STOP_STEP_01_TASK,
     INSTANCE_UPDATE_STEP_01,
     INSTANCE_UPDATE_STEP_01_TASK,
 )
@@ -186,6 +191,7 @@ class InstanceRepository:
             environment=payload.environment,
             action="creating",
             status=InstanceStatus.PENDING,
+            state=InstanceState.STOPPED,
             instance_url=instance_url(slug, payload, instance_domain),
             step=INSTANCE_CREATE_STEP_01,
         )
@@ -233,7 +239,7 @@ class InstanceRepository:
             await self._session.rollback()
             raise InstanceNotFoundError
         if (
-            instance.action not in {"creating", "updating"}
+            instance.action not in {"creating", "updating", "starting", "stopping"}
             or instance.status is not InstanceStatus.SUCCESS
         ):
             await self._session.rollback()
@@ -305,6 +311,77 @@ class InstanceRepository:
         )
         instance.job_id = job.id
         instance.step = INSTANCE_UPDATE_STEP_01
+        await self._session.commit()
+        stored_instance = await self._session.scalar(
+            select(Instance)
+            .where(Instance.id == instance_id)
+            .options(selectinload(Instance.database_allocation))
+        )
+        if stored_instance is None:  # pragma: no cover - protected by the successful commit
+            raise InstanceNotFoundError
+        return stored_instance
+
+    async def request_start(self, instance_id: UUID) -> Instance:
+        """Request a strict instance reconciliation under a durable start job."""
+
+        return await self._request_power_action(
+            instance_id,
+            action="starting",
+            job_name="instance.start",
+            task_name=INSTANCE_START_STEP_01_TASK,
+            step=INSTANCE_START_STEP_01,
+        )
+
+    async def request_stop(self, instance_id: UUID) -> Instance:
+        """Request workspace shutdown followed by Application deletion."""
+
+        return await self._request_power_action(
+            instance_id,
+            action="stopping",
+            job_name="instance.stop",
+            task_name=INSTANCE_STOP_STEP_01_TASK,
+            step=INSTANCE_STOP_STEP_01,
+        )
+
+    async def _request_power_action(
+        self,
+        instance_id: UUID,
+        *,
+        action: str,
+        job_name: str,
+        task_name: str,
+        step: str,
+    ) -> Instance:
+        """Serialize and persist one start or stop transition."""
+
+        instance = await self._session.scalar(
+            select(Instance)
+            .where(Instance.id == instance_id)
+            .options(selectinload(Instance.database_allocation))
+            .with_for_update()
+        )
+        if instance is None:
+            await self._session.rollback()
+            raise InstanceNotFoundError
+        if instance.action == "deleting" or instance.status in {
+            InstanceStatus.PENDING,
+            InstanceStatus.RUNNING,
+        }:
+            await self._session.rollback()
+            raise InstanceActionConflictError
+
+        instance.action = action
+        instance.status = InstanceStatus.PENDING
+        job = add_job_execution(
+            self._session,
+            name=job_name,
+            task_name=task_name,
+            resource_type="instance",
+            resource_id=instance.id,
+            step=step,
+        )
+        instance.job_id = job.id
+        instance.step = step
         await self._session.commit()
         stored_instance = await self._session.scalar(
             select(Instance)

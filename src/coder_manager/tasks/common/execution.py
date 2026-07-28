@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 RESOURCE_ACTIONS = {
     "instance.create": "creating",
     "instance.update": "updating",
+    "instance.start": "starting",
+    "instance.stop": "stopping",
     "instance.delete": "deleting",
     "template.sync": "syncing",
     "workspace.create": "creating",

@@ -45,6 +45,13 @@ class InstanceStatus(StrEnum):
     ERROR = "error"
 
 
+class InstanceState(StrEnum):
+    """Observed existence state of an instance's Argo CD Application."""
+
+    STARTED = "started"
+    STOPPED = "stopped"
+
+
 INSTANCE_SLUG_LENGTH = 12
 
 
@@ -80,9 +87,9 @@ class Instance(Base):
         nullable=False,
         index=True,
     )
-    slug: Mapped[str | None] = mapped_column(
+    slug: Mapped[str] = mapped_column(
         String(INSTANCE_SLUG_LENGTH),
-        nullable=True,
+        nullable=False,
     )
     environment: Mapped[InstanceEnvironment] = mapped_column(
         Enum(
@@ -107,6 +114,15 @@ class Instance(Base):
         nullable=False,
         default=InstanceStatus.PENDING,
         server_default=InstanceStatus.PENDING.value,
+    )
+    state: Mapped[InstanceState] = mapped_column(
+        Enum(
+            InstanceState,
+            name="instance_state",
+            values_callable=enum_values,
+        ),
+        nullable=False,
+        default=InstanceState.STOPPED,
     )
     instance_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     password_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
