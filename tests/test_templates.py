@@ -119,6 +119,31 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
     assert (await client.get(f"/api/v1/templates/{created['id']}")).status_code == 404
 
 
+async def test_template_creation_without_modules_defaults_to_empty_list(
+    client: AsyncClient,
+) -> None:
+    """Allow templates without editable modules."""
+
+    payload: dict[str, object] = {
+        "display_name": "Managed Desktop",
+        "name": "managed-desktop",
+        "scope": "global",
+        "application": None,
+        "git_url": "https://git.example.com/templates/managed-desktop.git",
+        "source_path": ".",
+        "branch": "main",
+        **RESOURCE_LIMITS,
+    }
+    response = await client.post("/api/v1/templates", json=payload)
+
+    assert response.status_code == 201
+    created = response.json()
+    assert created["modules"] == []
+    modules = await client.get(f"/api/v1/templates/{created['id']}/modules")
+    assert modules.status_code == 200
+    assert modules.json() == []
+
+
 async def test_template_statistics_is_empty_without_templates(client: AsyncClient) -> None:
     """Return a direct empty array when no templates exist."""
 
@@ -364,6 +389,23 @@ async def test_no_template_version_history_api_is_exposed(client: AsyncClient) -
     assert "coder_name" not in str(document)
 
 
+async def test_template_creation_openapi_shows_examples_with_and_without_modules(
+    client: AsyncClient,
+) -> None:
+    """Document both supported template creation shapes in Swagger."""
+
+    document = (await client.get("/openapi.json")).json()
+    request_body = document["paths"]["/api/v1/templates"]["post"]["requestBody"]
+    media_type = request_body["content"]["application/json"]
+    examples = media_type["examples"]
+
+    assert set(examples) == {"with_modules", "without_modules"}
+    assert examples["with_modules"]["value"]["modules"] == ["code-server", "git-config"]
+    assert "modules" not in examples["without_modules"]["value"]
+    template_create = document["components"]["schemas"]["TemplateCreate"]
+    assert "modules" not in template_create["required"]
+
+
 async def test_identical_update_preserves_updated_at(client: AsyncClient) -> None:
     """Verify the identical update preserves updated at scenario."""
 
@@ -518,7 +560,6 @@ async def test_template_list_is_paginated_and_escapes_display_name_wildcards(
         ({"source_path": "../outside"}, 422),
         ({"name": "invalid name"}, 422),
         ({"coder_name": "legacy"}, 422),
-        ({"modules": []}, 422),
         ({"modules": ["module", " module "]}, 422),
         ({"modules": ["   "]}, 422),
         ({"scope": "global", "application": "APP"}, 422),

@@ -340,15 +340,37 @@ Creation payload:
 }
 ```
 
+When creating a template without editable modules, `modules` can be omitted; the API persists and
+returns an empty list:
+
+```json
+{
+  "display_name": "Managed Desktop",
+  "name": "managed-desktop",
+  "scope": "global",
+  "application": null,
+  "git_url": "https://git.example.com/coder/managed-desktop.git",
+  "source_path": ".",
+  "branch": "main",
+  "min_cpu_count": 2,
+  "max_cpu_count": 4,
+  "min_ram_gb": 4,
+  "max_ram_gb": 16,
+  "min_disk_gb": 20,
+  "max_disk_gb": 80
+}
+```
+
 Set `scope` to `global` and `application` to `null` for a global template. Application identifiers
 are normalized like instance identifiers and are not checked against an internal catalog.
 `display_name` is the mutable human-readable label. `name` is the immutable lowercase slug used
 inside Coder. Git URLs accept HTTPS, `ssh://`, or
 SCP-style SSH syntax. `source_path` is repository-relative and defaults to `.`, while `branch`
-targets one exact `refs/heads/...` branch. Modules must be a non-empty ordered list without
-duplicates. CPU counts, RAM GB, and disk GB are positive integers with inclusive minimum and
-maximum bounds. PUT replaces these limits together with `name`, `git_url`, `source_path`, `branch`,
-and `modules`; scope, application, and `name` remain immutable. A change that would invalidate
+targets one exact `refs/heads/...` branch. On creation, modules default to an empty list; when
+present, they must be ordered without duplicates. CPU counts, RAM GB, and disk GB are positive
+integers with inclusive minimum and maximum bounds. PUT replaces these limits together with
+`display_name`, `git_url`, `source_path`, `branch`, and `modules`; scope, application, and `name`
+remain immutable. A change that would invalidate
 an existing workspace returns HTTP 409. `GET /templates/{id}/modules` returns the module array
 directly.
 

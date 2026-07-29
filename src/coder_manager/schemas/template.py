@@ -27,7 +27,7 @@ TemplateName = Annotated[str, StringConstraints(strip_whitespace=True, min_lengt
 SourcePath = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1024)]
 BranchName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ModuleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
-ModuleList = Annotated[list[ModuleName], Field(min_length=1)]
+ModuleList = list[ModuleName]
 PositiveInteger = Annotated[int, Field(gt=0)]
 CODER_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 SCP_GIT_URL_PATTERN = re.compile(
@@ -153,6 +153,7 @@ class TemplateMutableFields(BaseModel):
 class TemplateCreate(TemplateMutableFields):
     """Payload accepted when creating a Coder template."""
 
+    modules: ModuleList = Field(default_factory=list)
     name: TemplateName
     scope: TemplateScope
     application: ApplicationIdentifier | None = None

@@ -3,7 +3,8 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
+from fastapi.openapi.models import Example
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.database import get_session
@@ -28,6 +29,46 @@ from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/templates", tags=["templates"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
+TEMPLATE_CREATE_EXAMPLES: dict[str, Example] = {
+    "with_modules": {
+        "summary": "Editable application template with modules",
+        "value": {
+            "display_name": "Python Development",
+            "name": "python-development",
+            "scope": "application",
+            "application": "MY-BUSINESS-APPLICATION",
+            "git_url": "git@git.example.com:coder/python-template.git",
+            "source_path": "templates/python",
+            "branch": "main",
+            "modules": ["code-server", "git-config"],
+            "min_cpu_count": 1,
+            "max_cpu_count": 8,
+            "min_ram_gb": 2,
+            "max_ram_gb": 32,
+            "min_disk_gb": 10,
+            "max_disk_gb": 100,
+        },
+    },
+    "without_modules": {
+        "summary": "Global template without editable modules",
+        "description": "Omitting modules stores an empty module list.",
+        "value": {
+            "display_name": "Managed Desktop",
+            "name": "managed-desktop",
+            "scope": "global",
+            "application": None,
+            "git_url": "https://git.example.com/coder/managed-desktop.git",
+            "source_path": ".",
+            "branch": "main",
+            "min_cpu_count": 2,
+            "max_cpu_count": 4,
+            "min_ram_gb": 4,
+            "max_ram_gb": 16,
+            "min_disk_gb": 20,
+            "max_disk_gb": 80,
+        },
+    },
+}
 
 
 @router.get("", summary="List Coder templates")
@@ -123,7 +164,10 @@ async def get_template(template_id: UUID, session: SessionDependency) -> Templat
     status_code=status.HTTP_201_CREATED,
     summary="Create a Coder template",
 )
-async def create_template(payload: TemplateCreate, session: SessionDependency) -> TemplateRead:
+async def create_template(
+    payload: Annotated[TemplateCreate, Body(openapi_examples=TEMPLATE_CREATE_EXAMPLES)],
+    session: SessionDependency,
+) -> TemplateRead:
     """Create a template while enforcing scoped name uniqueness."""
 
     try:
