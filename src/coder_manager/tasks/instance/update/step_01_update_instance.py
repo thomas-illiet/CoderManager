@@ -22,6 +22,7 @@ from coder_manager.models import (
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
     advance_execution,
+    defer_execution,
     fail_execution,
     owned_execution,
     required_resource_id,
@@ -67,7 +68,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
                 public_url,
                 session_factory,
             )
-            application_name = argocd.reconcile_instance_application(
+            reconciliation = argocd.reconcile_instance_application(
                 required_resource_id(claim),
                 slug,
                 attached_name,
@@ -81,6 +82,13 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
                 mutate=lambda session: _fail_members(session, member_ids),
             )
             raise
+        if reconciliation.status is argocd.ArgoCdMutationStatus.DEFERRED:
+            deferred = defer_execution(
+                claim,
+                session_factory,
+                mutate=lambda session, _resource: _defer_members(session, member_ids),
+            )
+            return {"status": "deferred" if deferred else "noop"}
         advanced = advance_execution(
             claim,
             next_task_name=INSTANCE_UPDATE_STEP_02_TASK,
@@ -88,7 +96,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             session_factory=session_factory,
             mutate=lambda _session, resource: _store_application_name(
                 resource,
-                application_name,
+                reconciliation.application_name,
             ),
         )
         return {"status": "pending" if advanced else "noop"}
@@ -173,6 +181,21 @@ def _fail_members(session: Session, member_ids: tuple[UUID, ...]) -> None:
     )
     for member in members:
         member.status = MemberStatus.ERROR
+
+
+def _defer_members(session: Session, member_ids: tuple[UUID, ...]) -> None:
+    """Return only members claimed by the deferred attempt to pending."""
+
+    if not member_ids:
+        return
+    members = session.scalars(
+        select(Member).where(
+            Member.id.in_(member_ids),
+            Member.status == MemberStatus.RUNNING,
+        )
+    )
+    for member in members:
+        member.status = MemberStatus.PENDING
 
 
 def _finalize_update(

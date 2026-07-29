@@ -1,9 +1,25 @@
 """Value objects used by the Argo CD domain."""
 
 from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import urlsplit
 
 from pydantic import SecretBytes, SecretStr
+
+
+class ArgoCdMutationStatus(StrEnum):
+    """Outcome of one requested Argo CD mutation."""
+
+    COMPLETED = "completed"
+    DEFERRED = "deferred"
+
+
+@dataclass(frozen=True, slots=True)
+class ArgoCdReconcileResult:
+    """Typed result of one Application reconciliation request."""
+
+    status: ArgoCdMutationStatus
+    application_name: str
 
 
 @dataclass(frozen=True, slots=True)

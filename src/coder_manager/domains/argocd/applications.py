@@ -26,6 +26,7 @@ ENVIRONMENT_VALUE_FILES = {
     "staging": "values-stg.yaml",
     "production": "values-prd.yaml",
 }
+ACTIVE_OPERATION_PHASES = frozenset({"Running", "Terminating"})
 
 
 def application_name(
@@ -205,6 +206,13 @@ def application_status(
         revision=_nested_string(application, "status", "sync", "revision"),
         reconciled_at=_nested_string(application, "status", "reconciledAt"),
     )
+
+
+def application_operation_is_active(application: Mapping[str, Any]) -> bool:
+    """Return whether Argo CD reports a non-terminal Application operation."""
+
+    phase = _nested_string(application, "status", "operationState", "phase")
+    return phase in ACTIVE_OPERATION_PHASES
 
 
 def _member_values(

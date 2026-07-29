@@ -8,6 +8,7 @@ import httpx
 
 from coder_manager.domains.argocd.applications import (
     application_name,
+    application_operation_is_active,
     application_payload,
     application_status,
     application_update_payload,
@@ -15,6 +16,10 @@ from coder_manager.domains.argocd.applications import (
 from coder_manager.domains.argocd.errors import (
     ArgoCdApplicationNotFoundError,
     ArgoCdRequestError,
+)
+from coder_manager.domains.argocd.models import (
+    ArgoCdMutationStatus,
+    ArgoCdReconcileResult,
 )
 
 if TYPE_CHECKING:
@@ -82,7 +87,7 @@ class ArgoCdClient:
         attached_name: str | None,
         members: Iterable[tuple[str, str]],
         helm_values: InstanceHelmValues,
-    ) -> str:
+    ) -> ArgoCdReconcileResult:
         """Create or overwrite an Application and request one synchronization."""
 
         name = application_name(self._config, slug, attached_name)
@@ -94,6 +99,11 @@ class ArgoCdClient:
             helm_values,
         )
         existing = self._get_application(name)
+        if existing is not None and application_operation_is_active(existing):
+            return ArgoCdReconcileResult(
+                status=ArgoCdMutationStatus.DEFERRED,
+                application_name=name,
+            )
 
         # Attempt creation first, but recover if another worker won the race.
         if existing is None:
@@ -106,6 +116,11 @@ class ArgoCdClient:
                 existing = self._get_application(name)
                 if existing is None:
                     self._raise_for_response(response, "POST", "api/v1/applications")
+                if existing is not None and application_operation_is_active(existing):
+                    return ArgoCdReconcileResult(
+                        status=ArgoCdMutationStatus.DEFERRED,
+                        application_name=name,
+                    )
             else:
                 self._raise_for_response(response, "POST", "api/v1/applications")
 
@@ -119,6 +134,15 @@ class ArgoCdClient:
             )
             self._raise_for_response(response, "PUT", path)
 
+        # Re-read immediately before sync because creation or update may start an
+        # automated operation.
+        current = self._get_application(name)
+        if current is not None and application_operation_is_active(current):
+            return ArgoCdReconcileResult(
+                status=ArgoCdMutationStatus.DEFERRED,
+                application_name=name,
+            )
+
         # Explicitly synchronize after either creation or update.
         sync_path = f"api/v1/applications/{name}/sync"
         response = self._client.post(
@@ -127,7 +151,10 @@ class ArgoCdClient:
             json={},
         )
         self._raise_for_response(response, "POST", sync_path)
-        return name
+        return ArgoCdReconcileResult(
+            status=ArgoCdMutationStatus.COMPLETED,
+            application_name=name,
+        )
 
     def get_application_status(
         self,
@@ -156,10 +183,15 @@ class ArgoCdClient:
         self,
         slug: str,
         attached_name: str | None,
-    ) -> None:
+    ) -> ArgoCdMutationStatus:
         """Delete an Application and its managed resources idempotently."""
 
         name = application_name(self._config, slug, attached_name)
+        existing = self._get_application(name)
+        if existing is None:
+            return ArgoCdMutationStatus.COMPLETED
+        if application_operation_is_active(existing):
+            return ArgoCdMutationStatus.DEFERRED
         path = f"api/v1/applications/{name}"
         response = self._client.delete(
             path,
@@ -171,8 +203,9 @@ class ArgoCdClient:
             },
         )
         if response.status_code == httpx.codes.NOT_FOUND:
-            return
+            return ArgoCdMutationStatus.COMPLETED
         self._raise_for_response(response, "DELETE", path)
+        return ArgoCdMutationStatus.COMPLETED
 
     def _get_application(self, name: str) -> dict[str, Any] | None:
         """Fetch one Application, returning none only for an explicit 404 response."""

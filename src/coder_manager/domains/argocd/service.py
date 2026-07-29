@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
     from coder_manager.domains.argocd.models import (
         ArgoCdApplicationStatus,
+        ArgoCdMutationStatus,
+        ArgoCdReconcileResult,
         InstanceHelmValues,
     )
 
@@ -24,7 +26,7 @@ def reconcile_instance_application(
     attached_name: str | None,
     members: Iterable[tuple[str, str]],
     helm_values: InstanceHelmValues,
-) -> str:
+) -> ArgoCdReconcileResult:
     """Reconcile one instance using the process-wide Argo CD configuration."""
 
     config = ArgoCdConfig.from_settings(get_settings())
@@ -41,12 +43,12 @@ def reconcile_instance_application(
 def delete_instance_application(
     slug: str,
     attached_name: str | None,
-) -> None:
+) -> ArgoCdMutationStatus:
     """Delete one instance's Application using the process-wide configuration."""
 
     config = ArgoCdConfig.from_settings(get_settings())
     with ArgoCdClient(config) as client:
-        client.delete_application(slug, attached_name)
+        return client.delete_application(slug, attached_name)
 
 
 def instance_application_exists(

@@ -13,6 +13,7 @@ from coder_manager.models import Instance, InstanceState, Member
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
     advance_execution,
+    defer_execution,
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import (
@@ -65,13 +66,16 @@ def step_01_start_instance(job_id: str) -> dict[str, str]:
             public_url,
             session_factory,
         )
-        application_name = argocd.reconcile_instance_application(
+        reconciliation = argocd.reconcile_instance_application(
             instance_id,
             slug,
             attached_name,
             tuple((username, role.value) for username, role in members),
             helm_values,
         )
+        if reconciliation.status is argocd.ArgoCdMutationStatus.DEFERRED:
+            deferred = defer_execution(claim, session_factory)
+            return {"status": "deferred" if deferred else "noop"}
 
         def store_started(_session: Session, resource: object | None) -> None:
             """Persist the confirmed remote Application identity and state."""
@@ -79,7 +83,7 @@ def step_01_start_instance(job_id: str) -> dict[str, str]:
             if not isinstance(resource, Instance):
                 msg = "Instance is missing"
                 raise TypeError(msg)
-            resource.argocd_application_name = application_name
+            resource.argocd_application_name = reconciliation.application_name
             resource.state = InstanceState.STARTED
 
         advanced = advance_execution(

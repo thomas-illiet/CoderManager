@@ -53,8 +53,14 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_CREATE_STEP_04,
     INSTANCE_CREATE_STEP_04_TASK,
+    INSTANCE_DELETE_STEP_02,
+    INSTANCE_DELETE_STEP_02_TASK,
     INSTANCE_DELETE_STEP_04,
     INSTANCE_DELETE_STEP_04_TASK,
+    INSTANCE_START_STEP_01,
+    INSTANCE_START_STEP_01_TASK,
+    INSTANCE_STOP_STEP_02,
+    INSTANCE_STOP_STEP_02_TASK,
     INSTANCE_UPDATE_STEP_01,
     INSTANCE_UPDATE_STEP_01_TASK,
     INSTANCE_UPDATE_STEP_02,
@@ -151,10 +157,34 @@ def successful_reconcile(
     attached_name: str | None,
     _members: tuple[tuple[str, str], ...],
     _helm_values: argocd.InstanceHelmValues,
-) -> str:
+) -> argocd.ArgoCdReconcileResult:
     """Return a deterministic Argo CD Application name."""
 
-    return attached_name or f"coder-{slug}"
+    return argocd.ArgoCdReconcileResult(
+        status=argocd.ArgoCdMutationStatus.COMPLETED,
+        application_name=attached_name or f"coder-{slug}",
+    )
+
+
+def successful_delete(*_args: object) -> argocd.ArgoCdMutationStatus:
+    """Return a completed Argo CD deletion outcome."""
+
+    return argocd.ArgoCdMutationStatus.COMPLETED
+
+
+def deferred_reconcile(
+    _instance_id: UUID,
+    slug: str,
+    attached_name: str | None,
+    _members: tuple[tuple[str, str], ...],
+    _helm_values: argocd.InstanceHelmValues,
+) -> argocd.ArgoCdReconcileResult:
+    """Return a deferred Argo CD reconciliation outcome."""
+
+    return argocd.ArgoCdReconcileResult(
+        status=argocd.ArgoCdMutationStatus.DEFERRED,
+        application_name=attached_name or f"coder-{slug}",
+    )
 
 
 def test_registered_step_names_and_beat_schedule() -> None:
@@ -238,7 +268,7 @@ async def test_start_and_stop_jobs_reconcile_workspaces_before_application_delet
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda *_args: events.append("application"),
+        lambda *_args: events.append("application") or argocd.ArgoCdMutationStatus.COMPLETED,
     )
     stopped = await client.post(f"/api/v1/instances/{instance_id}/stop")
     stop_job_id = UUID(stopped.json()["job"]["id"])
@@ -298,7 +328,7 @@ async def test_stop_workspace_failure_keeps_application_and_started_state(
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda *_args: deleted.append("application"),
+        lambda *_args: deleted.append("application") or argocd.ArgoCdMutationStatus.COMPLETED,
     )
     response = await client.post(f"/api/v1/instances/{instance_id}/stop")
     job_id = UUID(response.json()["job"]["id"])
@@ -348,7 +378,7 @@ async def test_stop_already_absent_skips_coder_and_converges(
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda *_args: deleted.append("idempotent-delete"),
+        lambda *_args: deleted.append("idempotent-delete") or argocd.ArgoCdMutationStatus.COMPLETED,
     )
     response = await client.post(f"/api/v1/instances/{instance_id}/stop")
     job_id = UUID(response.json()["job"]["id"])
@@ -361,6 +391,210 @@ async def test_stop_already_absent_skips_coder_and_converges(
         assert stored is not None
         assert stored.state is InstanceState.STOPPED
         assert stored.status is InstanceStatus.SUCCESS
+
+
+async def test_create_reconciliation_defers_on_same_step_and_beat_retries(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep a busy Argo create pending until Beat redispatches the same step."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DEFER CREATE")
+    instance_id = UUID(str(instance["id"]))
+    job_id = UUID(str(instance["job_id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    monkeypatch.setattr(postgresql, "create_schema", lambda _target: None)
+    assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", deferred_reconcile)
+    tasks.step_03_bootstrap_admin.delay.reset_mock()
+    assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "deferred"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_CREATE_STEP_02_TASK
+        assert job.step == INSTANCE_CREATE_STEP_02
+        assert job.status is JobStatus.PENDING
+        assert job.claimed_at is None
+        assert stored.step == INSTANCE_CREATE_STEP_02
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.argocd_application_name is None
+    tasks.step_03_bootstrap_admin.delay.assert_not_called()
+
+    tasks.step_02_create_instance.delay.reset_mock()
+    retry = tasks.retry_job_executions.run()
+    assert retry["scheduled"] >= 1
+    tasks.step_02_create_instance.delay.assert_any_call(str(job_id))
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", successful_reconcile)
+    assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "pending"}
+    tasks.step_03_bootstrap_admin.delay.assert_called_once_with(str(job_id))
+
+
+async def test_update_reconciliation_defers_claimed_members_to_pending(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Return members claimed by a busy Argo update to pending without an error."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DEFER UPDATE")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    response = await client.post(
+        f"/api/v1/instances/{instance_id}/members",
+        json={"username": "deferred-member", "role": "user"},
+    )
+    job_id = UUID(response.json()["job"]["id"])
+    monkeypatch.setattr(argocd, "reconcile_instance_application", deferred_reconcile)
+    tasks.step_02_cleanup_users.delay.reset_mock()
+
+    assert tasks.step_01_update_instance.run(str(job_id)) == {"status": "deferred"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        member = await session.scalar(select(Member).where(Member.username == "deferred-member"))
+        assert job is not None
+        assert stored is not None
+        assert member is not None
+        assert job.task_name == INSTANCE_UPDATE_STEP_01_TASK
+        assert job.step == INSTANCE_UPDATE_STEP_01
+        assert job.status is JobStatus.PENDING
+        assert job.claimed_at is None
+        assert stored.step == INSTANCE_UPDATE_STEP_01
+        assert stored.status is InstanceStatus.PENDING
+        assert member.status is MemberStatus.PENDING
+    tasks.step_02_cleanup_users.delay.assert_not_called()
+
+
+async def test_start_reconciliation_defers_without_changing_observed_state(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep a stopped instance pending on start while Argo CD is busy."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DEFER START")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STOPPED
+        stored.step = None
+        await session.commit()
+
+    response = await client.post(f"/api/v1/instances/{instance_id}/start")
+    job_id = UUID(response.json()["job"]["id"])
+    monkeypatch.setattr(argocd, "reconcile_instance_application", deferred_reconcile)
+    tasks.step_02_cleanup_users.delay.reset_mock()
+
+    assert tasks.step_01_start_instance.run(str(job_id)) == {"status": "deferred"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_START_STEP_01_TASK
+        assert job.step == INSTANCE_START_STEP_01
+        assert job.status is JobStatus.PENDING
+        assert stored.step == INSTANCE_START_STEP_01
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.state is InstanceState.STOPPED
+    tasks.step_02_cleanup_users.delay.assert_not_called()
+
+
+async def test_stop_deletion_defers_without_marking_instance_stopped(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep stop pending on Application deletion while Argo CD is busy."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DEFER STOP")
+    instance_id = UUID(str(instance["id"]))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "updating"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STARTED
+        stored.step = None
+        await session.commit()
+
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: False)
+    response = await client.post(f"/api/v1/instances/{instance_id}/stop")
+    job_id = UUID(response.json()["job"]["id"])
+    assert tasks.step_01_stop_workspaces.run(str(job_id)) == {"status": "pending"}
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda *_args: argocd.ArgoCdMutationStatus.DEFERRED,
+    )
+
+    assert tasks.step_02_stop_instance.run(str(job_id)) == {"status": "deferred"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_STOP_STEP_02_TASK
+        assert job.step == INSTANCE_STOP_STEP_02
+        assert job.status is JobStatus.PENDING
+        assert stored.step == INSTANCE_STOP_STEP_02
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.state is InstanceState.STARTED
+
+
+async def test_instance_deletion_defers_before_local_cleanup(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep delete pending on its Argo step while the Application is busy."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DEFER DELETE")
+    instance_id = UUID(str(instance["id"]))
+    await set_instance_status(session_maker, instance_id)
+    response = await client.delete(f"/api/v1/instances/{instance_id}")
+    job_id = UUID(response.json()["job"]["id"])
+    assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda *_args: argocd.ArgoCdMutationStatus.DEFERRED,
+    )
+    tasks.step_03_remove_schema.delay.reset_mock()
+
+    assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "deferred"}
+    async with session_maker() as session:
+        job = await session.get(JobExecution, job_id)
+        stored = await session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        assert job.task_name == INSTANCE_DELETE_STEP_02_TASK
+        assert job.step == INSTANCE_DELETE_STEP_02
+        assert job.status is JobStatus.PENDING
+        assert stored.step == INSTANCE_DELETE_STEP_02
+        assert stored.status is InstanceStatus.PENDING
+    tasks.step_03_remove_schema.delay.assert_not_called()
 
 
 async def test_start_fails_without_admin_credentials(
@@ -523,7 +757,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
-    ) -> str:
+    ) -> argocd.ArgoCdReconcileResult:
         """Capture the dynamic Helm values passed to Argo CD."""
 
         reconciled_values.append(helm_values)
@@ -889,7 +1123,7 @@ async def test_update_fails_without_admin_credentials(
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
-    ) -> str:
+    ) -> argocd.ArgoCdReconcileResult:
         """Capture the decrypted kubeconfig passed to the Argo CD boundary."""
 
         reconciled_values.append(helm_values)
@@ -1007,13 +1241,16 @@ async def test_update_step_coalesces_member_changes_into_a_new_job(
         attached_name: str | None,
         _members: tuple[tuple[str, str], ...],
         _helm_values: argocd.InstanceHelmValues,
-    ) -> str:
+    ) -> argocd.ArgoCdReconcileResult:
         """Insert a pending member while the first reconciliation is running."""
 
         with sync_session_maker() as session:
             session.add(Member(instance_id=reconciled_id, username="late", role="user"))
             session.commit()
-        return attached_name or f"coder-{slug}"
+        return argocd.ArgoCdReconcileResult(
+            status=argocd.ArgoCdMutationStatus.COMPLETED,
+            application_name=attached_name or f"coder-{slug}",
+        )
 
     monkeypatch.setattr(argocd, "reconcile_instance_application", add_late_member)
     monkeypatch.setattr(coder, "cleanup_user_accounts", capture_cleanup_snapshot)
@@ -1115,7 +1352,7 @@ async def test_update_deletes_remote_accounts_before_local_members(
         attached_name: str | None,
         members: tuple[tuple[str, str], ...],
         helm_values: argocd.InstanceHelmValues,
-    ) -> str:
+    ) -> argocd.ArgoCdReconcileResult:
         """Record that policy reconciliation precedes account deletion."""
 
         events.append(("argocd", members))
@@ -1284,7 +1521,10 @@ async def test_delete_steps_keep_local_state_until_step_04(
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda slug, name: deleted_remote.append((instance_id, slug, name)),
+        lambda slug, name: (
+            deleted_remote.append((instance_id, slug, name))
+            or argocd.ArgoCdMutationStatus.COMPLETED
+        ),
     )
     monkeypatch.setattr(postgresql, "drop_schema", dropped_targets.append)
 
@@ -1367,7 +1607,7 @@ async def test_each_delete_step_failure_preserves_local_configuration(
 
     deletion = await client.delete(f"/api/v1/instances/{instance_id}")
     job_id = UUID(deletion.json()["job"]["id"])
-    monkeypatch.setattr(argocd, "delete_instance_application", lambda *_args: None)
+    monkeypatch.setattr(argocd, "delete_instance_application", successful_delete)
     monkeypatch.setattr(postgresql, "drop_schema", lambda _target: None)
     deletion_tasks = (
         tasks.step_01_remove_workspaces,

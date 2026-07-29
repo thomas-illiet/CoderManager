@@ -429,6 +429,11 @@ redelivers the exact allowlisted step for `pending` and `error` jobs and first r
 `running` jobs to `pending`. Unknown task names are logged and ignored. The healthcheck and scanner
 are intentionally not tracked as jobs.
 
+Before mutating an existing Argo CD Application, instance reconciliation, start, stop, and deletion
+read its current operation phase. An Application in `Running` or `Terminating` is left untouched:
+the owned job and any members claimed by an update return to `pending` on the same step without an
+exception, and Beat retries them on a later scan.
+
 Beat also runs `coder_manager.check_instance_states` every hour. It observes only idle instances
 that are not being deleted: an Argo `2xx` stores `started`, and a `404` stores `stopped`. Missing
 configuration, transport failures, and any other response retain the previous state and are logged.

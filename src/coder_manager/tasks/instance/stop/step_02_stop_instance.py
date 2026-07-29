@@ -7,6 +7,7 @@ from coder_manager.models import Instance, InstanceState
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
     complete_execution,
+    defer_execution,
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import INSTANCE_STOP_STEP_02_TASK
@@ -29,7 +30,10 @@ def step_02_stop_instance(job_id: str) -> dict[str, str]:
             slug = instance.slug
             attached_name = instance.argocd_application_name
 
-        argocd.delete_instance_application(slug, attached_name)
+        deletion = argocd.delete_instance_application(slug, attached_name)
+        if deletion is argocd.ArgoCdMutationStatus.DEFERRED:
+            deferred = defer_execution(claim, session_factory)
+            return {"status": "deferred" if deferred else "noop"}
 
         def mark_stopped(_session: object, resource: object | None) -> None:
             """Persist stopped only after Argo confirms deletion."""

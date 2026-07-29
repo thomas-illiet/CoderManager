@@ -232,6 +232,34 @@ def complete_execution(
         return True
 
 
+def defer_execution(
+    claim: ExecutionClaim,
+    session_factory: sessionmaker[Session],
+    *,
+    mutate: Callable[[Session, Instance | Template | Workspace | None], None] | None = None,
+) -> bool:
+    """Return an owned execution to pending without changing its current step."""
+
+    with session_factory() as session:
+        owned = owned_execution(session, claim)
+        if owned is None:
+            return False
+        job, resource = owned
+        if mutate is not None:
+            mutate(session, resource)
+        job.status = JobStatus.PENDING
+        job.claimed_at = None
+        job.updated_at = datetime.now(UTC)
+        if isinstance(resource, Instance):
+            resource.status = InstanceStatus.PENDING
+        elif isinstance(resource, Template):
+            resource.sync_status = TemplateSyncStatus.PENDING
+        elif isinstance(resource, Workspace):
+            resource.status = WorkspaceStatus.PENDING
+        session.commit()
+        return True
+
+
 def fail_execution(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
