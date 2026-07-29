@@ -27,6 +27,7 @@ class CoderWorkspace:
     id: UUID
     status: str
     latest_build_id: UUID
+    latest_build_transition: str = "start"
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +40,8 @@ class CoderWorkspacePage:
 
 @dataclass(frozen=True, slots=True)
 class CoderWorkspaceBuild:
-    """Remote workspace stop build state."""
+    """Remote workspace build state."""
 
     id: UUID
     status: str
+    transition: str = "stop"

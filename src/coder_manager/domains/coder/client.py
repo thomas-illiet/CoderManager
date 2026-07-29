@@ -35,6 +35,21 @@ if TYPE_CHECKING:
 BUILD_VERSION_HEADER = "X-Coder-Build-Version"
 CONNECT_TIMEOUT_SECONDS = 5.0
 READ_TIMEOUT_SECONDS = 30.0
+WORKSPACE_STATUSES = frozenset(
+    {
+        "pending",
+        "starting",
+        "running",
+        "stopping",
+        "stopped",
+        "failed",
+        "canceling",
+        "canceled",
+        "deleting",
+        "deleted",
+    }
+)
+WORKSPACE_TRANSITIONS = frozenset({"start", "stop", "delete"})
 
 
 class CoderClient:
@@ -184,17 +199,17 @@ class CoderClient:
     def workspaces(
         self,
         *,
-        status: str,
+        status: str | None,
         offset: int,
         limit: int,
     ) -> CoderWorkspacePage:
-        """Return one validated page of workspaces matching a remote status."""
+        """Return one validated page of non-deleted workspaces."""
 
         path = "api/v2/workspaces"
         response = self._client.get(
             path,
             params={
-                "q": f'status:"{status}"',
+                "q": "" if status is None else f'status:"{status}"',
                 "offset": offset,
                 "limit": limit,
             },
@@ -212,17 +227,25 @@ class CoderClient:
                 msg = "Coder GET api/v2/workspaces returned an invalid workspace"
                 raise CoderRequestError(msg)
             latest_build = item.get("latest_build")
-            if not isinstance(latest_build, dict) or not isinstance(
-                latest_build.get("status"),
-                str,
+            if not isinstance(latest_build, dict):
+                msg = "Coder GET api/v2/workspaces returned an invalid latest build"
+                raise CoderRequestError(msg)
+            build_status = latest_build.get("status")
+            transition = latest_build.get("transition")
+            if (
+                not isinstance(build_status, str)
+                or build_status not in WORKSPACE_STATUSES
+                or not isinstance(transition, str)
+                or transition not in WORKSPACE_TRANSITIONS
             ):
                 msg = "Coder GET api/v2/workspaces returned an invalid latest build"
                 raise CoderRequestError(msg)
             workspaces.append(
                 CoderWorkspace(
                     id=self._uuid_field(item, "id", path),
-                    status=latest_build["status"],
+                    status=build_status,
                     latest_build_id=self._uuid_field(latest_build, "id", path),
+                    latest_build_transition=transition,
                 )
             )
         expected_items = min(limit, max(count - offset, 0))
@@ -236,6 +259,14 @@ class CoderClient:
 
         path = f"api/v2/workspaces/{workspace_id}/builds"
         response = self._client.post(path, json={"transition": "stop"})
+        self._raise_for_response(response, "POST", path, httpx.codes.CREATED)
+        return self._workspace_build(response, path)
+
+    def create_workspace_delete_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+        """Queue a non-orphan delete build for one remote workspace."""
+
+        path = f"api/v2/workspaces/{workspace_id}/builds"
+        response = self._client.post(path, json={"transition": "delete"})
         self._raise_for_response(response, "POST", path, httpx.codes.CREATED)
         return self._workspace_build(response, path)
 
@@ -476,14 +507,19 @@ class CoderClient:
         response: httpx.Response,
         path: str,
     ) -> CoderWorkspaceBuild:
-        """Decode the fields required to wait for a workspace stop build."""
+        """Decode the fields required to wait for a workspace build."""
 
         payload = cls._json_object(response, path)
         status = payload.get("status")
-        if not isinstance(status, str):
+        transition = payload.get("transition")
+        if not isinstance(status, str) or status not in WORKSPACE_STATUSES:
             msg = f"Coder {path} returned an invalid workspace build status"
+            raise CoderRequestError(msg)
+        if not isinstance(transition, str) or transition not in WORKSPACE_TRANSITIONS:
+            msg = f"Coder {path} returned an invalid workspace build transition"
             raise CoderRequestError(msg)
         return CoderWorkspaceBuild(
             id=cls._uuid_field(payload, "id", path),
             status=status,
+            transition=transition,
         )

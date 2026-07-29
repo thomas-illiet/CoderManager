@@ -2,6 +2,7 @@
 
 # ruff: noqa: EM101, PLR0913, PLR0915, S105, SLF001, TRY003
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
@@ -53,6 +54,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_03_TASK,
     INSTANCE_CREATE_STEP_04,
     INSTANCE_CREATE_STEP_04_TASK,
+    INSTANCE_DELETE_STEP_01,
+    INSTANCE_DELETE_STEP_01_TASK,
     INSTANCE_DELETE_STEP_02,
     INSTANCE_DELETE_STEP_02_TASK,
     INSTANCE_DELETE_STEP_04,
@@ -572,7 +575,10 @@ async def test_instance_deletion_defers_before_local_cleanup(
     configure_worker(monkeypatch, sync_session_maker)
     instance = await create_instance(client, "DEFER DELETE")
     instance_id = UUID(str(instance["id"]))
+    await store_admin_password(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+    monkeypatch.setattr(coder, "delete_all_workspaces", lambda *_args, **_kwargs: ())
     response = await client.delete(f"/api/v1/instances/{instance_id}")
     job_id = UUID(response.json()["job"]["id"])
     assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
@@ -595,6 +601,202 @@ async def test_instance_deletion_defers_before_local_cleanup(
         assert stored.step == INSTANCE_DELETE_STEP_02
         assert stored.status is InstanceStatus.PENDING
     tasks.step_03_remove_schema.delay.assert_not_called()
+
+
+async def test_instance_deletion_restores_stopped_coder_before_deleting_workspaces(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Restore an absent Application and delete workspaces before advancing."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "RESTORE DELETE")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.action = "stopping"
+        stored.status = InstanceStatus.SUCCESS
+        stored.state = InstanceState.STOPPED
+        stored.step = None
+        await session.commit()
+
+    events: list[str] = []
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: False)
+
+    def restore(
+        _instance_id: UUID,
+        slug: str,
+        _attached_name: str | None,
+        _members: tuple[tuple[str, str], ...],
+        _helm_values: argocd.InstanceHelmValues,
+    ) -> argocd.ArgoCdReconcileResult:
+        """Record the temporary Application restoration."""
+
+        events.append("restore")
+        return argocd.ArgoCdReconcileResult(
+            status=argocd.ArgoCdMutationStatus.COMPLETED,
+            application_name=f"coder-{slug}",
+        )
+
+    monkeypatch.setattr(argocd, "reconcile_instance_application", restore)
+
+    def delete_workspaces(
+        instance_url: str,
+        password: SecretStr,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float,
+        heartbeat: Callable[[], None],
+    ) -> tuple[str, ...]:
+        """Require restored credentials and exercise the durable heartbeat."""
+
+        assert instance_url == instance["instance_url"]
+        assert password.get_secret_value() == "stored-admin-password"
+        assert timeout_seconds == 1800
+        assert poll_interval_seconds == 2
+        assert callable(heartbeat)
+        heartbeat()
+        events.append("workspaces")
+        return ("workspace-id",)
+
+    monkeypatch.setattr(coder, "delete_all_workspaces", delete_workspaces)
+    response = await client.delete(f"/api/v1/instances/{instance_id}")
+    job_id = UUID(response.json()["job"]["id"])
+
+    assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
+    assert events == ["restore", "workspaces"]
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored is not None
+        assert job is not None
+        assert stored.state is InstanceState.STARTED
+        assert stored.argocd_application_name == f"coder-{stored.slug}"
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.step == INSTANCE_DELETE_STEP_02
+        assert job.task_name == INSTANCE_DELETE_STEP_02_TASK
+
+
+async def test_instance_deletion_defers_when_restoration_is_busy(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep deletion on step one while Argo CD defers restoration."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DEFER RESTORE DELETE")
+    instance_id = UUID(str(instance["id"]))
+    await encrypt_allocated_database(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: False)
+    monkeypatch.setattr(argocd, "reconcile_instance_application", deferred_reconcile)
+    monkeypatch.setattr(
+        coder,
+        "delete_all_workspaces",
+        lambda *_args, **_kwargs: pytest.fail("Coder must not be called"),
+    )
+    response = await client.delete(f"/api/v1/instances/{instance_id}")
+    job_id = UUID(response.json()["job"]["id"])
+
+    assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "deferred"}
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored is not None
+        assert job is not None
+        assert stored.state is InstanceState.STOPPED
+        assert stored.status is InstanceStatus.PENDING
+        assert stored.step == INSTANCE_DELETE_STEP_01
+        assert job.status is JobStatus.PENDING
+        assert job.task_name == INSTANCE_DELETE_STEP_01_TASK
+
+
+async def test_workspace_deletion_failure_preserves_instance_resources(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail deletion before Application, schema, or local cleanup."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "WORKSPACE DELETE FAILURE")
+    instance_id = UUID(str(instance["id"]))
+    await store_admin_password(session_maker, instance_id)
+    await set_instance_status(session_maker, instance_id)
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+
+    def fail_workspaces(*_args: object, **_kwargs: object) -> None:
+        """Simulate a terminal workspace delete failure."""
+
+        raise RuntimeError("workspace delete failed")
+
+    deleted_applications: list[str] = []
+    monkeypatch.setattr(coder, "delete_all_workspaces", fail_workspaces)
+    monkeypatch.setattr(
+        argocd,
+        "delete_instance_application",
+        lambda *_args: deleted_applications.append("application"),
+    )
+    response = await client.delete(f"/api/v1/instances/{instance_id}")
+    job_id = UUID(response.json()["job"]["id"])
+
+    with pytest.raises(RuntimeError, match="workspace delete failed"):
+        tasks.step_01_remove_workspaces.run(str(job_id))
+    assert deleted_applications == []
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored is not None
+        assert job is not None
+        assert stored.status is InstanceStatus.ERROR
+        assert stored.step == INSTANCE_DELETE_STEP_01
+        assert job.status is JobStatus.ERROR
+
+
+async def test_instance_deletion_fails_before_remote_calls_without_admin_credentials(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Require stored administrator credentials before restoring or deleting."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "DELETE CREDENTIALS")
+    instance_id = UUID(str(instance["id"]))
+    await set_instance_status(session_maker, instance_id)
+    monkeypatch.setattr(
+        argocd,
+        "instance_application_exists",
+        lambda *_args: pytest.fail("Argo CD must not be called"),
+    )
+    monkeypatch.setattr(
+        coder,
+        "delete_all_workspaces",
+        lambda *_args, **_kwargs: pytest.fail("Coder must not be called"),
+    )
+    response = await client.delete(f"/api/v1/instances/{instance_id}")
+    job_id = UUID(response.json()["job"]["id"])
+
+    with pytest.raises(RuntimeError, match="administrator password is missing"):
+        tasks.step_01_remove_workspaces.run(str(job_id))
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        job = await session.get(JobExecution, job_id)
+        assert stored is not None
+        assert job is not None
+        assert stored.status is InstanceStatus.ERROR
+        assert stored.step == INSTANCE_DELETE_STEP_01
+        assert job.status is JobStatus.ERROR
 
 
 async def test_start_fails_without_admin_credentials(
@@ -1492,6 +1694,7 @@ async def test_delete_steps_keep_local_state_until_step_04(
     instance, member, template, image = await create_ready_context(client, session_maker)
     instance_id = UUID(str(instance["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
     workspace_response = await client.post(
         "/api/v1/workspaces",
         json=workspace_payload(instance, member, template, image),
@@ -1526,6 +1729,8 @@ async def test_delete_steps_keep_local_state_until_step_04(
             or argocd.ArgoCdMutationStatus.COMPLETED
         ),
     )
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+    monkeypatch.setattr(coder, "delete_all_workspaces", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(postgresql, "drop_schema", dropped_targets.append)
 
     assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
@@ -1583,6 +1788,7 @@ async def test_each_delete_step_failure_preserves_local_configuration(
     instance_id = UUID(str(instance["id"]))
     member_id = UUID(str(member["id"]))
     await encrypt_allocated_database(session_maker, instance_id)
+    await store_admin_password(session_maker, instance_id)
     workspace_response = await client.post(
         "/api/v1/workspaces",
         json=workspace_payload(instance, member, template, image),
@@ -1608,6 +1814,8 @@ async def test_each_delete_step_failure_preserves_local_configuration(
     deletion = await client.delete(f"/api/v1/instances/{instance_id}")
     job_id = UUID(deletion.json()["job"]["id"])
     monkeypatch.setattr(argocd, "delete_instance_application", successful_delete)
+    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+    monkeypatch.setattr(coder, "delete_all_workspaces", lambda *_args, **_kwargs: ())
     monkeypatch.setattr(postgresql, "drop_schema", lambda _target: None)
     deletion_tasks = (
         tasks.step_01_remove_workspaces,
@@ -1626,7 +1834,7 @@ async def test_each_delete_step_failure_preserves_local_configuration(
         raise RuntimeError("selected deletion failure")
 
     if failed_step == 1:
-        monkeypatch.setattr(failed_module, "placeholder", fail_step)
+        monkeypatch.setattr(failed_module.coder, "delete_all_workspaces", fail_step)
     elif failed_step == 2:
         monkeypatch.setattr(failed_module.argocd, "delete_instance_application", fail_step)
     elif failed_step == 3:

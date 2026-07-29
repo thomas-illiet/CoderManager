@@ -218,6 +218,20 @@ finishes idempotently. A Coder error or timeout preserves the Application and pr
 Stop never deletes the local instance, database schema or allocation, members, workspace rows,
 provider configuration, or secrets.
 
+`DELETE /api/v1/instances/{id}` keeps its four durable deletion steps. The first step requires the
+stored Coder administrator credentials and removes every non-deleted Coder workspace before any
+instance resource is removed. If the Argo CD Application is absent, the worker first reconciles it
+from the persisted instance configuration, records the observed instance as `started`, and waits
+for Coder authentication. It then waits for any active workspace build, submits non-orphan
+`delete` builds, waits for each build to reach `deleted`, and repeats the complete paginated scan
+until Coder returns no workspaces. A retry observes an existing delete build instead of submitting
+a duplicate. Only after the empty final scan does deletion remove the Application, drop the
+PostgreSQL schema, and delete the local configuration. Any Coder failure or timeout keeps all
+remaining instance resources available for retry.
+`CODER_MANAGER_WORKSPACE_DELETE_POLL_INTERVAL_SECONDS` controls polling (2 seconds by default), and
+`CODER_MANAGER_WORKSPACE_DELETE_TIMEOUT_SECONDS` sets the per-attempt global deadline (1800 seconds
+by default) for Coder readiness, active builds, delete builds, and the final scan.
+
 Both power routes return HTTP 202 with `{ "resource": ..., "job": ... }`, return 404 for an unknown
 instance, and return 409 while another transition is active or deletion is in progress.
 

@@ -19,6 +19,7 @@ from coder_manager.domains.coder import (
     CoderWorkspaceBuild,
     CoderWorkspacePage,
     cleanup_user_accounts,
+    delete_all_workspaces,
     delete_user_accounts,
     stop_active_workspaces,
 )
@@ -75,6 +76,7 @@ def test_workspace_stop_http_contract_and_strict_response_validation() -> None:
                             "latest_build": {
                                 "id": str(build_id),
                                 "status": "running",
+                                "transition": "start",
                             },
                         }
                     ],
@@ -84,11 +86,11 @@ def test_workspace_stop_http_contract_and_strict_response_validation() -> None:
         if request.method == "POST":
             return httpx.Response(
                 201,
-                json={"id": str(build_id), "status": "stopping"},
+                json={"id": str(build_id), "status": "stopping", "transition": "stop"},
             )
         return httpx.Response(
             200,
-            json={"id": str(build_id), "status": "stopped"},
+            json={"id": str(build_id), "status": "stopped", "transition": "stop"},
         )
 
     with CoderClient(
@@ -134,6 +136,7 @@ def test_workspace_page_rejects_incomplete_coder_response() -> None:
                         "latest_build": {
                             "id": str(build_id),
                             "status": "running",
+                            "transition": "start",
                         },
                     }
                 ],
@@ -149,6 +152,95 @@ def test_workspace_page_rejects_incomplete_coder_response() -> None:
         pytest.raises(CoderRequestError, match="incomplete workspace page"),
     ):
         client.workspaces(status="running", offset=0, limit=100)
+
+
+def test_workspace_delete_http_contract_uses_unfiltered_non_orphan_build() -> None:
+    """List every workspace and submit a strict non-orphan delete build."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return one complete workspace and its delete build."""
+
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                httpx.codes.OK,
+                json={
+                    "workspaces": [
+                        {
+                            "id": str(workspace_id),
+                            "latest_build": {
+                                "id": str(uuid4()),
+                                "status": "stopped",
+                                "transition": "stop",
+                            },
+                        }
+                    ],
+                    "count": 1,
+                },
+            )
+        return httpx.Response(
+            httpx.codes.CREATED,
+            json={
+                "id": str(build_id),
+                "status": "deleting",
+                "transition": "delete",
+            },
+        )
+
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        page = client.workspaces(status=None, offset=0, limit=100)
+        build = client.create_workspace_delete_build(workspace_id)
+
+    assert page.items[0].latest_build_transition == "stop"
+    assert build == CoderWorkspaceBuild(
+        id=build_id,
+        status="deleting",
+        transition="delete",
+    )
+    assert requests[0].url.params["q"] == ""
+    assert requests[0].url.params["offset"] == "0"
+    assert requests[0].url.params["limit"] == "100"
+    assert json.loads(requests[1].content) == {"transition": "delete"}
+
+
+def test_workspace_page_rejects_invalid_status_or_transition() -> None:
+    """Reject unknown latest-build values before destructive reconciliation."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return an unsupported transition."""
+
+        return httpx.Response(
+            httpx.codes.OK,
+            json={
+                "workspaces": [
+                    {
+                        "id": str(uuid4()),
+                        "latest_build": {
+                            "id": str(uuid4()),
+                            "status": "running",
+                            "transition": "unknown",
+                        },
+                    }
+                ],
+                "count": 1,
+            },
+        )
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(CoderRequestError, match="invalid latest build"),
+    ):
+        client.workspaces(status=None, offset=0, limit=100)
 
 
 def test_stop_active_workspaces_waits_and_rechecks_until_none_are_active(
@@ -492,6 +584,510 @@ def test_stop_active_workspaces_uses_one_global_timeout(
             "https://coder.example.test",
             PASSWORD,
             timeout_seconds=1,
+            poll_interval_seconds=0.001,
+        )
+
+
+def test_delete_all_workspaces_waits_for_active_builds_and_rechecks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait for blockers, delete every snapshot, and catch a late workspace."""
+
+    starting_id = uuid4()
+    stopped_id = uuid4()
+    late_id = uuid4()
+    starting_build_id = uuid4()
+    stopped_build_id = uuid4()
+    late_build_id = uuid4()
+    scan = 0
+    submitted: list[UUID] = []
+    heartbeats: list[str] = []
+
+    class StubClient:
+        """Expose active, terminal, and late workspaces across three scans."""
+
+        def __init__(self, instance_url: str) -> None:
+            """Require the managed Coder URL."""
+
+            assert instance_url == "https://coder.example.test"
+
+        def authenticate_prepared_admin(self, password: SecretStr) -> None:
+            """Require prepared credentials."""
+
+            assert password.get_secret_value() == PASSWORD.get_secret_value()
+
+        def close(self) -> None:
+            """Close the fake client."""
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Return one complete snapshot per scan."""
+
+            nonlocal scan
+            assert status is None
+            assert offset == 0
+            assert limit == 100
+            scan += 1
+            if scan == 1:
+                return CoderWorkspacePage(
+                    items=(
+                        CoderWorkspace(
+                            id=starting_id,
+                            status="starting",
+                            latest_build_id=starting_build_id,
+                            latest_build_transition="start",
+                        ),
+                        CoderWorkspace(
+                            id=stopped_id,
+                            status="stopped",
+                            latest_build_id=uuid4(),
+                            latest_build_transition="stop",
+                        ),
+                    ),
+                    count=2,
+                )
+            if scan == 2:
+                return CoderWorkspacePage(
+                    items=(
+                        CoderWorkspace(
+                            id=starting_id,
+                            status="running",
+                            latest_build_id=starting_build_id,
+                            latest_build_transition="start",
+                        ),
+                        CoderWorkspace(
+                            id=late_id,
+                            status="failed",
+                            latest_build_id=uuid4(),
+                            latest_build_transition="start",
+                        ),
+                    ),
+                    count=2,
+                )
+            return CoderWorkspacePage(items=(), count=0)
+
+        def create_workspace_delete_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Queue one delete build for every terminal workspace."""
+
+            submitted.append(workspace_id)
+            build_id = {
+                stopped_id: stopped_build_id,
+                starting_id: starting_build_id,
+                late_id: late_build_id,
+            }[workspace_id]
+            return CoderWorkspaceBuild(
+                id=build_id,
+                status="deleting",
+                transition="delete",
+            )
+
+        def workspace_build(self, build_id: UUID) -> CoderWorkspaceBuild:
+            """Complete blockers and deletion builds deterministically."""
+
+            if build_id == starting_build_id and starting_id not in submitted:
+                return CoderWorkspaceBuild(
+                    id=build_id,
+                    status="running",
+                    transition="start",
+                )
+            return CoderWorkspaceBuild(
+                id=build_id,
+                status="deleted",
+                transition="delete",
+            )
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    deleted = delete_all_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+        heartbeat=lambda: heartbeats.append("beat"),
+    )
+
+    assert set(deleted) == {str(starting_id), str(stopped_id), str(late_id)}
+    assert submitted[0] == stopped_id
+    assert set(submitted[1:]) == {starting_id, late_id}
+    assert scan == 3
+    assert heartbeats
+
+
+def test_delete_all_workspaces_observes_existing_delete_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Poll a delete build created by a previous durable attempt."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+    scans = 0
+
+    class StubClient:
+        """Expose one deleting workspace and then an empty final scan."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept prepared credentials."""
+
+        def close(self) -> None:
+            """Close the fake client."""
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Return the existing delete build on the first scan only."""
+
+            nonlocal scans
+            assert status is None
+            assert offset == 0
+            assert limit == 100
+            scans += 1
+            if scans > 1:
+                return CoderWorkspacePage(items=(), count=0)
+            return CoderWorkspacePage(
+                items=(
+                    CoderWorkspace(
+                        id=workspace_id,
+                        status="deleting",
+                        latest_build_id=build_id,
+                        latest_build_transition="delete",
+                    ),
+                ),
+                count=1,
+            )
+
+        def create_workspace_delete_build(self, _workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Reject a duplicate delete submission."""
+
+            pytest.fail("deleting workspace must not receive another build")
+
+        def workspace_build(self, observed_build_id: UUID) -> CoderWorkspaceBuild:
+            """Complete the build created by the earlier attempt."""
+
+            assert observed_build_id == build_id
+            return CoderWorkspaceBuild(
+                id=build_id,
+                status="deleted",
+                transition="delete",
+            )
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    assert delete_all_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+    ) == (str(workspace_id),)
+    assert scans == 2
+
+
+def test_delete_all_workspaces_paginates_before_mutating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Load every stable page before submitting any delete build."""
+
+    workspace_ids = (uuid4(), uuid4())
+    scan = 0
+    submitted: list[UUID] = []
+
+    class StubClient:
+        """Expose two pages followed by an empty final snapshot."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept prepared credentials."""
+
+        def close(self) -> None:
+            """Close the fake client."""
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Return one workspace per page during the first scan."""
+
+            nonlocal scan
+            assert status is None
+            assert limit == 1
+            if offset == 0:
+                scan += 1
+            if scan > 1:
+                return CoderWorkspacePage(items=(), count=0)
+            assert submitted == []
+            return CoderWorkspacePage(
+                items=(
+                    CoderWorkspace(
+                        id=workspace_ids[offset],
+                        status="stopped",
+                        latest_build_id=uuid4(),
+                        latest_build_transition="stop",
+                    ),
+                ),
+                count=2,
+            )
+
+        def create_workspace_delete_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Complete every submitted build immediately."""
+
+            submitted.append(workspace_id)
+            return CoderWorkspaceBuild(
+                id=uuid4(),
+                status="deleted",
+                transition="delete",
+            )
+
+        def workspace_build(self, _build_id: UUID) -> CoderWorkspaceBuild:
+            """Reject polling for already completed builds."""
+
+            pytest.fail("completed delete builds must not be polled")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    monkeypatch.setattr(coder_service, "WORKSPACE_PAGE_SIZE", 1)
+    deleted = delete_all_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+    )
+
+    assert set(submitted) == set(workspace_ids)
+    assert set(deleted) == {str(workspace_id) for workspace_id in workspace_ids}
+
+
+def test_delete_all_workspaces_rejects_terminal_delete_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop convergence when a delete build fails terminally."""
+
+    workspace_id = uuid4()
+    build_id = uuid4()
+
+    class StubClient:
+        """Expose one workspace whose delete build fails."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept prepared credentials."""
+
+        def close(self) -> None:
+            """Close the fake client."""
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Return one terminal workspace."""
+
+            assert status is None
+            assert offset == 0
+            assert limit == 100
+            return CoderWorkspacePage(
+                items=(
+                    CoderWorkspace(
+                        id=workspace_id,
+                        status="stopped",
+                        latest_build_id=uuid4(),
+                        latest_build_transition="stop",
+                    ),
+                ),
+                count=1,
+            )
+
+        def create_workspace_delete_build(self, _workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Return the submitted delete build."""
+
+            return CoderWorkspaceBuild(
+                id=build_id,
+                status="deleting",
+                transition="delete",
+            )
+
+        def workspace_build(self, _build_id: UUID) -> CoderWorkspaceBuild:
+            """Return a terminal delete failure."""
+
+            return CoderWorkspaceBuild(
+                id=build_id,
+                status="failed",
+                transition="delete",
+            )
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    with pytest.raises(CoderRequestError, match="workspace deletion failed"):
+        delete_all_workspaces(
+            "https://coder.example.test",
+            PASSWORD,
+            timeout_seconds=5,
+            poll_interval_seconds=0.001,
+        )
+
+
+def test_delete_all_workspaces_times_out_waiting_for_coder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Use the deletion deadline while waiting for restored Coder readiness."""
+
+    monotonic_values = iter((0.0, 0.0, 1.0))
+    closes: list[str] = []
+
+    class StubClient:
+        """Keep the restored Coder instance unavailable."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Fail the readiness probe."""
+
+            msg = "Coder unavailable"
+            raise CoderRequestError(msg)
+
+        def close(self) -> None:
+            """Record cleanup after the failed probe."""
+
+            closes.append("closed")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    monkeypatch.setattr(coder_service.time, "monotonic", lambda: next(monotonic_values))
+    with pytest.raises(CoderRequestError, match="workspace deletion timed out"):
+        delete_all_workspaces(
+            "https://coder.example.test",
+            PASSWORD,
+            timeout_seconds=1,
+            poll_interval_seconds=0.001,
+        )
+    assert closes == ["closed"]
+
+
+def test_delete_all_workspaces_retries_coder_readiness_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retry transient Coder readiness failures under the shared deadline."""
+
+    attempts = 0
+    closes: list[int] = []
+
+    class StubClient:
+        """Fail the first authentication and converge on the second."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Assign this probe its deterministic attempt number."""
+
+            nonlocal attempts
+            attempts += 1
+            self.attempt = attempts
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Fail only the first readiness probe."""
+
+            if self.attempt == 1:
+                msg = "Coder is starting"
+                raise CoderRequestError(msg)
+
+        def close(self) -> None:
+            """Record cleanup for failed and successful clients."""
+
+            closes.append(self.attempt)
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Return the required empty final scan."""
+
+            assert status is None
+            assert offset == 0
+            assert limit == 100
+            return CoderWorkspacePage(items=(), count=0)
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    monkeypatch.setattr(coder_service.time, "sleep", lambda _seconds: None)
+    assert (
+        delete_all_workspaces(
+            "https://coder.example.test",
+            PASSWORD,
+            timeout_seconds=5,
+            poll_interval_seconds=0.001,
+        )
+        == ()
+    )
+    assert attempts == 2
+    assert closes == [1, 2]
+
+
+def test_delete_all_workspaces_rejects_count_change_during_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed when the workspace inventory changes between pages."""
+
+    workspace_id = uuid4()
+
+    class StubClient:
+        """Return contradictory totals for one paginated snapshot."""
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the fake client."""
+
+        def authenticate_prepared_admin(self, _password: SecretStr) -> None:
+            """Accept prepared credentials."""
+
+        def close(self) -> None:
+            """Close the fake client."""
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Change the total count on the second page."""
+
+            assert status is None
+            assert limit == 1
+            if offset == 0:
+                return CoderWorkspacePage(
+                    items=(
+                        CoderWorkspace(
+                            id=workspace_id,
+                            status="stopped",
+                            latest_build_id=uuid4(),
+                            latest_build_transition="stop",
+                        ),
+                    ),
+                    count=2,
+                )
+            return CoderWorkspacePage(items=(), count=1)
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    monkeypatch.setattr(coder_service, "WORKSPACE_PAGE_SIZE", 1)
+    with pytest.raises(CoderRequestError, match="count changed"):
+        delete_all_workspaces(
+            "https://coder.example.test",
+            PASSWORD,
+            timeout_seconds=5,
             poll_interval_seconds=0.001,
         )
 
