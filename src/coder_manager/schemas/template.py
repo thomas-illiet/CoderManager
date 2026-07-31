@@ -28,7 +28,6 @@ SourcePath = Annotated[str, StringConstraints(strip_whitespace=True, min_length=
 BranchName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ModuleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
 ModuleList = list[ModuleName]
-PositiveInteger = Annotated[int, Field(gt=0)]
 CODER_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 SCP_GIT_URL_PATTERN = re.compile(
     r"^(?P<user>[A-Za-z0-9._-]+)@(?P<host>[A-Za-z0-9.-]+):(?P<path>[^\s]+)$"
@@ -48,12 +47,6 @@ class TemplateMutableFields(BaseModel):
     source_path: SourcePath = "."
     branch: BranchName
     modules: ModuleList
-    min_cpu_count: PositiveInteger
-    max_cpu_count: PositiveInteger
-    min_ram_gb: PositiveInteger
-    max_ram_gb: PositiveInteger
-    min_disk_gb: PositiveInteger
-    max_disk_gb: PositiveInteger
 
     @field_validator("git_url")
     @classmethod
@@ -134,21 +127,6 @@ class TemplateMutableFields(BaseModel):
             raise ValueError(msg)
         return value
 
-    @model_validator(mode="after")
-    def validate_resource_ranges(self) -> Self:
-        """Require coherent inclusive resource ranges."""
-
-        ranges = (
-            ("cpu", self.min_cpu_count, self.max_cpu_count),
-            ("ram", self.min_ram_gb, self.max_ram_gb),
-            ("disk", self.min_disk_gb, self.max_disk_gb),
-        )
-        for resource, minimum, maximum in ranges:
-            if minimum > maximum:
-                msg = f"min_{resource} must be less than or equal to max_{resource}"
-                raise ValueError(msg)
-        return self
-
 
 class TemplateCreate(TemplateMutableFields):
     """Payload accepted when creating a Coder template."""
@@ -200,12 +178,7 @@ class TemplateRead(BaseModel):
     source_path: str
     branch: str
     modules: list[str]
-    min_cpu_count: int
-    max_cpu_count: int
-    min_ram_gb: int
-    max_ram_gb: int
-    min_disk_gb: int
-    max_disk_gb: int
+    system_parameter_revision: int
     created_at: datetime
     updated_at: datetime
 

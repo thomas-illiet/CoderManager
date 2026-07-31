@@ -10,7 +10,7 @@ from pydantic import SecretStr
 from sqlalchemy import or_, select
 
 from coder_manager.config import get_settings
-from coder_manager.crypto import InstancePasswordCipher
+from coder_manager.crypto import InstancePasswordCipher, TemplateParameterCipher
 from coder_manager.domains.coder import CoderClient
 from coder_manager.domains.template_source import TemplateArchive, fetch_branch_archive
 from coder_manager.models import (
@@ -19,6 +19,8 @@ from coder_manager.models import (
     Template,
     TemplateDeployment,
     TemplateDeploymentStatus,
+    TemplateParameterScope,
+    TemplateParameterType,
     TemplateScope,
 )
 
@@ -41,6 +43,7 @@ class TemplateSourceSnapshot:
     git_url: str
     source_path: str
     branch: str
+    system_parameter_revision: int
 
 
 class TemplateTargetSyncError(Exception):
@@ -65,6 +68,7 @@ def template_source_snapshot(
             git_url=template.git_url,
             source_path=template.source_path,
             branch=template.branch,
+            system_parameter_revision=template.system_parameter_revision,
         )
 
 
@@ -130,8 +134,9 @@ def _prepare_deployment(
     template_id: UUID,
     instance_id: UUID,
     commit: str,
+    system_parameter_revision: int,
     session_factory: sessionmaker[Session],
-) -> tuple[bool, str, SecretStr, UUID | None]:
+) -> tuple[bool, str, SecretStr, UUID | None, tuple[tuple[str, str], ...]]:
     """Mark one target running and return its current remote version if reusable."""
 
     with session_factory() as session:
@@ -164,20 +169,65 @@ def _prepare_deployment(
         if (
             deployment.status is TemplateDeploymentStatus.SUCCESS
             and deployment.applied_commit == commit
+            and deployment.applied_system_parameter_revision == system_parameter_revision
         ):
-            return True, instance.instance_url, SecretStr(""), None
+            return True, instance.instance_url, SecretStr(""), None, ()
 
-        if deployment.target_commit != commit:
+        if (
+            deployment.target_commit != commit
+            or deployment.target_system_parameter_revision != system_parameter_revision
+        ):
             deployment.coder_template_version_id = None
         deployment.target_commit = commit
+        deployment.target_system_parameter_revision = system_parameter_revision
         deployment.status = TemplateDeploymentStatus.RUNNING
         reusable_version_id = deployment.coder_template_version_id
-        password = InstancePasswordCipher(get_settings().crypto_key).decrypt(
+        settings = get_settings()
+        password = InstancePasswordCipher(settings.crypto_key).decrypt(
             instance.password_enc,
             instance.id,
         )
+        system_values = _system_parameter_values(
+            template,
+            instance.environment.value,
+            TemplateParameterCipher(settings.crypto_key),
+        )
         session.commit()
-        return False, instance.instance_url, password, reusable_version_id
+        return (
+            False,
+            instance.instance_url,
+            password,
+            reusable_version_id,
+            system_values,
+        )
+
+
+def _system_parameter_values(
+    template: Template,
+    environment: str,
+    cipher: TemplateParameterCipher,
+) -> tuple[tuple[str, str], ...]:
+    """Resolve and decrypt the concrete system values for one instance."""
+
+    resolved: list[tuple[str, str]] = []
+    for parameter in sorted(template.parameters, key=lambda item: item.name):
+        if parameter.type is not TemplateParameterType.SYSTEM:
+            continue
+        target = "global" if parameter.scope is TemplateParameterScope.GLOBAL else environment
+        value = next(
+            (item for item in parameter.system_values if item.target.value == target),
+            None,
+        )
+        if value is None:
+            msg = "Template system parameter value is missing"
+            raise TemplateTargetSyncError(msg)
+        resolved.append(
+            (
+                parameter.name,
+                cipher.decrypt(value.value_enc, parameter.id, target),
+            )
+        )
+    return tuple(resolved)
 
 
 def _store_remote_ids(  # noqa: PLR0913
@@ -212,10 +262,11 @@ def _store_remote_ids(  # noqa: PLR0913
         session.commit()
 
 
-def _finish_deployment(
+def _finish_deployment(  # noqa: PLR0913
     template_id: UUID,
     instance_id: UUID,
     commit: str,
+    system_parameter_revision: int,
     *,
     success: bool,
     session_factory: sessionmaker[Session],
@@ -238,6 +289,7 @@ def _finish_deployment(
         )
         if success:
             deployment.applied_commit = commit
+            deployment.applied_system_parameter_revision = system_parameter_revision
         session.commit()
 
 
@@ -251,17 +303,24 @@ def sync_template_target(
 ) -> bool:
     """Synchronize one branch HEAD to one instance, returning whether work ran."""
 
-    already_applied, instance_url, password, reusable_version_id = _prepare_deployment(
+    (
+        already_applied,
+        instance_url,
+        password,
+        reusable_version_id,
+        system_values,
+    ) = _prepare_deployment(
         snapshot.id,
         instance_id,
         archive.commit,
+        snapshot.system_parameter_revision,
         session_factory,
     )
     if already_applied:
         return False
 
     settings = get_settings()
-    version_name = f"git-{archive.commit}"
+    version_name = f"git-{archive.commit}-p{snapshot.system_parameter_revision}"
     try:
         with CoderClient(instance_url) as client:
             client.authenticate_prepared_admin(password)
@@ -295,6 +354,7 @@ def sync_template_target(
                     file_id=file_id,
                     version_name=version_name,
                     template_id=coder_template_id,
+                    user_variable_values=system_values,
                 )
                 _store_remote_ids(
                     snapshot.id,
@@ -333,6 +393,7 @@ def sync_template_target(
             snapshot.id,
             instance_id,
             archive.commit,
+            snapshot.system_parameter_revision,
             success=False,
             session_factory=session_factory,
         )
@@ -342,6 +403,7 @@ def sync_template_target(
         snapshot.id,
         instance_id,
         archive.commit,
+        snapshot.system_parameter_revision,
         success=True,
         session_factory=session_factory,
     )

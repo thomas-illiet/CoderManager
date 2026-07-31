@@ -254,6 +254,103 @@ class CoderClient:
             raise CoderRequestError(msg)
         return CoderWorkspacePage(items=tuple(workspaces), count=count)
 
+    def workspace(self, workspace_id: UUID) -> CoderWorkspace | None:
+        """Return one remote workspace by ID, treating absence as convergence."""
+
+        path = f"api/v2/workspaces/{workspace_id}"
+        response = self._client.get(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        return self._workspace(response, path)
+
+    def workspace_by_owner_and_name(
+        self,
+        username: str,
+        name: str,
+    ) -> CoderWorkspace | None:
+        """Find one workspace by its owner and stable name."""
+
+        path = f"api/v2/users/{quote(username, safe='')}/workspace/{quote(name, safe='')}"
+        response = self._client.get(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        return self._workspace(response, path)
+
+    def create_workspace(
+        self,
+        username: str,
+        *,
+        name: str,
+        template_id: UUID,
+        rich_parameter_values: tuple[tuple[str, str], ...],
+    ) -> CoderWorkspace:
+        """Create one user workspace from a remote template."""
+
+        path = f"api/v2/users/{quote(username, safe='')}/workspaces"
+        response = self._client.post(
+            path,
+            json={
+                "name": name,
+                "template_id": str(template_id),
+                "rich_parameter_values": [
+                    {"name": parameter_name, "value": value}
+                    for parameter_name, value in rich_parameter_values
+                ],
+            },
+        )
+        self._raise_for_response(response, "POST", path, httpx.codes.CREATED)
+        return self._workspace(response, path)
+
+    def update_workspace_name(self, workspace_id: UUID, name: str) -> None:
+        """Replace one remote workspace's mutable name."""
+
+        path = f"api/v2/workspaces/{workspace_id}"
+        response = self._client.patch(path, json={"name": name})
+        self._raise_for_response(response, "PATCH", path, httpx.codes.NO_CONTENT)
+
+    def create_workspace_start_build(
+        self,
+        workspace_id: UUID,
+        rich_parameter_values: tuple[tuple[str, str], ...],
+    ) -> CoderWorkspaceBuild:
+        """Start one workspace using the supplied rich parameter snapshot."""
+
+        path = f"api/v2/workspaces/{workspace_id}/builds"
+        response = self._client.post(
+            path,
+            json={
+                "transition": "start",
+                "rich_parameter_values": [
+                    {"name": parameter_name, "value": value}
+                    for parameter_name, value in rich_parameter_values
+                ],
+            },
+        )
+        self._raise_for_response(response, "POST", path, httpx.codes.CREATED)
+        return self._workspace_build(response, path)
+
+    def workspace_build_parameters(self, build_id: UUID) -> tuple[tuple[str, str], ...]:
+        """Return one build's validated rich parameter snapshot."""
+
+        path = f"api/v2/workspacebuilds/{build_id}/parameters"
+        response = self._client.get(path)
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        payload = self._json_array(response, path)
+        values: list[tuple[str, str]] = []
+        for item in payload:
+            name = item.get("name")
+            value = item.get("value")
+            if not isinstance(name, str) or not name or not isinstance(value, str):
+                msg = f"Coder {path} returned invalid build parameters"
+                raise CoderRequestError(msg)
+            values.append((name, value))
+        if len({name for name, _value in values}) != len(values):
+            msg = f"Coder {path} returned duplicate build parameters"
+            raise CoderRequestError(msg)
+        return tuple(sorted(values))
+
     def create_workspace_stop_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
         """Queue a stop build for one remote workspace."""
 
@@ -349,6 +446,7 @@ class CoderClient:
         file_id: UUID,
         version_name: str,
         template_id: UUID | None,
+        user_variable_values: tuple[tuple[str, str], ...] = (),
     ) -> CoderTemplateVersion:
         """Create one Terraform version from an uploaded archive."""
 
@@ -360,7 +458,9 @@ class CoderClient:
             "provisioner": "terraform",
             "storage_method": "file",
             "tags": {},
-            "user_variable_values": [],
+            "user_variable_values": [
+                {"name": name, "value": value} for name, value in user_variable_values
+            ],
         }
         if template_id is not None:
             body["template_id"] = str(template_id)
@@ -522,4 +622,37 @@ class CoderClient:
             id=cls._uuid_field(payload, "id", path),
             status=status,
             transition=transition,
+        )
+
+    @classmethod
+    def _workspace(
+        cls,
+        response: httpx.Response,
+        path: str,
+    ) -> CoderWorkspace:
+        """Decode the workspace identity and latest build required by workers."""
+
+        payload = cls._json_object(response, path)
+        name = payload.get("name")
+        latest_build = payload.get("latest_build")
+        if not isinstance(name, str) or not name or not isinstance(latest_build, dict):
+            msg = f"Coder {path} returned an invalid workspace"
+            raise CoderRequestError(msg)
+        status = latest_build.get("status")
+        transition = latest_build.get("transition")
+        if (
+            not isinstance(status, str)
+            or status not in WORKSPACE_STATUSES
+            or not isinstance(transition, str)
+            or transition not in WORKSPACE_TRANSITIONS
+        ):
+            msg = f"Coder {path} returned an invalid latest build"
+            raise CoderRequestError(msg)
+        return CoderWorkspace(
+            id=cls._uuid_field(payload, "id", path),
+            status=status,
+            latest_build_id=cls._uuid_field(latest_build, "id", path),
+            latest_build_transition=transition,
+            name=name,
+            template_id=cls._uuid_field(payload, "template_id", path),
         )

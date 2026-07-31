@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from coder_manager.models.job_execution import JobExecution
     from coder_manager.models.template_deployment import TemplateDeployment
     from coder_manager.models.template_image import TemplateImage
+    from coder_manager.models.template_parameter import TemplateParameter
     from coder_manager.models.workspace import Workspace
 
 
@@ -70,12 +71,11 @@ class Template(Base):
     source_path: Mapped[str] = mapped_column(String(1024), nullable=False, default=".")
     branch: Mapped[str] = mapped_column(String(255), nullable=False)
     modules: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    min_cpu_count: Mapped[int] = mapped_column(nullable=False)
-    max_cpu_count: Mapped[int] = mapped_column(nullable=False)
-    min_ram_gb: Mapped[int] = mapped_column(nullable=False)
-    max_ram_gb: Mapped[int] = mapped_column(nullable=False)
-    min_disk_gb: Mapped[int] = mapped_column(nullable=False)
-    max_disk_gb: Mapped[int] = mapped_column(nullable=False)
+    system_parameter_revision: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     action: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
@@ -123,6 +123,11 @@ class Template(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    parameters: Mapped[list["TemplateParameter"]] = relationship(
+        back_populates="template",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     job: Mapped["JobExecution | None"] = relationship(foreign_keys=[job_id])
 
     __table_args__ = (
@@ -133,15 +138,10 @@ class Template(Base):
         CheckConstraint("length(trim(source_path)) > 0", name="source_path_not_empty"),
         CheckConstraint("length(trim(branch)) > 0", name="branch_not_empty"),
         CheckConstraint("length(trim(action)) > 0", name="action_not_empty"),
-        CheckConstraint("min_cpu_count > 0", name="min_cpu_count_positive"),
-        CheckConstraint("max_cpu_count > 0", name="max_cpu_count_positive"),
-        CheckConstraint("min_cpu_count <= max_cpu_count", name="cpu_range_valid"),
-        CheckConstraint("min_ram_gb > 0", name="min_ram_gb_positive"),
-        CheckConstraint("max_ram_gb > 0", name="max_ram_gb_positive"),
-        CheckConstraint("min_ram_gb <= max_ram_gb", name="ram_range_valid"),
-        CheckConstraint("min_disk_gb > 0", name="min_disk_gb_positive"),
-        CheckConstraint("max_disk_gb > 0", name="max_disk_gb_positive"),
-        CheckConstraint("min_disk_gb <= max_disk_gb", name="disk_range_valid"),
+        CheckConstraint(
+            "system_parameter_revision >= 0",
+            name="system_parameter_revision_non_negative",
+        ),
         CheckConstraint(
             "(scope = 'global' AND application IS NULL) OR "
             "(scope = 'application' AND application IS NOT NULL)",

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     job_stale_after_seconds: int = Field(default=300, ge=1)
     template_sync_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
     template_sync_timeout_seconds: int = Field(default=1800, ge=1)
+    workspace_build_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
+    workspace_build_timeout_seconds: int = Field(default=1800, ge=1)
     workspace_stop_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
     workspace_stop_timeout_seconds: int = Field(default=1800, ge=1)
     workspace_delete_poll_interval_seconds: float = Field(default=2.0, ge=0.1)

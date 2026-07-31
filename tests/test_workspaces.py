@@ -11,7 +11,8 @@ from coder_manager.models import (
     Instance,
     InstanceStatus,
     MemberStatus,
-    Template,
+    TemplateDeployment,
+    TemplateDeploymentStatus,
     Workspace,
     WorkspaceStatus,
 )
@@ -31,15 +32,6 @@ from coder_manager.schemas import (
     WorkspaceListQuery,
     WorkspaceUpdate,
 )
-
-LIMITS = {
-    "min_cpu_count": 1,
-    "max_cpu_count": 8,
-    "min_ram_gb": 2,
-    "max_ram_gb": 32,
-    "min_disk_gb": 10,
-    "max_disk_gb": 100,
-}
 
 
 async def create_instance(
@@ -132,7 +124,6 @@ async def create_template(
             "source_path": ".",
             "branch": "main",
             "modules": modules or ["code-server", "git-config"],
-            **LIMITS,
         },
     )
     assert response.status_code == 201, response.text
@@ -167,6 +158,20 @@ async def create_ready_context(
     member = await create_member(client, session_maker, instance["id"])
     template = await create_template(client)
     image = await create_image(client, template["id"])
+    async with session_maker() as session:
+        session.add(
+            TemplateDeployment(
+                template_id=UUID(str(template["id"])),
+                instance_id=UUID(str(instance["id"])),
+                coder_template_id=uuid4(),
+                target_commit="a" * 40,
+                applied_commit="a" * 40,
+                target_system_parameter_revision=0,
+                applied_system_parameter_revision=0,
+                status=TemplateDeploymentStatus.SUCCESS,
+            )
+        )
+        await session.commit()
     return instance, member, template, image
 
 
@@ -186,9 +191,7 @@ def workspace_payload(
         "member_id": member["id"],
         "image_id": image["id"],
         "modules": ["code-server"],
-        "cpu": 2,
-        "ram": 8,
-        "disk": 20,
+        "parameters": {},
     }
     payload.update(overrides)
     return payload
@@ -294,7 +297,7 @@ async def test_workspace_crud_filters_and_image_change(
     created = created_response.json()["resource"]
     assert created["action"] == "creating"
     assert created["status"] == "pending"
-    assert created["disk"] == 20
+    assert created["parameters"] == {}
 
     fetched = await client.get(f"/api/v1/workspaces/{created['id']}")
     filtered = await client.get(
@@ -314,7 +317,12 @@ async def test_workspace_crud_filters_and_image_change(
 
     blocked = await client.put(
         f"/api/v1/workspaces/{created['id']}",
-        json={"name": "development", "image_id": image["id"], "modules": [], "cpu": 2, "ram": 8},
+        json={
+            "name": "development",
+            "image_id": image["id"],
+            "modules": [],
+            "parameters": {},
+        },
     )
     assert blocked.status_code == 409
     await set_workspace_status(session_maker, created["id"])
@@ -326,8 +334,7 @@ async def test_workspace_crud_filters_and_image_change(
             "name": ready["name"],
             "image_id": ready["image_id"],
             "modules": ready["modules"],
-            "cpu": ready["cpu"],
-            "ram": ready["ram"],
+            "parameters": ready["parameters"],
         },
     )
     assert no_op.status_code == 200
@@ -339,14 +346,13 @@ async def test_workspace_crud_filters_and_image_change(
             "name": "development-updated",
             "image_id": second_image["id"],
             "modules": [],
-            "cpu": 4,
-            "ram": 16,
+            "parameters": {},
         },
     )
     assert updated.status_code == 202
     updated_resource = updated.json()["resource"]
     assert updated_resource["image_id"] == second_image["id"]
-    assert updated_resource["disk"] == 20
+    assert updated_resource["parameters"] == {}
     assert updated_resource["action"] == "updating"
 
     await set_workspace_status(
@@ -361,8 +367,7 @@ async def test_workspace_crud_filters_and_image_change(
             "name": "development-updated",
             "image_id": second_image["id"],
             "modules": [],
-            "cpu": 4,
-            "ram": 16,
+            "parameters": {},
         },
     )
     assert retried.status_code == 202
@@ -403,67 +408,51 @@ async def test_failed_parent_instance_blocks_workspace_creation(
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    "legacy_field",
     [
-        {"cpu": 0},
-        {"cpu": 9},
-        {"ram": 1},
-        {"ram": 33},
-        {"disk": 9},
-        {"disk": 101},
-        {"modules": ["unknown"]},
+        "cpu",
+        "ram",
+        "disk",
     ],
 )
-async def test_workspace_creation_rejects_out_of_tolerance_configuration(
+async def test_workspace_creation_rejects_removed_resource_fields(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
-    overrides: dict[str, object],
+    legacy_field: str,
 ) -> None:
-    """Verify the workspace creation rejects out of tolerance configuration scenario."""
+    """Reject the removed workspace resource fields through the strict schema."""
 
     instance, member, template, image = await create_ready_context(client, session_maker)
+    payload = workspace_payload(instance, member, template, image)
+    payload[legacy_field] = 2
     response = await client.post(
         "/api/v1/workspaces",
-        json=workspace_payload(instance, member, template, image, **overrides),
+        json=payload,
     )
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize(
-    ("cpu", "ram", "disk"),
-    [(1, 2, 10), (8, 32, 100)],
-)
-async def test_workspace_creation_accepts_inclusive_boundaries(
+async def test_workspace_creation_rejects_unknown_module(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
-    cpu: int,
-    ram: int,
-    disk: int,
 ) -> None:
-    """Verify the workspace creation accepts inclusive boundaries scenario."""
+    """Keep module compatibility validation after removing resource bounds."""
 
     instance, member, template, image = await create_ready_context(client, session_maker)
     response = await client.post(
         "/api/v1/workspaces",
-        json=workspace_payload(
-            instance,
-            member,
-            template,
-            image,
-            name=f"workspace-{cpu}",
-            cpu=cpu,
-            ram=ram,
-            disk=disk,
-        ),
+        json=workspace_payload(instance, member, template, image, modules=["unknown"]),
     )
-    assert response.status_code == 201
+    assert response.status_code == 422
 
 
-async def test_workspace_update_revalidates_cpu_ram_and_stored_disk(
+@pytest.mark.parametrize("legacy_field", ["cpu", "ram", "disk"])
+async def test_workspace_update_rejects_removed_resource_fields(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
+    legacy_field: str,
 ) -> None:
-    """Verify the workspace update revalidates cpu ram and stored disk scenario."""
+    """Reject legacy resource fields without changing the workspace."""
 
     instance, member, template, image = await create_ready_context(client, session_maker)
     created = (
@@ -474,39 +463,180 @@ async def test_workspace_update_revalidates_cpu_ram_and_stored_disk(
     await set_workspace_status(session_maker, created["id"])
     original = (await client.get(f"/api/v1/workspaces/{created['id']}")).json()
 
-    for cpu, ram in ((9, 8), (2, 33)):
-        rejected = await client.put(
-            f"/api/v1/workspaces/{created['id']}",
-            json={
-                "name": "must-not-change",
-                "image_id": image["id"],
-                "modules": [],
-                "cpu": cpu,
-                "ram": ram,
-            },
-        )
-        assert rejected.status_code == 422
-        unchanged = (await client.get(f"/api/v1/workspaces/{created['id']}")).json()
-        assert unchanged == original
-
-    async with session_maker() as session:
-        stored_template = await session.get(Template, UUID(str(template["id"])))
-        assert stored_template is not None
-        stored_template.max_disk_gb = 19
-        await session.commit()
-
-    rejected_disk = await client.put(
+    payload: dict[str, object] = {
+        "name": "must-not-change",
+        "image_id": image["id"],
+        "modules": [],
+        "parameters": {},
+    }
+    payload[legacy_field] = 2
+    rejected = await client.put(
         f"/api/v1/workspaces/{created['id']}",
+        json=payload,
+    )
+    assert rejected.status_code == 422
+    assert (await client.get(f"/api/v1/workspaces/{created['id']}")).json() == original
+
+
+async def test_workspace_user_parameter_defaults_immutability_and_history(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Resolve defaults, fence immutable values, and preserve deleted snapshots."""
+
+    instance, member, template, image = await create_ready_context(client, session_maker)
+    parameter_url = f"/api/v1/templates/{template['id']}/parameters"
+    project = await client.post(
+        parameter_url,
         json={
-            "name": "must-not-change",
-            "image_id": image["id"],
-            "modules": [],
-            "cpu": 2,
-            "ram": 8,
+            "type": "user",
+            "name": "project_name",
+            "display_name": "Project name",
+            "required": True,
+            "mutable": False,
+            "default_value": "demo",
         },
     )
-    assert rejected_disk.status_code == 422
-    assert (await client.get(f"/api/v1/workspaces/{created['id']}")).json() == original
+    region = await client.post(
+        parameter_url,
+        json={
+            "type": "user",
+            "name": "region",
+            "display_name": "Region",
+            "required": False,
+            "mutable": True,
+            "default_value": "eu",
+        },
+    )
+    assert project.status_code == 201
+    assert region.status_code == 201
+
+    created_response = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(
+            instance,
+            member,
+            template,
+            image,
+            parameters={"project_name": "alpha"},
+        ),
+    )
+    assert created_response.status_code == 201, created_response.text
+    created = created_response.json()["resource"]
+    assert created["parameters"] == {"project_name": "alpha", "region": "eu"}
+    await set_workspace_status(session_maker, created["id"])
+
+    immutable = await client.put(
+        f"/api/v1/workspaces/{created['id']}",
+        json={
+            "name": created["name"],
+            "image_id": image["id"],
+            "modules": [],
+            "parameters": {"project_name": "beta", "region": "eu"},
+        },
+    )
+    unknown = await client.put(
+        f"/api/v1/workspaces/{created['id']}",
+        json={
+            "name": created["name"],
+            "image_id": image["id"],
+            "modules": [],
+            "parameters": {
+                "project_name": "alpha",
+                "region": "eu",
+                "unknown": "value",
+            },
+        },
+    )
+    assert immutable.status_code == 409
+    assert unknown.status_code == 422
+
+    mutable = await client.put(
+        f"/api/v1/workspaces/{created['id']}",
+        json={
+            "name": created["name"],
+            "image_id": image["id"],
+            "modules": [],
+            "parameters": {"project_name": "alpha", "region": "us"},
+        },
+    )
+    assert mutable.status_code == 202, mutable.text
+    assert mutable.json()["resource"]["parameters"] == {
+        "project_name": "alpha",
+        "region": "us",
+    }
+    await set_workspace_status(
+        session_maker,
+        created["id"],
+        expected_action="updating",
+    )
+
+    deleted = await client.delete(f"{parameter_url}/{project.json()['id']}")
+    assert deleted.status_code == 204
+    historical = await client.put(
+        f"/api/v1/workspaces/{created['id']}",
+        json={
+            "name": created["name"],
+            "image_id": image["id"],
+            "modules": [],
+            "parameters": {"project_name": "alpha", "region": "apac"},
+        },
+    )
+    assert historical.status_code == 202, historical.text
+    assert historical.json()["resource"]["parameters"] == {
+        "project_name": "alpha",
+        "region": "apac",
+    }
+
+
+async def test_workspace_required_parameter_and_name_contract(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Reject missing required values and names outside Coder's contract."""
+
+    instance, member, template, image = await create_ready_context(client, session_maker)
+    parameter = await client.post(
+        f"/api/v1/templates/{template['id']}/parameters",
+        json={
+            "type": "user",
+            "name": "project_name",
+            "display_name": "Project name",
+            "required": True,
+            "mutable": True,
+            "default_value": None,
+        },
+    )
+    assert parameter.status_code == 201
+    missing = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(instance, member, template, image),
+    )
+    invalid_character = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(
+            instance,
+            member,
+            template,
+            image,
+            name="invalid_name",
+            parameters={"project_name": "demo"},
+        ),
+    )
+    too_long = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(
+            instance,
+            member,
+            template,
+            image,
+            name="a" * 33,
+            parameters={"project_name": "demo"},
+        ),
+    )
+    assert missing.status_code == 422
+    assert invalid_character.status_code == 422
+    assert too_long.status_code == 422
 
 
 async def test_workspace_relationship_validation_and_name_uniqueness(
@@ -551,9 +681,8 @@ async def test_workspace_relationship_validation_and_name_uniqueness(
             "name": "development",
             "image_id": image["id"],
             "modules": [],
-            "cpu": 2,
-            "ram": 8,
-            "disk": 30,
+            "parameters": {},
+            "instance_id": instance["id"],
         },
     )
     assert immutable.status_code == 422
@@ -589,7 +718,7 @@ async def test_instance_and_workspace_processing_blocks_mutations_but_not_reads(
     )
     blocked_update = await client.put(
         f"/api/v1/workspaces/{created['id']}",
-        json={"name": "new", "image_id": image["id"], "modules": [], "cpu": 2, "ram": 8},
+        json={"name": "new", "image_id": image["id"], "modules": [], "parameters": {}},
     )
     blocked_delete = await client.delete(f"/api/v1/workspaces/{created['id']}")
     assert {blocked_create.status_code, blocked_update.status_code, blocked_delete.status_code} == {
@@ -628,7 +757,6 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
             "source_path": template["source_path"],
             "branch": template["branch"],
             "modules": ["git-config"],
-            **LIMITS,
         },
     )
     assert incompatible.status_code == 409
@@ -641,7 +769,6 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
             "source_path": template["source_path"],
             "branch": "release/v2",
             "modules": template["modules"],
-            **LIMITS,
         },
     )
     assert compatible.status_code == 200
@@ -761,8 +888,7 @@ async def test_workspace_updated_at_changes_on_real_update(
             "name": "updated",
             "image_id": image["id"],
             "modules": [],
-            "cpu": 2,
-            "ram": 8,
+            "parameters": {},
         },
     )
     assert updated.status_code == 202
@@ -803,7 +929,6 @@ async def test_repositories_exercise_direct_successful_lifecycle(
                 source_path=".",
                 branch="main",
                 modules=["code-server", "git-config"],
-                **LIMITS,
             ),
         )
         assert unchanged_template.updated_at == previous_updated_at
@@ -849,12 +974,11 @@ async def test_repositories_exercise_direct_successful_lifecycle(
                 name="repository-updated",
                 image_id=UUID(str(image["id"])),
                 modules=[],
-                cpu=3,
-                ram=12,
+                parameters={},
             ),
         )
         assert changed is True
-        assert updated.disk == 20
+        assert updated.parameters == {}
         await repository.update_action(
             workspace_id,
             expected_action="updating",

@@ -9,6 +9,7 @@ from coder_manager.api.routes import (
     jobs,
     members,
     template_images,
+    template_parameters,
     templates,
     workspaces,
 )
@@ -21,4 +22,5 @@ api_router.include_router(jobs.router)
 api_router.include_router(members.router)
 api_router.include_router(templates.router)
 api_router.include_router(template_images.router)
+api_router.include_router(template_parameters.router)
 api_router.include_router(workspaces.router)

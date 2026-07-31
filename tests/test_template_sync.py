@@ -1,8 +1,10 @@
 """Template synchronization job, targeting, retry, and bootstrap tests."""
 
+# ruff: noqa: SLF001
+
 from importlib import import_module
 from typing import Self
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -51,6 +53,45 @@ def configure_worker(
     )
 
 
+def test_template_sync_helpers_reject_missing_local_resources(
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Fail safely when source, target, deployment, or instance rows disappeared."""
+
+    sync_helpers = import_module("coder_manager.tasks.template._sync")
+    missing_template = uuid4()
+    missing_instance = uuid4()
+    with pytest.raises(sync_helpers.TemplateTargetSyncError, match="Template is missing"):
+        sync_helpers.template_source_snapshot(missing_template, sync_session_maker)
+    with pytest.raises(sync_helpers.TemplateTargetSyncError, match="Template is missing"):
+        sync_helpers.ready_instance_ids(missing_template, sync_session_maker)
+    with pytest.raises(sync_helpers.TemplateTargetSyncError, match="Instance is missing"):
+        sync_helpers.compatible_template_ids(missing_instance, sync_session_maker)
+    with pytest.raises(sync_helpers.TemplateTargetSyncError, match="target is missing"):
+        sync_helpers._prepare_deployment(
+            missing_template,
+            missing_instance,
+            "a" * 40,
+            0,
+            sync_session_maker,
+        )
+    with pytest.raises(sync_helpers.TemplateTargetSyncError, match="deployment is missing"):
+        sync_helpers._store_remote_ids(
+            missing_template,
+            missing_instance,
+            organization_id=uuid4(),
+            session_factory=sync_session_maker,
+        )
+    sync_helpers._finish_deployment(
+        missing_template,
+        missing_instance,
+        "a" * 40,
+        0,
+        success=True,
+        session_factory=sync_session_maker,
+    )
+
+
 async def queued_template_job(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
@@ -64,7 +105,40 @@ async def queued_template_job(
         template = await session.get(Template, UUID(str(template_id)))
         assert template is not None
         assert template.job_id is not None
-        return template.job_id
+    return template.job_id
+
+
+async def test_template_sync_rejects_instance_without_admin_password(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+) -> None:
+    """Stop before Coder calls when the target has no initialized administrator."""
+
+    instance = await create_instance(client, "NO PASSWORD")
+    instance_id = UUID(str(instance["id"]))
+    await set_instance_status(session_maker, instance_id)
+    template = await create_template(client)
+    snapshot = TemplateSourceSnapshot(
+        id=UUID(str(template["id"])),
+        display_name="Python",
+        name="python",
+        git_url="https://git.example.com/template.git",
+        source_path=".",
+        branch="main",
+        system_parameter_revision=0,
+    )
+    sync_helpers = import_module("coder_manager.tasks.template._sync")
+    with pytest.raises(
+        sync_helpers.TemplateTargetSyncError,
+        match="password is not initialized",
+    ):
+        sync_template_target(
+            snapshot,
+            TemplateArchive(commit="a" * 40, content=b"ustar"),
+            instance_id,
+            sync_session_maker,
+        )
 
 
 async def test_template_sync_targets_scope_and_retries_partial_failure(
@@ -158,6 +232,8 @@ async def test_applied_commit_skips_all_remote_calls(
                 instance_id=instance_id,
                 target_commit=commit,
                 applied_commit=commit,
+                target_system_parameter_revision=0,
+                applied_system_parameter_revision=0,
                 status=TemplateDeploymentStatus.SUCCESS,
             )
         )
@@ -176,6 +252,7 @@ async def test_applied_commit_skips_all_remote_calls(
         git_url="git@git.example.com:templates/python.git",
         source_path=".",
         branch="main",
+        system_parameter_revision=0,
     )
     assert (
         sync_template_target(
@@ -201,6 +278,21 @@ async def test_target_sync_creates_first_remote_template(  # noqa: C901
     await set_instance_status(session_maker, instance_id)
     template = await create_template(client)
     template_id = UUID(str(template["id"]))
+    parameter = await client.post(
+        f"/api/v1/templates/{template_id}/parameters",
+        json={
+            "type": "system",
+            "name": "registry_url",
+            "display_name": "Registry URL",
+            "scope": "environment",
+            "values": {
+                "development": "registry.dev.example.com",
+                "staging": "registry.stg.example.com",
+                "production": "registry.example.com",
+            },
+        },
+    )
+    assert parameter.status_code == 201
     async with session_maker() as session:
         stored_instance = await session.get(Instance, instance_id)
         assert stored_instance is not None
@@ -260,13 +352,15 @@ async def test_target_sync_creates_first_remote_template(  # noqa: C901
             file_id: UUID,
             version_name: str,
             template_id: UUID | None,
+            user_variable_values: tuple[tuple[str, str], ...] = (),
         ) -> CoderTemplateVersion:
             """Create the pending native Coder template version."""
 
             assert selected_organization == organization_id
             assert file_id == UUID("40000000-0000-0000-0000-000000000004")
-            assert version_name == f"git-{'d' * 40}"
+            assert version_name == f"git-{'d' * 40}-p1"
             assert template_id is None
+            assert user_variable_values == (("registry_url", "registry.dev.example.com"),)
             calls.append("create-version")
             return CoderTemplateVersion(
                 expected_version_id,
@@ -330,6 +424,7 @@ async def test_target_sync_creates_first_remote_template(  # noqa: C901
             git_url="git@git.example.com:templates/python.git",
             source_path=".",
             branch="main",
+            system_parameter_revision=1,
         ),
         TemplateArchive(commit="d" * 40, content=b"ustar"),
         instance_id,

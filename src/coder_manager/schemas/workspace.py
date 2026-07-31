@@ -9,10 +9,15 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_vali
 from coder_manager.models import WorkspaceStatus
 
 WorkspaceName = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,31})$",
+    ),
 ]
 ModuleName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)]
-PositiveInteger = Annotated[int, Field(gt=0)]
 
 
 class WorkspaceMutableFields(BaseModel):
@@ -23,8 +28,7 @@ class WorkspaceMutableFields(BaseModel):
     name: WorkspaceName
     image_id: UUID
     modules: list[ModuleName]
-    cpu: PositiveInteger
-    ram: PositiveInteger
+    parameters: dict[str, str]
 
     @field_validator("modules")
     @classmethod
@@ -43,7 +47,6 @@ class WorkspaceCreate(WorkspaceMutableFields):
     instance_id: UUID
     template_id: UUID
     member_id: UUID
-    disk: PositiveInteger
 
 
 class WorkspaceUpdate(WorkspaceMutableFields):
@@ -62,9 +65,7 @@ class WorkspaceRead(BaseModel):
     member_id: UUID
     image_id: UUID
     modules: list[str]
-    cpu: int
-    ram: int
-    disk: int
+    parameters: dict[str, str]
     action: str
     status: WorkspaceStatus
     job_id: UUID | None = None

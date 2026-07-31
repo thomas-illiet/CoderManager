@@ -1,11 +1,12 @@
 """Durable Celery step and recovery tests."""
 
-# ruff: noqa: EM101, PLR0913, PLR0915, S105, SLF001, TRY003
+# ruff: noqa: C901, EM101, PLR0913, PLR0915, S105, SLF001, TRY003
 
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
+from typing import Self
 from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
@@ -26,6 +27,7 @@ from coder_manager.crypto import (
     PasswordCipher,
 )
 from coder_manager.domains import argocd, coder, postgresql
+from coder_manager.domains.coder import CoderWorkspace, CoderWorkspaceBuild
 from coder_manager.models import (
     Database,
     DatabaseAllocation,
@@ -1875,9 +1877,157 @@ async def test_workspace_steps_and_database_sync_are_durable(
 
     configure_worker(monkeypatch, sync_session_maker)
     instance, member, template, image = await create_ready_context(client, session_maker)
+    instance_id = UUID(str(instance["id"]))
+    parameter = await client.post(
+        f"/api/v1/templates/{template['id']}/parameters",
+        json={
+            "type": "user",
+            "name": "project_name",
+            "display_name": "Project",
+            "required": True,
+            "mutable": True,
+        },
+    )
+    assert parameter.status_code == 201
+    async with session_maker() as session:
+        stored_instance = await session.get(Instance, instance_id)
+        assert stored_instance is not None
+        stored_instance.password_enc = InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY)).encrypt(
+            SecretStr("password"), instance_id
+        )
+        await session.commit()
+
+    class FakeWorkspaceClient:
+        """Provide one stateful remote workspace for the durable workflow."""
+
+        remote: CoderWorkspace | None = None
+        parameters: tuple[tuple[str, str], ...] = ()
+
+        def __init__(self, _instance_url: str) -> None:
+            """Initialize the in-memory remote client."""
+
+        def __enter__(self) -> Self:
+            """Enter the fake client context."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Leave the fake client context."""
+
+        def authenticate_prepared_admin(self, password: SecretStr) -> None:
+            """Validate the decrypted administrator password."""
+
+            assert password.get_secret_value() == "password"
+
+        def workspace(self, workspace_id: UUID) -> CoderWorkspace | None:
+            """Return the persisted remote workspace by ID."""
+
+            if self.remote is not None and self.remote.id == workspace_id:
+                return self.remote
+            return None
+
+        def workspace_by_owner_and_name(
+            self,
+            _username: str,
+            name: str,
+        ) -> CoderWorkspace | None:
+            """Return a remote workspace by its current name."""
+
+            if self.remote is not None and self.remote.name == name:
+                return self.remote
+            return None
+
+        def create_workspace(
+            self,
+            _username: str,
+            *,
+            name: str,
+            template_id: UUID,
+            rich_parameter_values: tuple[tuple[str, str], ...],
+        ) -> CoderWorkspace:
+            """Create a running remote workspace."""
+
+            assert rich_parameter_values == (("project_name", "one"),)
+            self.__class__.parameters = rich_parameter_values
+            self.__class__.remote = CoderWorkspace(
+                id=uuid4(),
+                status="running",
+                latest_build_id=uuid4(),
+                name=name,
+                template_id=template_id,
+            )
+            return self.__class__.remote
+
+        def workspace_build_parameters(
+            self,
+            _build_id: UUID,
+        ) -> tuple[tuple[str, str], ...]:
+            """Return the empty parameter set used by this scenario."""
+
+            return self.parameters
+
+        def create_workspace_start_build(
+            self,
+            workspace_id: UUID,
+            parameters: tuple[tuple[str, str], ...],
+        ) -> CoderWorkspaceBuild:
+            """Create an immediately running start build."""
+
+            build = CoderWorkspaceBuild(uuid4(), "running", "start")
+            assert self.remote is not None
+            self.__class__.parameters = parameters
+            self.__class__.remote = CoderWorkspace(
+                id=workspace_id,
+                status="running",
+                latest_build_id=build.id,
+                name=self.remote.name,
+                template_id=self.remote.template_id,
+            )
+            return build
+
+        def update_workspace_name(self, workspace_id: UUID, name: str) -> None:
+            """Rename the in-memory remote workspace."""
+
+            assert self.remote is not None
+            self.__class__.remote = CoderWorkspace(
+                id=workspace_id,
+                status=self.remote.status,
+                latest_build_id=self.remote.latest_build_id,
+                name=name,
+                template_id=self.remote.template_id,
+            )
+
+        def create_workspace_delete_build(
+            self,
+            workspace_id: UUID,
+        ) -> CoderWorkspaceBuild:
+            """Create an immediately deleted build."""
+
+            assert self.remote is not None
+            assert self.remote.id == workspace_id
+            return CoderWorkspaceBuild(uuid4(), "deleted", "delete")
+
+    for module_name in (
+        "coder_manager.tasks.workspace.create.step_01_create_workspace",
+        "coder_manager.tasks.workspace.update.step_01_update_workspace",
+        "coder_manager.tasks.workspace.delete.step_01_delete_workspace",
+    ):
+        monkeypatch.setattr(import_module(module_name), "CoderClient", FakeWorkspaceClient)
+    monkeypatch.setattr(
+        import_module("coder_manager.tasks.workspace._remote"),
+        "get_settings",
+        lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
+
     created = await client.post(
         "/api/v1/workspaces",
-        json=workspace_payload(instance, member, template, image),
+        json=workspace_payload(
+            instance,
+            member,
+            template,
+            image,
+            parameters={"project_name": "one"},
+        ),
     )
     workspace = created.json()["resource"]
     create_job_id = UUID(created.json()["job"]["id"])
@@ -1889,8 +2039,7 @@ async def test_workspace_steps_and_database_sync_are_durable(
             "name": "updated",
             "image_id": image["id"],
             "modules": [],
-            "cpu": 2,
-            "ram": 8,
+            "parameters": {"project_name": "two"},
         },
     )
     update_job_id = UUID(updated.json()["job"]["id"])

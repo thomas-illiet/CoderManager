@@ -44,6 +44,14 @@ from coder_manager.repositories.template_images import (
     TemplateImageRepository,
     TemplateImageTemplateNotFoundError,
 )
+from coder_manager.repositories.template_parameters import (
+    TemplateParameterAlreadyExistsError,
+    TemplateParameterImmutableFieldError,
+    TemplateParameterNotFoundError,
+    TemplateParameterRepository,
+    TemplateParameterSyncInProgressError,
+    TemplateParameterTemplateNotFoundError,
+)
 from coder_manager.repositories.templates import (
     TemplateAlreadyExistsError,
     TemplateHasWorkspacesError,
@@ -65,7 +73,9 @@ from coder_manager.repositories.workspaces import (
     WorkspaceMemberNotFoundError,
     WorkspaceMemberUnavailableError,
     WorkspaceNotFoundError,
+    WorkspaceParameterImmutableError,
     WorkspaceRepository,
+    WorkspaceTemplateNotDeployedError,
     WorkspaceTemplateNotFoundError,
     WorkspaceTemplateUnavailableError,
 )
@@ -106,6 +116,12 @@ __all__ = [
     "TemplateImageRepository",
     "TemplateImageTemplateNotFoundError",
     "TemplateNotFoundError",
+    "TemplateParameterAlreadyExistsError",
+    "TemplateParameterImmutableFieldError",
+    "TemplateParameterNotFoundError",
+    "TemplateParameterRepository",
+    "TemplateParameterSyncInProgressError",
+    "TemplateParameterTemplateNotFoundError",
     "TemplateRepository",
     "TemplateSyncInProgressError",
     "TemplateWorkspaceCompatibilityError",
@@ -120,7 +136,9 @@ __all__ = [
     "WorkspaceMemberNotFoundError",
     "WorkspaceMemberUnavailableError",
     "WorkspaceNotFoundError",
+    "WorkspaceParameterImmutableError",
     "WorkspaceRepository",
+    "WorkspaceTemplateNotDeployedError",
     "WorkspaceTemplateNotFoundError",
     "WorkspaceTemplateUnavailableError",
     "add_job_execution",

@@ -28,6 +28,8 @@ class CoderWorkspace:
     status: str
     latest_build_id: UUID
     latest_build_transition: str = "start"
+    name: str = ""
+    template_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

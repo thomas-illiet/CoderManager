@@ -141,6 +141,10 @@ class TemplateRepository:
             TemplateDeployment.status == TemplateDeploymentStatus.SUCCESS,
             TemplateDeployment.applied_commit.is_not(None),
             TemplateDeployment.target_commit == TemplateDeployment.applied_commit,
+            TemplateDeployment.target_system_parameter_revision
+            == TemplateDeployment.applied_system_parameter_revision,
+            TemplateDeployment.applied_system_parameter_revision
+            == Template.system_parameter_revision,
         )
         outdated_deployment = and_(
             Instance.id.is_not(None),
@@ -150,6 +154,12 @@ class TemplateRepository:
                 TemplateDeployment.target_commit.is_(None),
                 TemplateDeployment.applied_commit.is_(None),
                 TemplateDeployment.target_commit != TemplateDeployment.applied_commit,
+                TemplateDeployment.target_system_parameter_revision.is_(None),
+                TemplateDeployment.applied_system_parameter_revision.is_(None),
+                TemplateDeployment.target_system_parameter_revision
+                != TemplateDeployment.applied_system_parameter_revision,
+                TemplateDeployment.applied_system_parameter_revision
+                != Template.system_parameter_revision,
             ),
         )
         missing_deployment = and_(
@@ -215,12 +225,6 @@ class TemplateRepository:
             source_path=payload.source_path,
             branch=payload.branch,
             modules=list(payload.modules),
-            min_cpu_count=payload.min_cpu_count,
-            max_cpu_count=payload.max_cpu_count,
-            min_ram_gb=payload.min_ram_gb,
-            max_ram_gb=payload.max_ram_gb,
-            min_disk_gb=payload.min_disk_gb,
-            max_disk_gb=payload.max_disk_gb,
         )
         self._session.add(template)
         try:
@@ -252,29 +256,18 @@ class TemplateRepository:
             or template.source_path != payload.source_path
             or template.branch != payload.branch
             or template.modules != payload.modules
-            or template.min_cpu_count != payload.min_cpu_count
-            or template.max_cpu_count != payload.max_cpu_count
-            or template.min_ram_gb != payload.min_ram_gb
-            or template.max_ram_gb != payload.max_ram_gb
-            or template.min_disk_gb != payload.min_disk_gb
-            or template.max_disk_gb != payload.max_disk_gb
         )
         if not changed:
             await self._session.commit()
             return template
 
-        # Reject ranges or modules that would invalidate an existing workspace.
+        # Reject module changes that would invalidate an existing workspace.
         workspaces = await self._session.scalars(
             select(Workspace).where(Workspace.template_id == template.id)
         )
         allowed_modules = set(payload.modules)
         for workspace in workspaces:
-            resources_valid = (
-                payload.min_cpu_count <= workspace.cpu <= payload.max_cpu_count
-                and payload.min_ram_gb <= workspace.ram <= payload.max_ram_gb
-                and payload.min_disk_gb <= workspace.disk <= payload.max_disk_gb
-            )
-            if not resources_valid or not set(workspace.modules).issubset(allowed_modules):
+            if not set(workspace.modules).issubset(allowed_modules):
                 await self._session.rollback()
                 raise TemplateWorkspaceCompatibilityError
 
@@ -284,12 +277,6 @@ class TemplateRepository:
         template.source_path = payload.source_path
         template.branch = payload.branch
         template.modules = list(payload.modules)
-        template.min_cpu_count = payload.min_cpu_count
-        template.max_cpu_count = payload.max_cpu_count
-        template.min_ram_gb = payload.min_ram_gb
-        template.max_ram_gb = payload.max_ram_gb
-        template.min_disk_gb = payload.min_disk_gb
-        template.max_disk_gb = payload.max_disk_gb
         await self._discard_current_job(template)
         template.action = "updated"
         template.sync_status = TemplateSyncStatus.SUCCESS

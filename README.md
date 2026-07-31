@@ -23,10 +23,9 @@ The API is then available at <http://localhost:8000>, with interactive documenta
 <http://localhost:8000/docs>. The migration container applies pending migrations before the API,
 worker, and Beat scheduler start.
 
-The instance state migration is intentionally incompatible with existing instance rows. Before
-upgrading to this version, delete every instance through the API and verify that the `instances`
-table is empty. The migration aborts when any row remains; it does not backfill state, purge local
-data, or enqueue reconciliation.
+This release replaces the complete Alembic history with one fresh-install baseline. It has no
+upgrade, backfill, reconciliation, or supported `alembic stamp` path for an existing database.
+Destroy and recreate PostgreSQL before deploying this version.
 
 To run Python tooling directly on the host:
 
@@ -84,6 +83,11 @@ All endpoints are under `/api/v1`:
 | `GET` | `/templates/{id}/images/{image_id}` | Get one allowed Docker image |
 | `POST` | `/templates/{id}/images` | Allow an immutable Docker image |
 | `DELETE` | `/templates/{id}/images/{image_id}` | Remove an unused Docker image |
+| `GET` | `/templates/{id}/parameters?page=1&page_size=20` | List redacted template parameters |
+| `GET` | `/templates/{id}/parameters/{parameter_id}` | Get one redacted template parameter |
+| `POST` | `/templates/{id}/parameters` | Create a user or system parameter |
+| `PUT` | `/templates/{id}/parameters/{parameter_id}` | Replace a parameter definition |
+| `DELETE` | `/templates/{id}/parameters/{parameter_id}` | Delete a parameter definition |
 | `GET` | `/workspaces?page=1&page_size=20` | Paginated and filtered workspace list |
 | `GET` | `/workspaces/{id}` | Get one workspace |
 | `POST` | `/workspaces` | Request workspace creation |
@@ -246,8 +250,7 @@ UUID. `GET /api/v1/instances/{id}/admin` returns the static username and email w
 password whenever `password_enc` is present; it does not depend on `job_executions`. A bootstrap job
 skips the remote bootstrap when the instance already has a stored password. Failed or running
 bootstrap attempts leave the password unset and unavailable. The response uses
-`Cache-Control: no-store`. This is a breaking migration: existing instances are not reconciled or
-bootstrapped automatically.
+`Cache-Control: no-store`.
 
 `POST /api/v1/instances/{id}/provider` is a create-only `multipart/form-data` upload whose required
 file field is named `kubeconfig`. Coder Manager does not validate the filename, media type, size,
@@ -260,10 +263,6 @@ without exposing file or ciphertext material.
 `application/octet-stream` attachment named `kubeconfig`. Successful and error responses use
 `Cache-Control: no-store`; missing instances or providers return 404, while unavailable encryption
 or an unauthenticatable envelope returns a redacted 503.
-
-The provider upload schema is a breaking change. Its migration deletes all legacy provider rows
-containing `host`, `namespace`, `ca`, and `token_enc` without changing instance state or scheduling
-reconciliation. Those instances must upload a new kubeconfig explicitly.
 
 The API generates an immutable, globally unique, 12-character lowercase alphanumeric slug for each
 new instance and exposes it as `slug`. The immutable HTTPS URL combines that slug with the
@@ -330,13 +329,7 @@ Creation payload:
   "git_url": "git@git.example.com:coder/python-template.git",
   "source_path": "templates/python",
   "branch": "main",
-  "modules": ["code-server", "git-config"],
-  "min_cpu_count": 1,
-  "max_cpu_count": 8,
-  "min_ram_gb": 2,
-  "max_ram_gb": 32,
-  "min_disk_gb": 10,
-  "max_disk_gb": 100
+  "modules": ["code-server", "git-config"]
 }
 ```
 
@@ -351,13 +344,7 @@ returns an empty list:
   "application": null,
   "git_url": "https://git.example.com/coder/managed-desktop.git",
   "source_path": ".",
-  "branch": "main",
-  "min_cpu_count": 2,
-  "max_cpu_count": 4,
-  "min_ram_gb": 4,
-  "max_ram_gb": 16,
-  "min_disk_gb": 20,
-  "max_disk_gb": 80
+  "branch": "main"
 }
 ```
 
@@ -367,24 +354,81 @@ are normalized like instance identifiers and are not checked against an internal
 inside Coder. Git URLs accept HTTPS, `ssh://`, or
 SCP-style SSH syntax. `source_path` is repository-relative and defaults to `.`, while `branch`
 targets one exact `refs/heads/...` branch. On creation, modules default to an empty list; when
-present, they must be ordered without duplicates. CPU counts, RAM GB, and disk GB are positive
-integers with inclusive minimum and maximum bounds. PUT replaces these limits together with
-`display_name`, `git_url`, `source_path`, `branch`, and `modules`; scope, application, and `name`
-remain immutable. A change that would invalidate
-an existing workspace returns HTTP 409. `GET /templates/{id}/modules` returns the module array
-directly.
+present, they must be ordered without duplicates. PUT replaces `display_name`, `git_url`,
+`source_path`, `branch`, and `modules`; scope, application, and `name` remain immutable. Only module
+compatibility is checked against existing workspaces. The removed CPU, RAM, and disk fields are
+rejected with HTTP 422. `GET /templates/{id}/modules` returns the module array directly.
+
+### Template parameters
+
+Parameters use an immutable lowercase snake_case `name`, an immutable `type`, mutable display
+metadata, and timestamps. Names are unique within a template. A user parameter defines the values
+accepted from workspace clients:
+
+```json
+{
+  "type": "user",
+  "name": "project_name",
+  "display_name": "Project name",
+  "description": "Name used by the workspace",
+  "required": true,
+  "mutable": false,
+  "default_value": null
+}
+```
+
+A global system parameter has one write-only value:
+
+```json
+{
+  "type": "system",
+  "name": "registry_token",
+  "display_name": "Registry token",
+  "description": "",
+  "scope": "global",
+  "value": "write-only-secret"
+}
+```
+
+An environment-scoped system parameter requires exactly one value for every supported environment,
+without fallback:
+
+```json
+{
+  "type": "system",
+  "name": "registry_url",
+  "display_name": "Registry URL",
+  "description": "",
+  "scope": "environment",
+  "values": {
+    "development": "registry.dev.example.com",
+    "staging": "registry.stg.example.com",
+    "production": "registry.example.com"
+  }
+}
+```
+
+System values are encrypted with AES-256-GCM using the parameter UUID and concrete target as
+associated data. Reads expose only `value_configured` or the three `values_configured` flags.
+Omitting `value` or `values` on PUT retains the existing encrypted values; changing only display
+metadata does not advance the system parameter revision. `type`, `name`, and system `scope` cannot
+be changed. Parameter mutations are rejected while that template is synchronizing.
 
 `POST /templates/{id}/sync` returns an empty HTTP 202 response after committing a durable
 fire-and-forget job. The worker fetches the current branch HEAD once and synchronizes it to every
 ready compatible instance. Global templates target all ready instances; application templates
-target only matching normalized application identifiers. CoderManager stores only the current
+target only matching normalized application identifiers. System parameters are resolved for each
+instance environment and sent to Coder as `user_variable_values`. The version name is
+`git-<commit>-p<system_parameter_revision>`. A system value change immediately makes existing
+deployments outdated, but synchronization remains manual. CoderManager stores only the current
 per-instance deployment state and exposes no local template-version history.
 
 `GET /templates/statistics` returns one object per template with `updated`, `outdated`, and
-`missing` ready-server counts. `updated` means the durable deployment state is successful and its
-applied commit matches its non-null target commit. Any other existing deployment is `outdated`,
-while a compatible ready instance without a deployment is `missing`. The endpoint reads only the
-local database and does not contact Git or Coder.
+`missing` ready-server counts. `updated` means the durable deployment state is successful and both
+its applied commit and applied system parameter revision match their targets and the current
+template revision. Any other existing deployment is `outdated`, while a compatible ready instance
+without a deployment is `missing`. The endpoint reads only the local database and does not contact
+Git or Coder.
 
 The worker image contains Git and OpenSSH. Mount the SSH identity read-only for `appuser`. SSH uses
 batch mode, disables host-key verification and `known_hosts`, uses identity-only authentication,
@@ -427,23 +471,37 @@ application-scoped template, and an image allowed by that template:
   "member_id": "043a736a-1bfd-431f-9382-1402c91a6b02",
   "image_id": "d7555af5-d499-4368-9f39-d6e0bfdaf69c",
   "modules": ["code-server"],
-  "cpu": 2,
-  "ram": 8,
-  "disk": 20
+  "parameters": {
+    "project_name": "demo"
+  }
 }
 ```
 
-CPU, RAM, and disk are checked inclusively against the template limits during creation. PUT accepts
-only `name`, `image_id`, `modules`, `cpu`, and `ram`; instance, template, owner, and disk are
-immutable. Every PUT revalidates the complete candidate configuration, including the stored disk,
-inside the same transaction as the update. Modules must be unique and selected from the template;
-an empty module list is valid. An image change is limited to another image from the same template.
+Workspace names follow Coder's contract: at most 32 alphanumeric or hyphen characters. PUT accepts
+only `name`, `image_id`, `modules`, and `parameters`; instance, template, and owner remain immutable.
+The removed `cpu`, `ram`, and `disk` fields are rejected with HTTP 422. Modules must be unique and
+selected from the template; an empty module list is valid. An image change is limited to another
+image from the same template.
+
+User parameter defaults are resolved into the visible workspace snapshot. Unknown names and
+missing required values are rejected. A `mutable: false` value can be assigned once but cannot
+later change. Deleting a parameter definition preserves existing workspace snapshots for history,
+while future Coder builds receive only parameters still defined on the template.
 
 Creation starts in `creating/pending`; accepted updates and deletions return HTTP 202 and move to
 `updating/pending` or `deleting/pending`. Reads remain available during processing. Instance-owned
 mutations require a successful parent instance; workspaces in `error` can still be updated or
 deleted after their parent is successful. The list supports `instance_id`, `template_id`,
 `member_id`, `image_id`, `status`, and case-insensitive literal `name` filters.
+
+The worker creates the remote workspace for the member username with `rich_parameter_values`,
+adopts matching retries, and uses any known remote template even when the local deployment is
+outdated. Creation returns HTTP 409 only when no remote template identifier is known. Renames are
+propagated to Coder. A mutable parameter change starts and waits for a `start` build even when the
+workspace was stopped. Deletion starts and waits for a `delete` build before deleting the local
+row. Persisted remote workspace/build UUIDs and desired/applied revisions make retries idempotent.
+`CODER_MANAGER_WORKSPACE_BUILD_POLL_INTERVAL_SECONDS` controls polling (2 seconds by default), and
+`CODER_MANAGER_WORKSPACE_BUILD_TIMEOUT_SECONDS` bounds each build (1800 seconds by default).
 
 ## Celery
 
@@ -477,9 +535,11 @@ The result is committed only when the instance job, action, and status still mat
 taken before the remote request. This scanner performs no remote mutation and creates no
 `JobExecution`.
 
-The initial Alembic baseline creates job rows and lifecycle columns directly. Deploy schema changes
-with the same image as the API, worker, and Beat so every process uses the matching task registry
-and database contract.
+The single Alembic baseline creates the complete current schema directly and has
+`down_revision = None`. Its downgrade removes the complete schema. It is intentionally fresh-only:
+an existing PostgreSQL database must be destroyed and recreated, and `alembic stamp` is not a
+supported deployment procedure. Deploy the schema with the same image as the API, worker, and Beat
+so every process uses the matching task registry and database contract.
 
 FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`. Celery tasks use a
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection

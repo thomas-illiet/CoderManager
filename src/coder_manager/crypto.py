@@ -31,6 +31,10 @@ class InstancePasswordDecryptionError(Exception):
     """Raised when an encrypted instance administrator password cannot be authenticated."""
 
 
+class TemplateParameterDecryptionError(Exception):
+    """Raised when an encrypted template parameter cannot be authenticated."""
+
+
 class PasswordCipher:
     """Encrypt and decrypt database passwords with a versioned AES-GCM envelope."""
 
@@ -187,3 +191,57 @@ class InstancePasswordCipher:
             return SecretStr(plaintext.decode())
         except UnicodeDecodeError as error:
             raise InstancePasswordDecryptionError from error
+
+
+class TemplateParameterCipher:
+    """Encrypt system template parameters with target-bound AES-GCM envelopes."""
+
+    def __init__(self, encoded_key: SecretStr | None) -> None:
+        """Initialize the cipher from a validated base64-encoded AES-256 key."""
+
+        if encoded_key is None:
+            raise CryptoConfigurationError
+        try:
+            key = b64decode(encoded_key.get_secret_value(), validate=True)
+        except (Base64Error, ValueError) as error:
+            raise CryptoConfigurationError from error
+        if len(key) != KEY_LENGTH:
+            raise CryptoConfigurationError
+        self._cipher = AESGCM(key)
+
+    @staticmethod
+    def _associated_data(parameter_id: UUID, target: str) -> bytes:
+        """Bind an encrypted value to its parameter and concrete target."""
+
+        return b"coder-manager:template-parameter:" + parameter_id.bytes + b":" + target.encode()
+
+    def encrypt(self, value: str, parameter_id: UUID, target: str) -> bytes:
+        """Return a versioned authenticated envelope for one system value."""
+
+        nonce = urandom(NONCE_LENGTH)
+        ciphertext = self._cipher.encrypt(
+            nonce,
+            value.encode(),
+            self._associated_data(parameter_id, target),
+        )
+        return bytes((ENVELOPE_VERSION,)) + nonce + ciphertext
+
+    def decrypt(self, envelope: bytes, parameter_id: UUID, target: str) -> str:
+        """Authenticate and decrypt one system value."""
+
+        if len(envelope) <= 1 + NONCE_LENGTH or envelope[0] != ENVELOPE_VERSION:
+            raise TemplateParameterDecryptionError
+        nonce = envelope[1 : 1 + NONCE_LENGTH]
+        ciphertext = envelope[1 + NONCE_LENGTH :]
+        try:
+            plaintext = self._cipher.decrypt(
+                nonce,
+                ciphertext,
+                self._associated_data(parameter_id, target),
+            )
+        except (InvalidTag, ValueError) as error:
+            raise TemplateParameterDecryptionError from error
+        try:
+            return plaintext.decode()
+        except UnicodeDecodeError as error:
+            raise TemplateParameterDecryptionError from error

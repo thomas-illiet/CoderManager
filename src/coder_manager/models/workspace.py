@@ -39,7 +39,7 @@ class Workspace(Base):
     __tablename__ = "workspaces"
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(32), nullable=False)
     instance_id: Mapped[UUID] = mapped_column(
         ForeignKey("instances.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -53,9 +53,20 @@ class Workspace(Base):
         ForeignKey("template_images.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     modules: Mapped[list[str]] = mapped_column(JSON, nullable=False)
-    cpu: Mapped[int] = mapped_column(nullable=False)
-    ram: Mapped[int] = mapped_column(nullable=False)
-    disk: Mapped[int] = mapped_column(nullable=False)
+    parameters: Mapped[dict[str, str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    parameters_revision: Mapped[int] = mapped_column(
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    applied_parameters_revision: Mapped[int | None] = mapped_column(nullable=True)
+    coder_workspace_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    coder_workspace_build_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     action: Mapped[str] = mapped_column(
         String(255), nullable=False, default="creating", server_default="creating"
     )
@@ -84,9 +95,12 @@ class Workspace(Base):
 
     __table_args__ = (
         CheckConstraint("length(trim(name)) > 0", name="name_not_empty"),
+        CheckConstraint("length(name) <= 32", name="name_length"),
         CheckConstraint("length(trim(action)) > 0", name="action_not_empty"),
-        CheckConstraint("cpu > 0", name="cpu_positive"),
-        CheckConstraint("ram > 0", name="ram_positive"),
-        CheckConstraint("disk > 0", name="disk_positive"),
+        CheckConstraint("parameters_revision >= 0", name="parameters_revision_non_negative"),
+        CheckConstraint(
+            "applied_parameters_revision IS NULL OR applied_parameters_revision >= 0",
+            name="applied_parameters_revision_non_negative",
+        ),
         Index("uq_workspaces_instance_name_ci", instance_id, func.lower(name), unique=True),
     )

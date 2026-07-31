@@ -15,7 +15,10 @@ from coder_manager.models import (
     Member,
     MemberStatus,
     Template,
+    TemplateDeployment,
     TemplateImage,
+    TemplateParameter,
+    TemplateParameterType,
     TemplateScope,
     Workspace,
     WorkspaceStatus,
@@ -81,7 +84,15 @@ class WorkspaceImageUnavailableError(Exception):
 
 
 class WorkspaceConfigurationError(Exception):
-    """Raised when modules or resources violate the template contract."""
+    """Raised when modules or parameters violate the template contract."""
+
+
+class WorkspaceParameterImmutableError(Exception):
+    """Raised when an existing immutable user parameter would change."""
+
+
+class WorkspaceTemplateNotDeployedError(Exception):
+    """Raised when no remote Coder template is known for the target instance."""
 
 
 class WorkspaceBusyError(Exception):
@@ -152,13 +163,13 @@ class WorkspaceRepository:
         await self._validate_template_scope(template, instance)
         await self._validate_owner(payload.member_id, instance.id)
         await self._validate_image(payload.image_id, template.id)
-        await self._validate_configuration(
-            template,
-            modules=payload.modules,
-            cpu=payload.cpu,
-            ram=payload.ram,
-            disk=payload.disk,
+        await self._validate_modules(template, payload.modules)
+        parameters = await self._resolve_parameters(
+            template.id,
+            payload.parameters,
+            previous=None,
         )
+        await self._require_remote_template(template.id, instance.id)
 
         # Persist the validated configuration as one pending lifecycle operation.
         workspace_id = uuid4()
@@ -170,9 +181,7 @@ class WorkspaceRepository:
             member_id=payload.member_id,
             image_id=payload.image_id,
             modules=list(payload.modules),
-            cpu=payload.cpu,
-            ram=payload.ram,
-            disk=payload.disk,
+            parameters=parameters,
             action="creating",
             status=WorkspaceStatus.PENDING,
             step=WORKSPACE_CREATE_STEP_01,
@@ -198,18 +207,17 @@ class WorkspaceRepository:
     async def update(self, workspace_id: UUID, payload: WorkspaceUpdate) -> tuple[Workspace, bool]:
         """Replace mutable fields after revalidating the complete configuration."""
 
-        # Revalidate parents and template limits under row locks before comparing fields.
+        # Revalidate parents and template configuration under row locks before comparing fields.
         workspace = await self._lock_workspace(workspace_id)
         await self._ensure_workspace_available(workspace)
         await self._lock_available_instance(workspace.instance_id)
         template = await self._lock_template(workspace.template_id)
         await self._validate_image(payload.image_id, template.id)
-        await self._validate_configuration(
-            template,
-            modules=payload.modules,
-            cpu=payload.cpu,
-            ram=payload.ram,
-            disk=workspace.disk,
+        await self._validate_modules(template, payload.modules)
+        parameters = await self._resolve_parameters(
+            template.id,
+            payload.parameters,
+            previous=workspace.parameters,
         )
 
         # Avoid scheduling a worker when the requested state already matches a success.
@@ -217,8 +225,7 @@ class WorkspaceRepository:
             workspace.name != payload.name
             or workspace.image_id != payload.image_id
             or workspace.modules != payload.modules
-            or workspace.cpu != payload.cpu
-            or workspace.ram != payload.ram
+            or workspace.parameters != parameters
         )
         if not changed and workspace.status is WorkspaceStatus.SUCCESS:
             await self._session.commit()
@@ -228,8 +235,9 @@ class WorkspaceRepository:
         workspace.name = payload.name
         workspace.image_id = payload.image_id
         workspace.modules = list(payload.modules)
-        workspace.cpu = payload.cpu
-        workspace.ram = payload.ram
+        if workspace.parameters != parameters:
+            workspace.parameters = parameters
+            workspace.parameters_revision += 1
         workspace.action = "updating"
         workspace.status = WorkspaceStatus.PENDING
         job = add_job_execution(
@@ -382,23 +390,78 @@ class WorkspaceRepository:
             await self._session.rollback()
             raise WorkspaceTemplateUnavailableError
 
-    async def _validate_configuration(
+    async def _validate_modules(
         self,
         template: Template,
-        *,
         modules: Sequence[str],
-        cpu: int,
-        ram: int,
-        disk: int,
     ) -> None:
-        """Ensure requested resources and modules remain within template limits."""
+        """Ensure requested modules remain allowed by the template."""
 
-        resources_valid = (
-            template.min_cpu_count <= cpu <= template.max_cpu_count
-            and template.min_ram_gb <= ram <= template.max_ram_gb
-            and template.min_disk_gb <= disk <= template.max_disk_gb
-        )
-        modules_valid = set(modules).issubset(set(template.modules))
-        if not resources_valid or not modules_valid:
+        if not set(modules).issubset(set(template.modules)):
             await self._session.rollback()
             raise WorkspaceConfigurationError
+
+    async def _resolve_parameters(
+        self,
+        template_id: UUID,
+        supplied: dict[str, str],
+        *,
+        previous: dict[str, str] | None,
+    ) -> dict[str, str]:
+        """Validate user values and preserve deleted historical snapshots."""
+
+        definitions = list(
+            await self._session.scalars(
+                select(TemplateParameter)
+                .where(
+                    TemplateParameter.template_id == template_id,
+                    TemplateParameter.type == TemplateParameterType.USER,
+                )
+                .order_by(TemplateParameter.name)
+                .with_for_update()
+            )
+        )
+        by_name = {parameter.name: parameter for parameter in definitions}
+        previous_values = previous or {}
+        for name, value in supplied.items():
+            if name not in by_name and (
+                name not in previous_values or previous_values[name] != value
+            ):
+                await self._session.rollback()
+                raise WorkspaceConfigurationError
+
+        resolved = {name: value for name, value in previous_values.items() if name not in by_name}
+        for name, parameter in by_name.items():
+            if name in supplied:
+                value = supplied[name]
+            elif parameter.default_value is not None:
+                value = parameter.default_value
+            elif parameter.required:
+                await self._session.rollback()
+                raise WorkspaceConfigurationError
+            else:
+                continue
+            if (
+                previous is not None
+                and parameter.mutable is False
+                and name in previous_values
+                and previous_values[name] != value
+            ):
+                await self._session.rollback()
+                raise WorkspaceParameterImmutableError
+            resolved[name] = value
+        return resolved
+
+    async def _require_remote_template(self, template_id: UUID, instance_id: UUID) -> None:
+        """Require any known remote template, even when its version is outdated."""
+
+        remote_template_id = await self._session.scalar(
+            select(TemplateDeployment.coder_template_id).where(
+                TemplateDeployment.template_id == template_id,
+                TemplateDeployment.instance_id == instance_id,
+                TemplateDeployment.coder_template_id.is_not(None),
+            )
+        )
+        if remote_template_id is None:
+            await self._session.rollback()
+            raise WorkspaceTemplateNotDeployedError

@@ -51,12 +51,6 @@ def template_create_payload() -> TemplateCreate:
         source_path=".",
         branch="main",
         modules=["code-server"],
-        min_cpu_count=1,
-        max_cpu_count=8,
-        min_ram_gb=2,
-        max_ram_gb=32,
-        min_disk_gb=10,
-        max_disk_gb=100,
     )
 
 
@@ -79,9 +73,7 @@ def workspace_create_payload() -> WorkspaceCreate:
         member_id=uuid4(),
         image_id=uuid4(),
         modules=[],
-        cpu=2,
-        ram=8,
-        disk=20,
+        parameters={},
     )
 
 
@@ -92,8 +84,7 @@ def workspace_update_payload() -> WorkspaceUpdate:
         name="development",
         image_id=uuid4(),
         modules=[],
-        cpu=2,
-        ram=8,
+        parameters={},
     )
 
 

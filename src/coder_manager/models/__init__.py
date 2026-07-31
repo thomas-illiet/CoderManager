@@ -17,6 +17,13 @@ from coder_manager.models.template_deployment import (
     TemplateDeploymentStatus,
 )
 from coder_manager.models.template_image import TemplateImage
+from coder_manager.models.template_parameter import (
+    TemplateParameter,
+    TemplateParameterScope,
+    TemplateParameterSystemValue,
+    TemplateParameterType,
+    TemplateParameterValueTarget,
+)
 from coder_manager.models.workspace import Workspace, WorkspaceStatus
 
 __all__ = [
@@ -37,6 +44,11 @@ __all__ = [
     "TemplateDeployment",
     "TemplateDeploymentStatus",
     "TemplateImage",
+    "TemplateParameter",
+    "TemplateParameterScope",
+    "TemplateParameterSystemValue",
+    "TemplateParameterType",
+    "TemplateParameterValueTarget",
     "TemplateScope",
     "TemplateSyncStatus",
     "Workspace",

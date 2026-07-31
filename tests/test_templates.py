@@ -22,15 +22,6 @@ from coder_manager.models import (
 from coder_manager.tasks import step_01_sync_template
 from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01_TASK
 
-RESOURCE_LIMITS = {
-    "min_cpu_count": 1,
-    "max_cpu_count": 8,
-    "min_ram_gb": 2,
-    "max_ram_gb": 32,
-    "min_disk_gb": 10,
-    "max_disk_gb": 100,
-}
-
 
 async def create_template(
     client: AsyncClient,
@@ -48,7 +39,6 @@ async def create_template(
         "source_path": ".",
         "branch": "main",
         "modules": ["code-server", "git-config"],
-        **RESOURCE_LIMITS,
     }
     payload.update(overrides)
     response = await client.post(
@@ -99,7 +89,6 @@ async def test_template_crud_and_modules_contract(client: AsyncClient) -> None:
             "source_path": "templates/python",
             "branch": "feature/new-template",
             "modules": ["jetbrains-gateway"],
-            **RESOURCE_LIMITS,
         },
     )
     assert updated.status_code == 200
@@ -132,7 +121,6 @@ async def test_template_creation_without_modules_defaults_to_empty_list(
         "git_url": "https://git.example.com/templates/managed-desktop.git",
         "source_path": ".",
         "branch": "main",
-        **RESOURCE_LIMITS,
     }
     response = await client.post("/api/v1/templates", json=payload)
 
@@ -218,6 +206,8 @@ async def test_template_statistics_classifies_compatible_ready_deployments(
                     instance_id=instance_ids["FIRST"],
                     target_commit=target_commit,
                     applied_commit=target_commit,
+                    target_system_parameter_revision=0,
+                    applied_system_parameter_revision=0,
                     status=TemplateDeploymentStatus.SUCCESS,
                 ),
                 TemplateDeployment(
@@ -256,6 +246,8 @@ async def test_template_statistics_classifies_compatible_ready_deployments(
                     instance_id=instance_ids["NO-READY"],
                     target_commit=target_commit,
                     applied_commit=target_commit,
+                    target_system_parameter_revision=0,
+                    applied_system_parameter_revision=0,
                     status=TemplateDeploymentStatus.SUCCESS,
                 ),
                 TemplateDeployment(
@@ -263,6 +255,8 @@ async def test_template_statistics_classifies_compatible_ready_deployments(
                     instance_id=instance_ids["DELETING"],
                     target_commit=target_commit,
                     applied_commit=target_commit,
+                    target_system_parameter_revision=0,
+                    applied_system_parameter_revision=0,
                     status=TemplateDeploymentStatus.SUCCESS,
                 ),
                 TemplateDeployment(
@@ -270,6 +264,8 @@ async def test_template_statistics_classifies_compatible_ready_deployments(
                     instance_id=instance_ids["FIRST"],
                     target_commit=target_commit,
                     applied_commit=target_commit,
+                    target_system_parameter_revision=0,
+                    applied_system_parameter_revision=0,
                     status=TemplateDeploymentStatus.SUCCESS,
                 ),
             ]
@@ -345,7 +341,6 @@ async def test_template_sync_is_fire_and_forget_and_locks_mutations(
             "source_path": created["source_path"],
             "branch": created["branch"],
             "modules": created["modules"],
-            **RESOURCE_LIMITS,
         },
     )
     blocked_delete = await client.delete(f"/api/v1/templates/{created['id']}")
@@ -418,7 +413,6 @@ async def test_identical_update_preserves_updated_at(client: AsyncClient) -> Non
             "source_path": created["source_path"],
             "branch": created["branch"],
             "modules": created["modules"],
-            **RESOURCE_LIMITS,
         },
     )
 
@@ -445,7 +439,6 @@ async def test_template_names_are_unique_case_insensitively_per_scope(
             "git_url": "https://git.example.com/duplicate.git",
             "branch": "main",
             "modules": ["module"],
-            **RESOURCE_LIMITS,
         },
     )
     assert duplicate_global.status_code == 409
@@ -466,7 +459,6 @@ async def test_template_names_are_unique_case_insensitively_per_scope(
             "git_url": "https://git.example.com/duplicate.git",
             "branch": "main",
             "modules": ["module"],
-            **RESOURCE_LIMITS,
         },
     )
     assert duplicate_application.status_code == 409
@@ -582,7 +574,6 @@ async def test_invalid_template_payloads_are_rejected(
         "git_url": "https://git.example.com/template.git",
         "branch": "main",
         "modules": ["module"],
-        **RESOURCE_LIMITS,
     }
     payload.update(overrides)
     response = await client.post("/api/v1/templates", json=payload)
@@ -612,7 +603,6 @@ async def test_external_application_is_normalized_and_update_scope_is_rejected(
             "source_path": created["source_path"],
             "branch": created["branch"],
             "modules": created["modules"],
-            **RESOURCE_LIMITS,
         },
     )
     assert immutable_scope.status_code == 422
@@ -626,7 +616,6 @@ async def test_external_application_is_normalized_and_update_scope_is_rejected(
             "source_path": created["source_path"],
             "branch": created["branch"],
             "modules": created["modules"],
-            **RESOURCE_LIMITS,
         },
     )
     assert immutable_name.status_code == 422
@@ -645,7 +634,6 @@ async def test_update_display_name_conflict_returns_409(client: AsyncClient) -> 
             "source_path": other["source_path"],
             "branch": other["branch"],
             "modules": other["modules"],
-            **RESOURCE_LIMITS,
         },
     )
     assert conflict.status_code == 409
@@ -660,7 +648,6 @@ async def test_missing_template_endpoints_return_404(client: AsyncClient) -> Non
         "git_url": "https://git.example.com/missing.git",
         "branch": "main",
         "modules": ["module"],
-        **RESOURCE_LIMITS,
     }
     responses = [
         await client.get(f"/api/v1/templates/{template_id}"),

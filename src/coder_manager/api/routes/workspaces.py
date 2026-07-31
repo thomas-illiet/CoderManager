@@ -3,7 +3,8 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
+from fastapi.openapi.models import Example
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.database import get_session
@@ -19,7 +20,9 @@ from coder_manager.repositories import (
     WorkspaceMemberNotFoundError,
     WorkspaceMemberUnavailableError,
     WorkspaceNotFoundError,
+    WorkspaceParameterImmutableError,
     WorkspaceRepository,
+    WorkspaceTemplateNotDeployedError,
     WorkspaceTemplateNotFoundError,
     WorkspaceTemplateUnavailableError,
 )
@@ -41,6 +44,20 @@ from coder_manager.tasks.common.registry import dispatch_registered_step
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
+WORKSPACE_CREATE_EXAMPLES: dict[str, Example] = {
+    "with_parameters": {
+        "summary": "Workspace with user template parameters",
+        "value": {
+            "name": "alice-development",
+            "instance_id": "c0d8d7a7-b54c-4f89-b344-06d28bd3f685",
+            "template_id": "7f4cfd54-456f-4195-894d-f709d147fa7c",
+            "member_id": "043a736a-1bfd-431f-9382-1402c91a6b02",
+            "image_id": "d7555af5-d499-4368-9f39-d6e0bfdaf69c",
+            "modules": ["code-server"],
+            "parameters": {"project_name": "demo"},
+        },
+    }
+}
 
 
 @router.get("", summary="List Coder workspaces")
@@ -72,8 +89,8 @@ async def get_workspace(workspace_id: UUID, session: SessionDependency) -> Works
 
 
 @router.post("", status_code=status.HTTP_201_CREATED, summary="Create a Coder workspace")
-async def create_workspace(
-    payload: WorkspaceCreate,
+async def create_workspace(  # noqa: C901
+    payload: Annotated[WorkspaceCreate, Body(openapi_examples=WORKSPACE_CREATE_EXAMPLES)],
     session: SessionDependency,
 ) -> JobResourceResponse[WorkspaceRead]:
     """Create a workspace after validating all parent and template contracts."""
@@ -95,6 +112,11 @@ async def create_workspace(
             status_code=status.HTTP_409_CONFLICT,
             detail="Workspace owner is not ready for this instance",
         ) from error
+    except WorkspaceTemplateNotDeployedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Template is not deployed to this instance",
+        ) from error
     except (
         WorkspaceTemplateUnavailableError,
         WorkspaceImageUnavailableError,
@@ -110,7 +132,7 @@ async def create_workspace(
 
 
 @router.put("/{workspace_id}", summary="Replace a workspace's mutable fields")
-async def update_workspace(
+async def update_workspace(  # noqa: C901
     workspace_id: UUID,
     payload: WorkspaceUpdate,
     session: SessionDependency,
@@ -134,6 +156,11 @@ async def update_workspace(
         raise _workspace_busy() from error
     except (WorkspaceImageUnavailableError, WorkspaceConfigurationError) as error:
         raise _invalid_configuration() from error
+    except WorkspaceParameterImmutableError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An immutable workspace parameter cannot be changed",
+        ) from error
     except WorkspaceAlreadyExistsError as error:
         raise _name_conflict() from error
     if changed:

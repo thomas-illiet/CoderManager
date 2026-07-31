@@ -210,6 +210,293 @@ def test_workspace_delete_http_contract_uses_unfiltered_non_orphan_build() -> No
     assert json.loads(requests[1].content) == {"transition": "delete"}
 
 
+def test_workspace_create_rename_and_start_http_contract() -> None:
+    """Send exact Coder workspace and rich-parameter payloads."""
+
+    workspace_id = uuid4()
+    template_id = uuid4()
+    initial_build_id = uuid4()
+    start_build_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return the response selected by the requested workspace operation."""
+
+        requests.append(request)
+        if request.method == "PATCH":
+            return httpx.Response(httpx.codes.NO_CONTENT)
+        if request.url.path.endswith("/parameters"):
+            return httpx.Response(
+                httpx.codes.OK,
+                json=[
+                    {"name": "region", "value": "eu"},
+                    {"name": "project_name", "value": "demo"},
+                ],
+            )
+        if request.url.path.endswith("/builds"):
+            return httpx.Response(
+                httpx.codes.CREATED,
+                json={
+                    "id": str(start_build_id),
+                    "status": "starting",
+                    "transition": "start",
+                },
+            )
+        return httpx.Response(
+            httpx.codes.CREATED,
+            json={
+                "id": str(workspace_id),
+                "name": "alice-development",
+                "template_id": str(template_id),
+                "latest_build": {
+                    "id": str(initial_build_id),
+                    "status": "pending",
+                    "transition": "start",
+                },
+            },
+        )
+
+    parameters = (("project_name", "demo"), ("region", "eu"))
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        workspace = client.create_workspace(
+            "alice",
+            name="alice-development",
+            template_id=template_id,
+            rich_parameter_values=parameters,
+        )
+        client.update_workspace_name(workspace.id, "alice-renamed")
+        build = client.create_workspace_start_build(workspace.id, parameters)
+        observed_parameters = client.workspace_build_parameters(build.id)
+
+    assert requests[0].url.path == "/api/v2/users/alice/workspaces"
+    assert json.loads(requests[0].content) == {
+        "name": "alice-development",
+        "template_id": str(template_id),
+        "rich_parameter_values": [
+            {"name": "project_name", "value": "demo"},
+            {"name": "region", "value": "eu"},
+        ],
+    }
+    assert requests[1].url.path == f"/api/v2/workspaces/{workspace_id}"
+    assert json.loads(requests[1].content) == {"name": "alice-renamed"}
+    assert requests[2].url.path == f"/api/v2/workspaces/{workspace_id}/builds"
+    assert json.loads(requests[2].content) == {
+        "transition": "start",
+        "rich_parameter_values": [
+            {"name": "project_name", "value": "demo"},
+            {"name": "region", "value": "eu"},
+        ],
+    }
+    assert observed_parameters == parameters
+
+
+def test_workspace_lookup_by_id_and_owner_handles_success_and_absence() -> None:
+    """Parse both singular workspace endpoints and treat verified 404 as absence."""
+
+    workspace_id = uuid4()
+    template_id = uuid4()
+    build_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return a workspace once for each endpoint and then report absence."""
+
+        requests.append(request)
+        if len(requests) > 2:
+            return httpx.Response(httpx.codes.NOT_FOUND)
+        return httpx.Response(
+            httpx.codes.OK,
+            json={
+                "id": str(workspace_id),
+                "name": "alice-development",
+                "template_id": str(template_id),
+                "latest_build": {
+                    "id": str(build_id),
+                    "status": "stopped",
+                    "transition": "stop",
+                },
+            },
+        )
+
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        by_id = client.workspace(workspace_id)
+        by_name = client.workspace_by_owner_and_name("alice@example.com", "development one")
+        missing_by_id = client.workspace(uuid4())
+        missing_by_name = client.workspace_by_owner_and_name("alice", "missing")
+
+    expected = CoderWorkspace(
+        id=workspace_id,
+        status="stopped",
+        latest_build_id=build_id,
+        latest_build_transition="stop",
+        name="alice-development",
+        template_id=template_id,
+    )
+    assert by_id == expected
+    assert by_name == expected
+    assert missing_by_id is None
+    assert missing_by_name is None
+    assert requests[1].url.raw_path == (
+        b"/api/v2/users/alice%40example.com/workspace/development%20one"
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"name": "", "value": "demo"}],
+        [{"name": "project", "value": 1}],
+        [
+            {"name": "project", "value": "one"},
+            {"name": "project", "value": "two"},
+        ],
+    ],
+)
+def test_workspace_build_parameters_reject_invalid_coder_payload(
+    payload: list[dict[str, object]],
+) -> None:
+    """Reject malformed and duplicate rich parameter snapshots."""
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(httpx.codes.OK, json=payload)
+            ),
+        ) as client,
+        pytest.raises(CoderRequestError, match="build parameters"),
+    ):
+        client.workspace_build_parameters(uuid4())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {
+            "id": "invalid",
+            "name": "workspace",
+            "template_id": str(uuid4()),
+            "latest_build": {
+                "id": str(uuid4()),
+                "status": "running",
+                "transition": "start",
+            },
+        },
+        {
+            "id": str(uuid4()),
+            "name": "workspace",
+            "template_id": str(uuid4()),
+            "latest_build": {
+                "id": str(uuid4()),
+                "status": "unknown",
+                "transition": "start",
+            },
+        },
+    ],
+)
+def test_singular_workspace_rejects_incomplete_coder_payload(
+    payload: dict[str, object],
+) -> None:
+    """Reject incomplete identity, UUID, and build state from singular reads."""
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(httpx.codes.OK, json=payload)
+            ),
+        ) as client,
+        pytest.raises(CoderRequestError),
+    ):
+        client.workspace(uuid4())
+
+
+@pytest.mark.parametrize(
+    ("method_name", "payload"),
+    [
+        ("usernames", {}),
+        ("workspaces", {}),
+        ("workspaces", {"workspaces": [None], "count": 1}),
+        (
+            "workspaces",
+            {
+                "workspaces": [{"id": str(uuid4()), "latest_build": None}],
+                "count": 1,
+            },
+        ),
+    ],
+)
+def test_coder_page_methods_reject_invalid_container_shapes(
+    method_name: str,
+    payload: dict[str, object],
+) -> None:
+    """Reject invalid user/workspace pages before reconciliation."""
+
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(httpx.codes.OK, json=payload)
+        ),
+    ) as client:
+        if method_name == "usernames":
+            with pytest.raises(CoderRequestError):
+                client.usernames()
+        else:
+            with pytest.raises(CoderRequestError):
+                client.workspaces(status=None, offset=0, limit=100)
+
+
+def test_template_lookup_edges_and_attached_version_payload() -> None:
+    """Cover absent deterministic versions and attached version publication."""
+
+    organization_id = uuid4()
+    template_id = uuid4()
+    version_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return the edge response selected by the template endpoint."""
+
+        requests.append(request)
+        if request.url.path.endswith("/organizations"):
+            return httpx.Response(httpx.codes.OK, json=[])
+        if request.method == "GET":
+            return httpx.Response(httpx.codes.NOT_FOUND)
+        return httpx.Response(
+            httpx.codes.CREATED,
+            json={
+                "id": str(version_id),
+                "archived": False,
+                "job": {"status": "pending"},
+            },
+        )
+
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(CoderRequestError, match="default organization"):
+            client.default_organization_id()
+        assert client.template_version_by_name(organization_id, "python", "git-commit-p1") is None
+        version = client.create_template_version(
+            organization_id,
+            file_id=uuid4(),
+            version_name="git-commit-p1",
+            template_id=template_id,
+        )
+
+    assert version.id == version_id
+    body = json.loads(requests[-1].content)
+    assert body["template_id"] == str(template_id)
+
+
 def test_workspace_page_rejects_invalid_status_or_transition() -> None:
     """Reject unknown latest-build values before destructive reconciliation."""
 
@@ -1495,6 +1782,7 @@ def test_template_creation_http_contract() -> None:
             file_id=file_id,
             version_name="git-" + ("a" * 40),
             template_id=None,
+            user_variable_values=(("registry_url", "registry.dev.example.com"),),
         )
         assert version.status == "pending"
         waited = client.wait_template_version(
@@ -1516,6 +1804,14 @@ def test_template_creation_http_contract() -> None:
     upload = next(request for request in requests if request.url.path.endswith("/files"))
     assert upload.headers["content-type"] == "application/x-tar"
     assert upload.content == b"ustar"
+    create_version = next(
+        request
+        for request in requests
+        if request.url.path.endswith("/templateversions") and request.method == "POST"
+    )
+    assert json.loads(create_version.content)["user_variable_values"] == [
+        {"name": "registry_url", "value": "registry.dev.example.com"}
+    ]
 
 
 def test_existing_archived_template_version_can_be_reactivated() -> None:

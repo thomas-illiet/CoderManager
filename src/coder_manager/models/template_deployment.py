@@ -57,6 +57,14 @@ class TemplateDeployment(Base):
             "applied_commit IS NULL OR length(applied_commit) = 40",
             name="applied_commit_sha",
         ),
+        CheckConstraint(
+            "target_system_parameter_revision IS NULL OR target_system_parameter_revision >= 0",
+            name="target_system_parameter_revision_non_negative",
+        ),
+        CheckConstraint(
+            "applied_system_parameter_revision IS NULL OR applied_system_parameter_revision >= 0",
+            name="applied_system_parameter_revision_non_negative",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -75,6 +83,8 @@ class TemplateDeployment(Base):
     coder_template_version_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     target_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
     applied_commit: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    target_system_parameter_revision: Mapped[int | None] = mapped_column(nullable=True)
+    applied_system_parameter_revision: Mapped[int | None] = mapped_column(nullable=True)
     status: Mapped[TemplateDeploymentStatus] = mapped_column(
         Enum(
             TemplateDeploymentStatus,
