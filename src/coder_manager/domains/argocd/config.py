@@ -33,14 +33,46 @@ class CyberArkParameters:
 
 
 @dataclass(frozen=True)
-class ArgoCdConfig:
-    """Validated settings required to reconcile one Argo CD Application."""
+class ArgoCdClientConfig:
+    """Validated settings required to access one Argo CD Application."""
 
     url: str
     token: str = field(repr=False)
     skip_ssl_verify: bool
     project: str
     application_prefix: str
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> ArgoCdClientConfig:
+        """Validate the settings shared by read and mutation operations."""
+
+        required: dict[str, str | None] = {
+            "CODER_MANAGER_ARGOCD_URL": settings.argocd_url,
+            "CODER_MANAGER_ARGOCD_TOKEN": (
+                settings.argocd_token.get_secret_value() if settings.argocd_token else None
+            ),
+            "CODER_MANAGER_ARGOCD_PROJECT": settings.argocd_project,
+        }
+        missing = [name for name, value in required.items() if not value or not value.strip()]
+        if missing:
+            joined = ", ".join(sorted(missing))
+            msg = f"Missing required Argo CD client settings: {joined}"
+            raise ArgoCdConfigurationError(msg)
+
+        prefix = _application_prefix(settings.argocd_application_prefix)
+        return cls(
+            url=_required_value(required, "CODER_MANAGER_ARGOCD_URL").rstrip("/"),
+            token=_required_value(required, "CODER_MANAGER_ARGOCD_TOKEN"),
+            skip_ssl_verify=settings.argocd_skip_ssl_verify,
+            project=_required_value(required, "CODER_MANAGER_ARGOCD_PROJECT"),
+            application_prefix=prefix,
+        )
+
+
+@dataclass(frozen=True)
+class ArgoCdConfig(ArgoCdClientConfig):
+    """Validated settings required to reconcile one Argo CD Application."""
+
     region: str
     repository_url: str
     repository_path: str
@@ -53,12 +85,8 @@ class ArgoCdConfig:
     def from_settings(cls, settings: Settings) -> ArgoCdConfig:
         """Validate runtime settings only when an Argo CD operation is requested."""
 
+        client = ArgoCdClientConfig.from_settings(settings)
         required: dict[str, str | None] = {
-            "CODER_MANAGER_ARGOCD_URL": settings.argocd_url,
-            "CODER_MANAGER_ARGOCD_TOKEN": (
-                settings.argocd_token.get_secret_value() if settings.argocd_token else None
-            ),
-            "CODER_MANAGER_ARGOCD_PROJECT": settings.argocd_project,
             "CODER_MANAGER_ARGOCD_REGION": settings.argocd_region,
             "CODER_MANAGER_ARGOCD_REPOSITORY_URL": settings.argocd_repository_url,
             "CODER_MANAGER_ARGOCD_REPOSITORY_PATH": settings.argocd_repository_path,
@@ -72,18 +100,12 @@ class ArgoCdConfig:
             msg = f"Missing required Argo CD settings: {joined}"
             raise ArgoCdConfigurationError(msg)
 
-        prefix = settings.argocd_application_prefix.strip().lower()
-        maximum_prefix_length = MAX_APPLICATION_NAME_LENGTH - UUID_HEX_LENGTH - 1
-        if not APPLICATION_NAME_PATTERN.fullmatch(prefix) or len(prefix) > maximum_prefix_length:
-            msg = "CODER_MANAGER_ARGOCD_APPLICATION_PREFIX is not a valid DNS label prefix"
-            raise ArgoCdConfigurationError(msg)
-
         return cls(
-            url=_required_value(required, "CODER_MANAGER_ARGOCD_URL").rstrip("/"),
-            token=_required_value(required, "CODER_MANAGER_ARGOCD_TOKEN"),
-            skip_ssl_verify=settings.argocd_skip_ssl_verify,
-            project=_required_value(required, "CODER_MANAGER_ARGOCD_PROJECT"),
-            application_prefix=prefix,
+            url=client.url,
+            token=client.token,
+            skip_ssl_verify=client.skip_ssl_verify,
+            project=client.project,
+            application_prefix=client.application_prefix,
             region=_required_value(required, "CODER_MANAGER_ARGOCD_REGION").upper(),
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
@@ -119,6 +141,17 @@ def _required_value(values: Mapping[str, str | None], name: str) -> str:
     if value is None:  # pragma: no cover - checked by caller
         raise ArgoCdConfigurationError(name)
     return value.strip()
+
+
+def _application_prefix(raw_value: str) -> str:
+    """Normalize and validate the Application name prefix."""
+
+    prefix = raw_value.strip().lower()
+    maximum_prefix_length = MAX_APPLICATION_NAME_LENGTH - UUID_HEX_LENGTH - 1
+    if not APPLICATION_NAME_PATTERN.fullmatch(prefix) or len(prefix) > maximum_prefix_length:
+        msg = "CODER_MANAGER_ARGOCD_APPLICATION_PREFIX is not a valid DNS label prefix"
+        raise ArgoCdConfigurationError(msg)
+    return prefix
 
 
 def _destination_settings(settings: Settings) -> dict[str, str | None]:

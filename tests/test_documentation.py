@@ -22,3 +22,23 @@ def test_every_class_and_function_has_a_docstring() -> None:
                     missing.append(f"{relative_path}:{node.lineno} {node.name}")
 
     assert not missing, "Missing documentation blocks:\n" + "\n".join(missing)
+
+
+def test_environment_example_has_exact_service_categories_and_unique_variables() -> None:
+    """Keep the environment template grouped without duplicate assignments."""
+
+    project_root = Path(__file__).parents[1]
+    lines = (project_root / ".env.example").read_text(encoding="utf-8").splitlines()
+    categories = [
+        line.removeprefix("# ")
+        for line in lines
+        if line.removeprefix("# ") in {"COMMUN", "API", "WORKER", "BEAT", "MIGRATE", "FLOWER"}
+    ]
+    variables = [
+        line.partition("=")[0]
+        for line in lines
+        if line and not line.startswith("#") and "=" in line
+    ]
+
+    assert categories == ["COMMUN", "API", "WORKER", "BEAT", "MIGRATE", "FLOWER"]
+    assert len(variables) == len(set(variables))

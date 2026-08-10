@@ -20,8 +20,9 @@ docker compose up --build
 ```
 
 The API is then available at <http://localhost:8000>, with interactive documentation at
-<http://localhost:8000/docs>. The migration container applies pending migrations before the API,
-worker, and Beat scheduler start.
+<http://localhost:8000/docs>. Flower monitors the Celery worker at <http://127.0.0.1:5555>; its
+unauthenticated interface is bound to localhost and is not exposed on external network interfaces.
+The migration container applies pending migrations before the API, worker, and Beat scheduler start.
 
 This release replaces the complete Alembic history with one fresh-install baseline. It has no
 upgrade, backfill, reconciliation, or supported `alembic stamp` path for an existing database.
@@ -36,8 +37,14 @@ uv run ruff check .
 uv run ty check src
 ```
 
-Copy `.env.example` to `.env` before running the API, migrations, worker, or Beat directly on the
-host.
+Copy `.env.example` to `.env` before running the API, migrations, worker, Beat, or Flower directly on
+the host. The example is organized into `COMMUN`, `API`, `WORKER`, `BEAT`, `MIGRATE`, and `FLOWER`
+sections. `COMMUN` identifies values consumed by more than one service; it does not mean that every
+value is injected into every container. Compose explicitly gives each service only its required
+subset. `MIGRATE` uses only the common database URL, while `FLOWER` uses the common Celery broker and
+`FLOWER_UNAUTHENTICATED_API=true`. This opens Flower's internal API without authentication only on
+the localhost-bound interface. The worker publishes task events so Flower can display live task
+activity.
 
 ## HTTP API
 

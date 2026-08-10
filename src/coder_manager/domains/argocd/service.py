@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from coder_manager.config import Settings, get_settings
 from coder_manager.domains.argocd.client import ArgoCdClient
-from coder_manager.domains.argocd.config import ArgoCdConfig
+from coder_manager.domains.argocd.config import ArgoCdClientConfig, ArgoCdConfig
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -70,6 +70,6 @@ def read_instance_application_status(
 ) -> ArgoCdApplicationStatus:
     """Read one instance's remote Argo CD status with explicit API settings."""
 
-    config = ArgoCdConfig.from_settings(settings)
+    config = ArgoCdClientConfig.from_settings(settings)
     with ArgoCdClient(config) as client:
         return client.get_application_status(slug, attached_name)

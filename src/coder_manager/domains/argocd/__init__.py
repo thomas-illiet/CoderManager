@@ -1,7 +1,11 @@
 """Public API of the Argo CD business domain."""
 
 from coder_manager.domains.argocd.client import ArgoCdClient
-from coder_manager.domains.argocd.config import ArgoCdConfig, parse_default_admins
+from coder_manager.domains.argocd.config import (
+    ArgoCdClientConfig,
+    ArgoCdConfig,
+    parse_default_admins,
+)
 from coder_manager.domains.argocd.errors import (
     ArgoCdApplicationNotFoundError,
     ArgoCdConfigurationError,
@@ -24,6 +28,7 @@ __all__ = [
     "ArgoCdApplicationNotFoundError",
     "ArgoCdApplicationStatus",
     "ArgoCdClient",
+    "ArgoCdClientConfig",
     "ArgoCdConfig",
     "ArgoCdConfigurationError",
     "ArgoCdMutationStatus",

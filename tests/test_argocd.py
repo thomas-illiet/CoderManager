@@ -12,6 +12,7 @@ from coder_manager.config import Settings
 from coder_manager.domains.argocd import (
     ArgoCdApplicationNotFoundError,
     ArgoCdClient,
+    ArgoCdClientConfig,
     ArgoCdConfig,
     ArgoCdConfigurationError,
     ArgoCdMutationStatus,
@@ -62,6 +63,19 @@ def configured_settings(**overrides: object) -> Settings:
                 f"{prefix}_safe": f"{environment}-safe",
             }
         )
+    values.update(overrides)
+    return Settings.model_validate(values)
+
+
+def client_settings(**overrides: object) -> Settings:
+    """Build only the settings required for Argo CD read operations."""
+
+    values: dict[str, object] = {
+        "argocd_url": "https://argocd.test/root/",
+        "argocd_token": "super-secret-token",
+        "argocd_project": "coder",
+        "argocd_application_prefix": "managed",
+    }
     values.update(overrides)
     return Settings.model_validate(values)
 
@@ -525,7 +539,7 @@ def test_application_status_is_read_without_triggering_sync() -> None:
         requests.append(request)
         return httpx.Response(200, json=response_payload)
 
-    config = ArgoCdConfig.from_settings(configured_settings())
+    config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         remote = client.get_application_status(TEST_INSTANCE_SLUG, "attached")
 
@@ -555,7 +569,7 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
         return next(responses)
 
-    config = ArgoCdConfig.from_settings(configured_settings())
+    config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         partial = client.get_application_status(TEST_INSTANCE_SLUG, None)
         with pytest.raises(ArgoCdApplicationNotFoundError):
@@ -610,6 +624,51 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
     ]
     assert requests[1].headers["content-type"] == "application/json"
     assert requests[1].content == b""
+
+
+def test_read_status_service_uses_only_client_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read status without requiring worker deployment or CyberArk settings."""
+
+    captured: list[ArgoCdClientConfig] = []
+
+    class StubClient:
+        """Capture the configuration used by the API status service."""
+
+        def __init__(self, config: ArgoCdClientConfig) -> None:
+            """Store the minimal validated client configuration."""
+
+            captured.append(config)
+
+        def __enter__(self) -> Self:
+            """Enter the client context."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Exit the client context."""
+
+        def get_application_status(
+            self,
+            _slug: str,
+            _attached_name: str | None,
+        ) -> str:
+            """Return a sentinel status value."""
+
+            return "status"
+
+    monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
+
+    result = argocd_service.read_instance_application_status(
+        TEST_INSTANCE_SLUG,
+        None,
+        client_settings(),
+    )
+
+    assert result == "status"
+    assert len(captured) == 1
+    assert type(captured[0]) is ArgoCdClientConfig
 
 
 @pytest.mark.parametrize("phase", ["Running", "Terminating"])
@@ -741,7 +800,7 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
 def test_application_name_prefers_attachment_then_strict_slug() -> None:
     """Resolve attached and strict slug Application names."""
 
-    config = ArgoCdConfig.from_settings(configured_settings())
+    config = ArgoCdClientConfig.from_settings(client_settings())
 
     assert application_name(config, TEST_INSTANCE_SLUG, "attached") == "attached"
     assert application_name(config, TEST_INSTANCE_SLUG, None) == TEST_APPLICATION_NAME
@@ -770,7 +829,9 @@ def test_client_tls_and_timeout_configuration(
             captured["closed"] = True
 
     monkeypatch.setattr(argocd_client.httpx, "Client", StubClient)
-    config = ArgoCdConfig.from_settings(configured_settings(argocd_skip_ssl_verify=skip_ssl_verify))
+    config = ArgoCdClientConfig.from_settings(
+        client_settings(argocd_skip_ssl_verify=skip_ssl_verify)
+    )
     client = ArgoCdClient(config)
     client.close()
 
@@ -783,14 +844,48 @@ def test_client_tls_and_timeout_configuration(
     assert captured["closed"] is True
 
 
+def test_client_configuration_cannot_reconcile_application() -> None:
+    """Reject reconciliation when only read-level settings were provided."""
+
+    config = ArgoCdClientConfig.from_settings(client_settings())
+    with (
+        ArgoCdClient(
+            config, transport=httpx.MockTransport(lambda _request: httpx.Response(200))
+        ) as client,
+        pytest.raises(ArgoCdConfigurationError, match="deployment settings are required"),
+    ):
+        client.ensure_application(
+            uuid4(),
+            TEST_INSTANCE_SLUG,
+            None,
+            (),
+            instance_helm_values(),
+        )
+
+
 @pytest.mark.parametrize(
     ("settings", "expected_message"),
     [
-        (Settings(), "Missing required Argo CD settings"),
+        (Settings(), "Missing required Argo CD client settings"),
         (
-            configured_settings(argocd_application_prefix="x" * 31),
+            client_settings(argocd_application_prefix="x" * 31),
             "APPLICATION_PREFIX",
         ),
+    ],
+)
+def test_invalid_client_configuration_is_rejected(
+    settings: Settings,
+    expected_message: str,
+) -> None:
+    """Reject incomplete or invalid read-level Argo CD settings."""
+
+    with pytest.raises(ArgoCdConfigurationError, match=expected_message):
+        ArgoCdClientConfig.from_settings(settings)
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_message"),
+    [
         (
             configured_settings(default_admins="alice,,bob"),
             "contains an empty username",

@@ -16,7 +16,7 @@ from coder_manager.domains.coder import ADMIN_USERNAME
 if TYPE_CHECKING:
     from uuid import UUID
 
-    from coder_manager.domains.argocd.config import ArgoCdConfig
+    from coder_manager.domains.argocd.config import ArgoCdClientConfig, ArgoCdConfig
 
 MANAGED_LABEL = "coder-manager/managed"
 INSTANCE_ID_LABEL = "coder-manager/instance-id"
@@ -30,7 +30,7 @@ ACTIVE_OPERATION_PHASES = frozenset({"Running", "Terminating"})
 
 
 def application_name(
-    config: ArgoCdConfig,
+    config: ArgoCdClientConfig,
     slug: str,
     attached_name: str | None,
 ) -> str:

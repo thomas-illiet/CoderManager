@@ -1,3 +1,18 @@
+x-database-environment: &database-environment
+  CODER_MANAGER_DATABASE_URL: postgresql+asyncpg://coder_manager:coder_manager@postgres:5432/coder_manager
+
+x-broker-environment: &broker-environment
+  CODER_MANAGER_CELERY_BROKER_URL: redis://redis:6379/0
+
+x-api-worker-environment: &api-worker-environment
+  CODER_MANAGER_CRYPTO_KEY: ${CODER_MANAGER_CRYPTO_KEY:-}
+  CODER_MANAGER_ARGOCD_URL: ${CODER_MANAGER_ARGOCD_URL:-}
+  CODER_MANAGER_ARGOCD_TOKEN: ${CODER_MANAGER_ARGOCD_TOKEN:-}
+  CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY: ${CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY:-false}
+  CODER_MANAGER_ARGOCD_PROJECT: ${CODER_MANAGER_ARGOCD_PROJECT:-}
+  CODER_MANAGER_ARGOCD_APPLICATION_PREFIX: ${CODER_MANAGER_ARGOCD_APPLICATION_PREFIX:-coder}
+  CODER_MANAGER_DEFAULT_ADMINS: ${CODER_MANAGER_DEFAULT_ADMINS:-}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -24,13 +39,37 @@ services:
   migrate:
     build: .
     command: ["alembic", "upgrade", "head"]
-    environment: &app-environment
-      CODER_MANAGER_DATABASE_URL: postgresql+asyncpg://coder_manager:coder_manager@postgres:5432/coder_manager
-      CODER_MANAGER_CELERY_BROKER_URL: redis://redis:6379/0
+    environment: *database-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    environment:
+      <<: [*database-environment, *broker-environment, *api-worker-environment]
+      CODER_MANAGER_APP_NAME: ${CODER_MANAGER_APP_NAME:-Coder Manager}
+      CODER_MANAGER_INSTANCE_DOMAIN: ${CODER_MANAGER_INSTANCE_DOMAIN:-code-studio}
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command:
+      - celery
+      - -A
+      - coder_manager.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --events
+    environment:
+      <<: [*database-environment, *broker-environment, *api-worker-environment]
       CODER_MANAGER_CELERY_RESULT_BACKEND: redis://redis:6379/1
-      CODER_MANAGER_SCHEDULER_TIMEZONE: ${CODER_MANAGER_SCHEDULER_TIMEZONE:-Europe/Paris}
-      CODER_MANAGER_CRYPTO_KEY: ${CODER_MANAGER_CRYPTO_KEY:-}
-      CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS: ${CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS:-60}
       CODER_MANAGER_JOB_STALE_AFTER_SECONDS: ${CODER_MANAGER_JOB_STALE_AFTER_SECONDS:-300}
       CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS: ${CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS:-2}
       CODER_MANAGER_TEMPLATE_SYNC_TIMEOUT_SECONDS: ${CODER_MANAGER_TEMPLATE_SYNC_TIMEOUT_SECONDS:-1800}
@@ -40,12 +79,6 @@ services:
       CODER_MANAGER_WORKSPACE_STOP_TIMEOUT_SECONDS: ${CODER_MANAGER_WORKSPACE_STOP_TIMEOUT_SECONDS:-1800}
       CODER_MANAGER_WORKSPACE_DELETE_POLL_INTERVAL_SECONDS: ${CODER_MANAGER_WORKSPACE_DELETE_POLL_INTERVAL_SECONDS:-2}
       CODER_MANAGER_WORKSPACE_DELETE_TIMEOUT_SECONDS: ${CODER_MANAGER_WORKSPACE_DELETE_TIMEOUT_SECONDS:-1800}
-      CODER_MANAGER_INSTANCE_DOMAIN: ${CODER_MANAGER_INSTANCE_DOMAIN:-code-studio}
-      CODER_MANAGER_ARGOCD_URL: ${CODER_MANAGER_ARGOCD_URL:-}
-      CODER_MANAGER_ARGOCD_TOKEN: ${CODER_MANAGER_ARGOCD_TOKEN:-}
-      CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY: ${CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY:-false}
-      CODER_MANAGER_ARGOCD_PROJECT: ${CODER_MANAGER_ARGOCD_PROJECT:-}
-      CODER_MANAGER_ARGOCD_APPLICATION_PREFIX: ${CODER_MANAGER_ARGOCD_APPLICATION_PREFIX:-coder}
       CODER_MANAGER_ARGOCD_REGION: ${CODER_MANAGER_ARGOCD_REGION:-}
       CODER_MANAGER_ARGOCD_REPOSITORY_URL: ${CODER_MANAGER_ARGOCD_REPOSITORY_URL:-}
       CODER_MANAGER_ARGOCD_REPOSITORY_PATH: ${CODER_MANAGER_ARGOCD_REPOSITORY_PATH:-}
@@ -65,26 +98,6 @@ services:
       CODER_MANAGER_CYBERARK_PRODUCTION_CERT_NAME: ${CODER_MANAGER_CYBERARK_PRODUCTION_CERT_NAME:-}
       CODER_MANAGER_CYBERARK_PRODUCTION_KEY_NAME: ${CODER_MANAGER_CYBERARK_PRODUCTION_KEY_NAME:-}
       CODER_MANAGER_CYBERARK_PRODUCTION_SAFE: ${CODER_MANAGER_CYBERARK_PRODUCTION_SAFE:-}
-      CODER_MANAGER_DEFAULT_ADMINS: ${CODER_MANAGER_DEFAULT_ADMINS:-}
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  api:
-    build: .
-    environment: *app-environment
-    ports:
-      - "8000:8000"
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-
-  worker:
-    build: .
-    command: ["celery", "-A", "coder_manager.celery_app:celery_app", "worker", "--loglevel=INFO"]
-    environment: *app-environment
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -100,10 +113,30 @@ services:
       - beat
       - --loglevel=INFO
       - --schedule=/tmp/celerybeat-schedule
-    environment: *app-environment
+    environment:
+      <<: *broker-environment
+      CODER_MANAGER_SCHEDULER_TIMEZONE: ${CODER_MANAGER_SCHEDULER_TIMEZONE:-Europe/Paris}
+      CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS: ${CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS:-60}
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  flower:
+    build: .
+    command:
+      - celery
+      - -A
+      - coder_manager.celery_app:celery_app
+      - flower
+      - --port=5555
+    environment:
+      <<: *broker-environment
+      FLOWER_UNAUTHENTICATED_API: ${FLOWER_UNAUTHENTICATED_API:-true}
+    ports:
+      - "127.0.0.1:5555:5555"
+    depends_on:
       redis:
         condition: service_healthy
 

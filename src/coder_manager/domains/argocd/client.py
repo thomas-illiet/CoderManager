@@ -13,8 +13,10 @@ from coder_manager.domains.argocd.applications import (
     application_status,
     application_update_payload,
 )
+from coder_manager.domains.argocd.config import ArgoCdClientConfig, ArgoCdConfig
 from coder_manager.domains.argocd.errors import (
     ArgoCdApplicationNotFoundError,
+    ArgoCdConfigurationError,
     ArgoCdRequestError,
 )
 from coder_manager.domains.argocd.models import (
@@ -27,7 +29,6 @@ if TYPE_CHECKING:
     from types import TracebackType
     from uuid import UUID
 
-    from coder_manager.domains.argocd.config import ArgoCdConfig
     from coder_manager.domains.argocd.models import (
         ArgoCdApplicationStatus,
         InstanceHelmValues,
@@ -44,7 +45,7 @@ class ArgoCdClient:
 
     def __init__(
         self,
-        config: ArgoCdConfig,
+        config: ArgoCdClientConfig,
         *,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -90,9 +91,10 @@ class ArgoCdClient:
     ) -> ArgoCdReconcileResult:
         """Create or overwrite an Application and request one synchronization."""
 
+        deployment_config = self._deployment_config()
         name = application_name(self._config, slug, attached_name)
         desired = application_payload(
-            self._config,
+            deployment_config,
             name,
             instance_id,
             members,
@@ -155,6 +157,14 @@ class ArgoCdClient:
             status=ArgoCdMutationStatus.COMPLETED,
             application_name=name,
         )
+
+    def _deployment_config(self) -> ArgoCdConfig:
+        """Require deployment settings before constructing a mutation payload."""
+
+        if not isinstance(self._config, ArgoCdConfig):
+            msg = "Argo CD deployment settings are required for Application reconciliation"
+            raise ArgoCdConfigurationError(msg)
+        return self._config
 
     def get_application_status(
         self,
