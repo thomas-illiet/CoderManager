@@ -43,33 +43,36 @@ def reconcile_instance_application(
 def delete_instance_application(
     slug: str,
     attached_name: str | None,
+    environment: str,
 ) -> ArgoCdMutationStatus:
     """Delete one instance's Application using the process-wide configuration."""
 
     config = ArgoCdConfig.from_settings(get_settings())
     with ArgoCdClient(config) as client:
-        return client.delete_application(slug, attached_name)
+        return client.delete_application(slug, attached_name, environment)
 
 
 def instance_application_exists(
     slug: str,
     attached_name: str | None,
+    environment: str,
     settings: Settings | None = None,
 ) -> bool:
     """Return whether one strict instance Application currently exists."""
 
     config = ArgoCdConfig.from_settings(settings or get_settings())
     with ArgoCdClient(config) as client:
-        return client.application_exists(slug, attached_name)
+        return client.application_exists(slug, attached_name, environment)
 
 
 def read_instance_application_status(
     slug: str,
     attached_name: str | None,
+    environment: str,
     settings: Settings,
 ) -> ArgoCdApplicationStatus:
     """Read one instance's remote Argo CD status with explicit API settings."""
 
     config = ArgoCdClientConfig.from_settings(settings)
     with ArgoCdClient(config) as client:
-        return client.get_application_status(slug, attached_name)
+        return client.get_application_status(slug, attached_name, environment)

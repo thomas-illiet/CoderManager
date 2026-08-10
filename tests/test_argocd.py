@@ -42,12 +42,14 @@ def configured_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "argocd_url": "https://argocd.test/root/",
         "argocd_token": "super-secret-token",
-        "argocd_project": "coder",
         "argocd_application_prefix": "managed",
         "argocd_region": " emea ",
         "argocd_repository_url": "https://git.test/platform.git",
         "argocd_repository_path": "charts/coder",
         "argocd_target_revision": "v1.2.3",
+        "argocd_development_project_name": "development-project",
+        "argocd_staging_project_name": "staging-project",
+        "argocd_production_project_name": "production-project",
         "argocd_development_destination_name": "development-cluster",
         "argocd_staging_destination_name": "staging-cluster",
         "argocd_production_destination_name": "production-cluster",
@@ -73,8 +75,10 @@ def client_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "argocd_url": "https://argocd.test/root/",
         "argocd_token": "super-secret-token",
-        "argocd_project": "coder",
         "argocd_application_prefix": "managed",
+        "argocd_development_project_name": "development-project",
+        "argocd_staging_project_name": "staging-project",
+        "argocd_production_project_name": "production-project",
     }
     values.update(overrides)
     return Settings.model_validate(values)
@@ -133,7 +137,14 @@ def test_create_application_and_sync_contract() -> None:
     assert all(
         request.headers["authorization"] == "Bearer super-secret-token" for request in requests
     )
+    assert [dict(request.url.params) for request in requests] == [
+        {"project": "development-project"},
+        {"upsert": "false", "validate": "true"},
+        {"project": "development-project"},
+        {"project": "development-project"},
+    ]
     payload = json.loads(requests[1].content)
+    assert payload["spec"]["project"] == "development-project"
     assert payload["metadata"] == {
         "name": result.application_name,
         "labels": {
@@ -193,14 +204,18 @@ def test_create_application_and_sync_contract() -> None:
 
 
 @pytest.mark.parametrize(
-    ("environment", "values_file"),
+    ("environment", "values_file", "project"),
     [
-        ("development", "values-dev.yaml"),
-        ("staging", "values-stg.yaml"),
-        ("production", "values-prd.yaml"),
+        ("development", "values-dev.yaml", "development-project"),
+        ("staging", "values-stg.yaml", "staging-project"),
+        ("production", "values-prd.yaml", "production-project"),
     ],
 )
-def test_helm_values_file_matches_environment(environment: str, values_file: str) -> None:
+def test_helm_values_file_and_project_match_environment(
+    environment: str,
+    values_file: str,
+    project: str,
+) -> None:
     """Select exactly one environment-specific Helm values file."""
 
     config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
@@ -215,6 +230,7 @@ def test_helm_values_file_matches_environment(environment: str, values_file: str
     helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
     assert helm_arguments.startswith(f"--values {values_file}\n")
     assert helm_arguments.count("--values ") == 1
+    assert payload["spec"]["project"] == project
 
 
 def test_database_secret_references_use_managed_database_name() -> None:
@@ -333,7 +349,13 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert update["metadata"]["annotations"] == {"owner": "platform"}
     assert update["metadata"]["labels"]["existing"] == "kept"
     assert update["metadata"]["labels"]["coder-manager/managed"] == "true"
-    assert update["spec"]["project"] == "coder"
+    assert update["spec"]["project"] == "staging-project"
+    assert [dict(request.url.params) for request in requests] == [
+        {"project": "staging-project"},
+        {"project": "staging-project", "validate": "true"},
+        {"project": "staging-project"},
+        {"project": "staging-project"},
+    ]
     assert update["spec"]["source"]["plugin"]["env"] == [
         {
             "name": "HELM_ARGS",
@@ -541,7 +563,7 @@ def test_application_status_is_read_without_triggering_sync() -> None:
 
     config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        remote = client.get_application_status(TEST_INSTANCE_SLUG, "attached")
+        remote = client.get_application_status(TEST_INSTANCE_SLUG, "attached", "production")
 
     assert remote.application_name == "attached"
     assert remote.sync_status == "Synced"
@@ -551,7 +573,7 @@ def test_application_status_is_read_without_triggering_sync() -> None:
     assert remote.reconciled_at == "2026-07-19T10:20:30Z"
     assert len(requests) == 1
     assert requests[0].method == "GET"
-    assert requests[0].url.params["project"] == "coder"
+    assert requests[0].url.params["project"] == "production-project"
 
 
 def test_application_status_handles_missing_or_partial_remote_state() -> None:
@@ -571,9 +593,9 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
     config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        partial = client.get_application_status(TEST_INSTANCE_SLUG, None)
+        partial = client.get_application_status(TEST_INSTANCE_SLUG, None, "development")
         with pytest.raises(ArgoCdApplicationNotFoundError):
-            client.get_application_status(TEST_INSTANCE_SLUG, "missing")
+            client.get_application_status(TEST_INSTANCE_SLUG, "missing", "development")
 
     assert partial.application_name == TEST_APPLICATION_NAME
     assert partial.sync_status is None
@@ -603,8 +625,8 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        first = client.delete_application(TEST_INSTANCE_SLUG, "attached")
-        second = client.delete_application(TEST_INSTANCE_SLUG, "attached")
+        first = client.delete_application(TEST_INSTANCE_SLUG, "attached", "production")
+        second = client.delete_application(TEST_INSTANCE_SLUG, "attached", "production")
 
     assert first is ArgoCdMutationStatus.COMPLETED
     assert second is ArgoCdMutationStatus.COMPLETED
@@ -614,13 +636,13 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
         ("GET", "/root/api/v1/applications/attached"),
     ]
     assert [dict(request.url.params) for request in requests] == [
-        {"project": "coder"},
+        {"project": "production-project"},
         {
             "cascade": "true",
             "propagationPolicy": "foreground",
-            "project": "coder",
+            "project": "production-project",
         },
-        {"project": "coder"},
+        {"project": "production-project"},
     ]
     assert requests[1].headers["content-type"] == "application/json"
     assert requests[1].content == b""
@@ -653,6 +675,7 @@ def test_read_status_service_uses_only_client_configuration(
             self,
             _slug: str,
             _attached_name: str | None,
+            _environment: str,
         ) -> str:
             """Return a sentinel status value."""
 
@@ -663,6 +686,7 @@ def test_read_status_service_uses_only_client_configuration(
     result = argocd_service.read_instance_application_status(
         TEST_INSTANCE_SLUG,
         None,
+        "staging",
         client_settings(),
     )
 
@@ -691,7 +715,7 @@ def test_active_application_operation_defers_deletion(phase: str) -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        result = client.delete_application(TEST_INSTANCE_SLUG, "attached")
+        result = client.delete_application(TEST_INSTANCE_SLUG, "attached", "development")
 
     assert result is ArgoCdMutationStatus.DEFERRED
     assert [(request.method, request.url.path) for request in requests] == [
@@ -704,7 +728,7 @@ def test_delete_instance_application_uses_process_configuration(
 ) -> None:
     """Use the configured client when the worker invokes the deletion service."""
 
-    deleted: list[tuple[str, str | None]] = []
+    deleted: list[tuple[str, str | None, str]] = []
 
     class StubClient:
         """Capture calls made by the process-wide deletion service."""
@@ -724,18 +748,23 @@ def test_delete_instance_application_uses_process_configuration(
             self,
             slug: str,
             attached_name: str | None,
+            environment: str,
         ) -> ArgoCdMutationStatus:
             """Capture the requested Application deletion."""
 
-            deleted.append((slug, attached_name))
+            deleted.append((slug, attached_name, environment))
             return ArgoCdMutationStatus.COMPLETED
 
     monkeypatch.setattr(argocd_service, "get_settings", configured_settings)
     monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
 
-    result = argocd_service.delete_instance_application(TEST_INSTANCE_SLUG, "attached")
+    result = argocd_service.delete_instance_application(
+        TEST_INSTANCE_SLUG,
+        "attached",
+        "staging",
+    )
 
-    assert deleted == [(TEST_INSTANCE_SLUG, "attached")]
+    assert deleted == [(TEST_INSTANCE_SLUG, "attached", "staging")]
     assert result is ArgoCdMutationStatus.COMPLETED
 
 
@@ -871,6 +900,10 @@ def test_client_configuration_cannot_reconcile_application() -> None:
             client_settings(argocd_application_prefix="x" * 31),
             "APPLICATION_PREFIX",
         ),
+        (
+            client_settings(argocd_staging_project_name=" "),
+            "CODER_MANAGER_ARGOCD_STAGING_PROJECT_NAME",
+        ),
     ],
 )
 def test_invalid_client_configuration_is_rejected(
@@ -880,6 +913,25 @@ def test_invalid_client_configuration_is_rejected(
     """Reject incomplete or invalid read-level Argo CD settings."""
 
     with pytest.raises(ArgoCdConfigurationError, match=expected_message):
+        ArgoCdClientConfig.from_settings(settings)
+
+
+def test_legacy_global_project_setting_is_not_supported() -> None:
+    """Require environment projects even when the removed global setting is supplied."""
+
+    settings = Settings.model_validate(
+        {
+            "argocd_url": "https://argocd.test",
+            "argocd_token": "super-secret-token",
+            "argocd_project": "legacy-project",
+        }
+    )
+
+    assert "argocd_project" not in Settings.model_fields
+    with pytest.raises(
+        ArgoCdConfigurationError,
+        match="CODER_MANAGER_ARGOCD_DEVELOPMENT_PROJECT_NAME",
+    ):
         ArgoCdClientConfig.from_settings(settings)
 
 

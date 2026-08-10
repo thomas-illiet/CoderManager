@@ -29,8 +29,9 @@ def step_02_stop_instance(job_id: str) -> dict[str, str]:
                 raise RuntimeError(msg)
             slug = instance.slug
             attached_name = instance.argocd_application_name
+            environment = instance.environment.value
 
-        deletion = argocd.delete_instance_application(slug, attached_name)
+        deletion = argocd.delete_instance_application(slug, attached_name, environment)
         if deletion is argocd.ArgoCdMutationStatus.DEFERRED:
             deferred = defer_execution(claim, session_factory)
             return {"status": "deferred" if deferred else "noop"}

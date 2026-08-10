@@ -39,7 +39,7 @@ class ArgoCdClientConfig:
     url: str
     token: str = field(repr=False)
     skip_ssl_verify: bool
-    project: str
+    projects: Mapping[str, str]
     application_prefix: str
 
     @classmethod
@@ -51,8 +51,8 @@ class ArgoCdClientConfig:
             "CODER_MANAGER_ARGOCD_TOKEN": (
                 settings.argocd_token.get_secret_value() if settings.argocd_token else None
             ),
-            "CODER_MANAGER_ARGOCD_PROJECT": settings.argocd_project,
         }
+        required.update(_project_settings(settings))
         missing = [name for name, value in required.items() if not value or not value.strip()]
         if missing:
             joined = ", ".join(sorted(missing))
@@ -64,9 +64,18 @@ class ArgoCdClientConfig:
             url=_required_value(required, "CODER_MANAGER_ARGOCD_URL").rstrip("/"),
             token=_required_value(required, "CODER_MANAGER_ARGOCD_TOKEN"),
             skip_ssl_verify=settings.argocd_skip_ssl_verify,
-            project=_required_value(required, "CODER_MANAGER_ARGOCD_PROJECT"),
+            projects=_projects(required),
             application_prefix=prefix,
         )
+
+    def project_for(self, environment: str) -> str:
+        """Return the Argo CD project configured for one environment."""
+
+        try:
+            return self.projects[environment]
+        except KeyError as error:  # pragma: no cover - callers use domain enum values
+            msg = f"Unsupported Argo CD project: {environment}"
+            raise ArgoCdConfigurationError(msg) from error
 
 
 @dataclass(frozen=True)
@@ -104,7 +113,7 @@ class ArgoCdConfig(ArgoCdClientConfig):
             url=client.url,
             token=client.token,
             skip_ssl_verify=client.skip_ssl_verify,
-            project=client.project,
+            projects=client.projects,
             application_prefix=client.application_prefix,
             region=_required_value(required, "CODER_MANAGER_ARGOCD_REGION").upper(),
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
@@ -152,6 +161,38 @@ def _application_prefix(raw_value: str) -> str:
         msg = "CODER_MANAGER_ARGOCD_APPLICATION_PREFIX is not a valid DNS label prefix"
         raise ArgoCdConfigurationError(msg)
     return prefix
+
+
+def _project_settings(settings: Settings) -> dict[str, str | None]:
+    """Collect the three environment-specific Argo CD projects."""
+
+    return {
+        _project_environment_name(environment): getattr(
+            settings,
+            f"argocd_{environment}_project_name",
+        )
+        for environment in INSTANCE_ENVIRONMENTS
+    }
+
+
+def _projects(values: Mapping[str, str | None]) -> Mapping[str, str]:
+    """Build an immutable project lookup for every environment."""
+
+    return MappingProxyType(
+        {
+            environment: _required_value(
+                values,
+                _project_environment_name(environment),
+            )
+            for environment in INSTANCE_ENVIRONMENTS
+        }
+    )
+
+
+def _project_environment_name(environment: str) -> str:
+    """Return the public project environment variable name."""
+
+    return f"CODER_MANAGER_ARGOCD_{environment}_PROJECT_NAME".upper()
 
 
 def _destination_settings(settings: Settings) -> dict[str, str | None]:

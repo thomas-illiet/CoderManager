@@ -108,7 +108,7 @@ def application_payload(
             },
         },
         "spec": {
-            "project": config.project,
+            "project": config.project_for(helm_values.environment),
             "source": {
                 "repoURL": config.repository_url,
                 "path": config.repository_path,

@@ -192,14 +192,17 @@ values without creating API member records. The static bootstrap username `admin
 included in the allowed-user and administrator values.
 
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
-`CODER_MANAGER_ARGOCD_PROJECT`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
+`CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`,
 `CODER_MANAGER_ARGOCD_REGION`, and
-one destination per environment with
+one project and destination per environment with
+`CODER_MANAGER_ARGOCD_<ENVIRONMENT>_PROJECT_NAME` and
 `CODER_MANAGER_ARGOCD_<ENVIRONMENT>_DESTINATION_NAME`. Configure one CyberArk plugin map for each
-environment. Variable names follow `CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where
-environments are `DEVELOPMENT`, `STAGING`, and `PRODUCTION`, and fields are `APP_ID`, `CERT_NAME`,
-`KEY_NAME`, and `SAFE`. The region, all three destinations, and all 12 CyberArk values are required
+environment. Project and destination names, and CyberArk variable names, use the environments
+`DEVELOPMENT`, `STAGING`, and `PRODUCTION`. CyberArk variable names follow
+`CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where
+fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and `SAFE`. The region, all three projects, all three
+destinations, and all 12 CyberArk values are required
 for Argo CD reconciliation; `.env.example` lists the complete configuration. TLS certificate
 verification is enabled by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The

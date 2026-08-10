@@ -726,12 +726,14 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     def remote_status(
         slug: str,
         attached_name: str | None,
+        environment: str,
         _settings: Settings,
     ) -> argocd.ArgoCdApplicationStatus:
         """Simulate the remote status operation used by this scenario."""
 
         assert slug == instance["slug"]
         assert attached_name is None
+        assert environment == "development"
         return argocd.ArgoCdApplicationStatus(
             application_name=f"coder-{instance['slug']}",
             sync_status="OutOfSync",
@@ -790,6 +792,7 @@ async def test_instance_status_route_error_mapping(
     def fail_status(
         _slug: str,
         _attached_name: str | None,
+        _environment: str,
         _settings: Settings,
     ) -> None:
         """Simulate the expected fail status behavior."""

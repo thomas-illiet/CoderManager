@@ -485,7 +485,25 @@ async def test_start_and_stop_jobs_reconcile_workspaces_before_application_delet
     assert tasks.step_02_cleanup_users.run(str(start_job_id)) == {"status": "success"}
 
     events: list[str] = []
-    monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
+
+    def application_exists(_slug: str, _name: str | None, environment: str) -> bool:
+        """Verify stop existence checks use the instance environment."""
+
+        assert environment == "development"
+        return True
+
+    def delete_application(
+        _slug: str,
+        _name: str | None,
+        environment: str,
+    ) -> argocd.ArgoCdMutationStatus:
+        """Verify stop deletion uses the instance environment."""
+
+        assert environment == "development"
+        events.append("application")
+        return argocd.ArgoCdMutationStatus.COMPLETED
+
+    monkeypatch.setattr(argocd, "instance_application_exists", application_exists)
     monkeypatch.setattr(
         coder,
         "stop_active_workspaces",
@@ -494,7 +512,7 @@ async def test_start_and_stop_jobs_reconcile_workspaces_before_application_delet
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda *_args: events.append("application") or argocd.ArgoCdMutationStatus.COMPLETED,
+        delete_application,
     )
     stopped = await client.post(f"/api/v1/instances/{instance_id}/stop")
     stop_job_id = UUID(stopped.json()["job"]["id"])
@@ -1097,9 +1115,10 @@ async def test_hourly_state_audit_observes_idle_instances_and_isolates_errors(
         records[1]["slug"]: False,
     }
 
-    def observe(slug: str, _attached_name: str | None) -> bool:
+    def observe(slug: str, _attached_name: str | None, environment: str) -> bool:
         """Return two observations and fail one independently."""
 
+        assert environment == "development"
         if slug == records[2]["slug"]:
             raise RuntimeError("Argo unavailable")
         if slug == records[3]["slug"]:
@@ -1138,9 +1157,10 @@ async def test_hourly_state_audit_discards_concurrent_lifecycle_change(
         stored.step = None
         await session.commit()
 
-    def observe(_slug: str, _attached_name: str | None) -> bool:
+    def observe(_slug: str, _attached_name: str | None, environment: str) -> bool:
         """Change lifecycle state while the Argo observation is in flight."""
 
+        assert environment == "development"
         with sync_session_maker() as session:
             stored = session.get(Instance, instance_id)
             assert stored is not None
@@ -1942,13 +1962,13 @@ async def test_delete_steps_keep_local_state_until_step_04(
 
     deletion = await client.delete(f"/api/v1/instances/{instance_id}")
     job_id = UUID(deletion.json()["job"]["id"])
-    deleted_remote: list[tuple[UUID, str | None, str | None]] = []
+    deleted_remote: list[tuple[UUID, str | None, str | None, str]] = []
     dropped_targets: list[postgresql.SchemaTarget] = []
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda slug, name: (
-            deleted_remote.append((instance_id, slug, name))
+        lambda slug, name, environment: (
+            deleted_remote.append((instance_id, slug, name, environment))
             or argocd.ArgoCdMutationStatus.COMPLETED
         ),
     )
@@ -1958,7 +1978,9 @@ async def test_delete_steps_keep_local_state_until_step_04(
 
     assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
     assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "pending"}
-    assert deleted_remote == [(instance_id, str(deletion.json()["resource"]["slug"]), None)]
+    assert deleted_remote == [
+        (instance_id, str(deletion.json()["resource"]["slug"]), None, "development")
+    ]
     assert tasks.step_03_remove_schema.run(str(job_id)) == {"status": "pending"}
     assert dropped_targets[0].schema_name == f"coder_{instance_id.hex}"
     async with session_maker() as session:

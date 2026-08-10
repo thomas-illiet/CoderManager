@@ -302,6 +302,7 @@ async def get_instance_status(
             argocd.read_instance_application_status,
             instance.slug,
             instance.argocd_application_name,
+            instance.environment.value,
             settings,
         )
     except argocd.ArgoCdApplicationNotFoundError as error:

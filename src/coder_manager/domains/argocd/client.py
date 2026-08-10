@@ -92,6 +92,8 @@ class ArgoCdClient:
         """Create or overwrite an Application and request one synchronization."""
 
         deployment_config = self._deployment_config()
+        environment = helm_values.environment
+        project = self._config.project_for(environment)
         name = application_name(self._config, slug, attached_name)
         desired = application_payload(
             deployment_config,
@@ -100,7 +102,7 @@ class ArgoCdClient:
             members,
             helm_values,
         )
-        existing = self._get_application(name)
+        existing = self._get_application(name, environment)
         if existing is not None and application_operation_is_active(existing):
             return ArgoCdReconcileResult(
                 status=ArgoCdMutationStatus.DEFERRED,
@@ -115,7 +117,7 @@ class ArgoCdClient:
                 json=desired,
             )
             if response.status_code == httpx.codes.CONFLICT:
-                existing = self._get_application(name)
+                existing = self._get_application(name, environment)
                 if existing is None:
                     self._raise_for_response(response, "POST", "api/v1/applications")
                 if existing is not None and application_operation_is_active(existing):
@@ -131,14 +133,14 @@ class ArgoCdClient:
             path = f"api/v1/applications/{name}"
             response = self._client.put(
                 path,
-                params={"project": self._config.project, "validate": "true"},
+                params={"project": project, "validate": "true"},
                 json=application_update_payload(existing, desired),
             )
             self._raise_for_response(response, "PUT", path)
 
         # Re-read immediately before sync because creation or update may start an
         # automated operation.
-        current = self._get_application(name)
+        current = self._get_application(name, environment)
         if current is not None and application_operation_is_active(current):
             return ArgoCdReconcileResult(
                 status=ArgoCdMutationStatus.DEFERRED,
@@ -149,7 +151,7 @@ class ArgoCdClient:
         sync_path = f"api/v1/applications/{name}/sync"
         response = self._client.post(
             sync_path,
-            params={"project": self._config.project},
+            params={"project": project},
             json={},
         )
         self._raise_for_response(response, "POST", sync_path)
@@ -170,11 +172,12 @@ class ArgoCdClient:
         self,
         slug: str,
         attached_name: str | None,
+        environment: str,
     ) -> ArgoCdApplicationStatus:
         """Return a sanitized snapshot of an Application's remote status."""
 
         name = application_name(self._config, slug, attached_name)
-        application = self._get_application(name)
+        application = self._get_application(name, environment)
         if application is None:
             raise ArgoCdApplicationNotFoundError(name)
         return application_status(name, application)
@@ -183,21 +186,24 @@ class ArgoCdClient:
         self,
         slug: str,
         attached_name: str | None,
+        environment: str,
     ) -> bool:
         """Return whether the strict instance Application exists."""
 
         name = application_name(self._config, slug, attached_name)
-        return self._get_application(name) is not None
+        return self._get_application(name, environment) is not None
 
     def delete_application(
         self,
         slug: str,
         attached_name: str | None,
+        environment: str,
     ) -> ArgoCdMutationStatus:
         """Delete an Application and its managed resources idempotently."""
 
         name = application_name(self._config, slug, attached_name)
-        existing = self._get_application(name)
+        project = self._config.project_for(environment)
+        existing = self._get_application(name, environment)
         if existing is None:
             return ArgoCdMutationStatus.COMPLETED
         if application_operation_is_active(existing):
@@ -209,7 +215,7 @@ class ArgoCdClient:
             params={
                 "cascade": "true",
                 "propagationPolicy": "foreground",
-                "project": self._config.project,
+                "project": project,
             },
         )
         if response.status_code == httpx.codes.NOT_FOUND:
@@ -217,11 +223,14 @@ class ArgoCdClient:
         self._raise_for_response(response, "DELETE", path)
         return ArgoCdMutationStatus.COMPLETED
 
-    def _get_application(self, name: str) -> dict[str, Any] | None:
+    def _get_application(self, name: str, environment: str) -> dict[str, Any] | None:
         """Fetch one Application, returning none only for an explicit 404 response."""
 
         path = f"api/v1/applications/{name}"
-        response = self._client.get(path, params={"project": self._config.project})
+        response = self._client.get(
+            path,
+            params={"project": self._config.project_for(environment)},
+        )
         if response.status_code == httpx.codes.NOT_FOUND:
             return None
         self._raise_for_response(response, "GET", path)

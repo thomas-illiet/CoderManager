@@ -26,6 +26,7 @@ class InstanceStateSnapshot:
     id: UUID
     slug: str
     attached_name: str | None
+    environment: str
     job_id: UUID | None
     action: str
     status: InstanceStatus
@@ -42,6 +43,7 @@ def check_instance_states() -> dict[str, int]:
                 id=instance.id,
                 slug=instance.slug,
                 attached_name=instance.argocd_application_name,
+                environment=instance.environment.value,
                 job_id=instance.job_id,
                 action=instance.action,
                 status=instance.status,
@@ -64,6 +66,7 @@ def check_instance_states() -> dict[str, int]:
             exists = argocd.instance_application_exists(
                 snapshot.slug,
                 snapshot.attached_name,
+                snapshot.environment,
             )
         except Exception:
             errors += 1
