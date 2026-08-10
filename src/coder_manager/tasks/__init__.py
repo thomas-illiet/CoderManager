@@ -1,6 +1,10 @@
 """Durable background task steps registered by the Celery worker."""
 
 from coder_manager.tasks.check_instance_states import check_instance_states
+from coder_manager.tasks.daily_workspace_stops import (
+    dispatch_daily_workspace_stops,
+    stop_instance_workspaces,
+)
 from coder_manager.tasks.database.sync import step_01_sync_database
 from coder_manager.tasks.healthcheck import healthcheck
 from coder_manager.tasks.instance.create import (
@@ -26,6 +30,7 @@ from coder_manager.tasks.workspace.update import step_01_update_workspace
 
 __all__ = [
     "check_instance_states",
+    "dispatch_daily_workspace_stops",
     "healthcheck",
     "retry_job_executions",
     "step_01_create_schema",
@@ -46,4 +51,5 @@ __all__ = [
     "step_03_remove_schema",
     "step_04_remove_local_configuration",
     "step_04_sync_templates",
+    "stop_instance_workspaces",
 ]

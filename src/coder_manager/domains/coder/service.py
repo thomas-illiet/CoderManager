@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import httpx
@@ -16,7 +18,7 @@ if TYPE_CHECKING:
 
     from pydantic import SecretStr
 
-    from coder_manager.domains.coder.models import CoderWorkspace
+    from coder_manager.domains.coder.models import CoderWorkspace, CoderWorkspaceBuild
 
 WORKSPACE_PAGE_SIZE = 100
 ACTIVE_WORKSPACE_STATUSES = ("running", "starting")
@@ -28,6 +30,16 @@ ACTIVE_WORKSPACE_BUILD_STATUSES = frozenset(
     {"pending", "starting", "stopping", "canceling", "deleting"}
 )
 TERMINAL_WORKSPACE_DELETE_FAILURES = frozenset({"failed", "canceled"})
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceStopSubmissions:
+    """Stop builds submitted without waiting for remote convergence."""
+
+    submitted_ids: tuple[str, ...]
+    already_stopping_ids: tuple[str, ...]
 
 
 def bootstrap_admin_account(instance_url: str, password: SecretStr) -> None:
@@ -124,6 +136,52 @@ def stop_active_workspaces(
                 poll_interval_seconds=poll_interval_seconds,
                 heartbeat=heartbeat,
             )
+
+
+def submit_active_workspace_stops(
+    instance_url: str,
+    password: SecretStr,
+) -> WorkspaceStopSubmissions:
+    """Submit every currently required stop build without polling its result."""
+
+    submitted_ids: list[str] = []
+    already_stopping_ids: list[str] = []
+    failures: list[tuple[str, Exception]] = []
+    with CoderClient(instance_url) as client:
+        client.authenticate_prepared_admin(password)
+        for workspace in _active_workspaces(client, None):
+            workspace_id = str(workspace.id)
+            if workspace.status == "stopping":
+                already_stopping_ids.append(workspace_id)
+                continue
+            try:
+                build = client.create_workspace_stop_build(workspace.id)
+                _require_stop_transition(build)
+            except Exception as error:
+                logger.exception(
+                    "Could not submit workspace stop for remote workspace %s",
+                    workspace.id,
+                )
+                failures.append((workspace_id, error))
+                continue
+            submitted_ids.append(workspace_id)
+
+    if failures:
+        failed_ids = ", ".join(workspace_id for workspace_id, _error in failures)
+        msg = f"Coder workspace stop submission failed for: {failed_ids}"
+        raise CoderRequestError(msg) from failures[0][1]
+    return WorkspaceStopSubmissions(
+        submitted_ids=tuple(submitted_ids),
+        already_stopping_ids=tuple(already_stopping_ids),
+    )
+
+
+def _require_stop_transition(build: CoderWorkspaceBuild) -> None:
+    """Reject a response that does not represent the submitted stop build."""
+
+    if build.transition != "stop":
+        msg = "Coder workspace stop returned an unexpected transition"
+        raise CoderRequestError(msg)
 
 
 def _wait_workspace_builds(

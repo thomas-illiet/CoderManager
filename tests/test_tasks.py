@@ -111,6 +111,12 @@ def configure_worker(
         "get_settings",
         lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
     )
+    daily_stops_module = import_module("coder_manager.tasks.daily_workspace_stops")
+    monkeypatch.setattr(
+        daily_stops_module,
+        "get_settings",
+        lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
     monkeypatch.setattr(
         coder,
         "cleanup_user_accounts",
@@ -225,8 +231,223 @@ def test_registered_step_names_and_beat_schedule() -> None:
     state_schedule = celery_app.conf.beat_schedule["check-instance-states"]
     assert state_schedule["task"] == "coder_manager.check_instance_states"
     assert state_schedule["schedule"] == timedelta(hours=1)
+    daily_schedule = celery_app.conf.beat_schedule["dispatch-daily-workspace-stops"]
+    assert daily_schedule["task"] == "coder_manager.dispatch_daily_workspace_stops"
+    assert daily_schedule["schedule"].minute == frozenset({0})
+    assert daily_schedule["schedule"].hour == frozenset({0})
+    assert celery_app.conf.timezone == get_settings().scheduler_timezone
+    with pytest.raises(ValueError, match="valid IANA timezone"):
+        Settings(scheduler_timezone="invalid/timezone")
     task_source = Path(tasks.__file__).parent
     assert all("chain(" not in path.read_text() for path in task_source.rglob("*.py"))
+
+
+async def test_daily_workspace_stop_dispatches_every_instance_without_writes(
+    client: AsyncClient,
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch every stored UUID regardless of lifecycle state without persistence."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    first = await create_instance(client, "DAILY STOP ONE")
+    second = await create_instance(client, "DAILY STOP TWO")
+    instance_ids = tuple(sorted((UUID(str(first["id"])), UUID(str(second["id"])))))
+    with sync_session_maker() as session:
+        stored_first = session.get(Instance, instance_ids[0])
+        stored_second = session.get(Instance, instance_ids[1])
+        assert stored_first is not None
+        assert stored_second is not None
+        stored_first.state = InstanceState.STARTED
+        stored_first.status = InstanceStatus.SUCCESS
+        stored_second.state = InstanceState.STOPPED
+        stored_second.status = InstanceStatus.RUNNING
+        session.commit()
+        before_instances = tuple(
+            session.execute(
+                select(
+                    Instance.id,
+                    Instance.action,
+                    Instance.status,
+                    Instance.state,
+                    Instance.job_id,
+                    Instance.step,
+                    Instance.updated_at,
+                ).order_by(Instance.id)
+            ).all()
+        )
+        before_jobs = session.scalar(select(func.count()).select_from(JobExecution))
+        before_workspaces = session.scalar(select(func.count()).select_from(Workspace))
+
+    dispatch = MagicMock()
+    monkeypatch.setattr(tasks.stop_instance_workspaces, "delay", dispatch)
+
+    assert tasks.dispatch_daily_workspace_stops.run() == {
+        "status": "success",
+        "dispatched": 2,
+    }
+    assert [call.args[0] for call in dispatch.call_args_list] == [
+        str(instance_id) for instance_id in instance_ids
+    ]
+
+    with sync_session_maker() as session:
+        after_instances = tuple(
+            session.execute(
+                select(
+                    Instance.id,
+                    Instance.action,
+                    Instance.status,
+                    Instance.state,
+                    Instance.job_id,
+                    Instance.step,
+                    Instance.updated_at,
+                ).order_by(Instance.id)
+            ).all()
+        )
+        assert after_instances == before_instances
+        assert session.scalar(select(func.count()).select_from(JobExecution)) == before_jobs
+        assert session.scalar(select(func.count()).select_from(Workspace)) == before_workspaces
+
+
+async def test_daily_workspace_stop_dispatch_continues_after_delivery_failure(
+    client: AsyncClient,
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Attempt every independent delivery before failing the dispatcher."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    first = await create_instance(client, "DAILY DISPATCH ONE")
+    second = await create_instance(client, "DAILY DISPATCH TWO")
+    instance_ids = tuple(sorted((UUID(str(first["id"])), UUID(str(second["id"])))))
+    attempted: list[str] = []
+
+    def dispatch(instance_id: str) -> None:
+        """Fail the first delivery and accept the second."""
+
+        attempted.append(instance_id)
+        if instance_id == str(instance_ids[0]):
+            msg = "broker unavailable"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr(tasks.stop_instance_workspaces, "delay", dispatch)
+
+    with pytest.raises(RuntimeError, match="1 instance"):
+        tasks.dispatch_daily_workspace_stops.run()
+
+    assert attempted == [str(instance_id) for instance_id in instance_ids]
+
+
+async def test_daily_workspace_stop_submits_directly_without_database_writes(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read credentials and submit stops without Argo, polling, retries, or writes."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    created = await create_instance(client, "DAILY DIRECT")
+    instance_id = UUID(str(created["id"]))
+    await store_admin_password(session_maker, instance_id)
+    captured: list[tuple[str, str]] = []
+
+    def submit(instance_url: str, password: SecretStr) -> coder.WorkspaceStopSubmissions:
+        """Capture one direct Coder submission call."""
+
+        captured.append((instance_url, password.get_secret_value()))
+        return coder.WorkspaceStopSubmissions(
+            submitted_ids=(str(uuid4()), str(uuid4())),
+            already_stopping_ids=(str(uuid4()),),
+        )
+
+    monkeypatch.setattr(coder, "submit_active_workspace_stops", submit)
+    monkeypatch.setattr(
+        argocd,
+        "instance_application_exists",
+        lambda *_args: pytest.fail("daily workspace stops must not call Argo CD"),
+    )
+    with sync_session_maker() as session:
+        before_instance = session.execute(
+            select(
+                Instance.action,
+                Instance.status,
+                Instance.state,
+                Instance.job_id,
+                Instance.step,
+                Instance.updated_at,
+            ).where(Instance.id == instance_id)
+        ).one()
+        before_jobs = session.scalar(select(func.count()).select_from(JobExecution))
+        before_workspaces = session.scalar(select(func.count()).select_from(Workspace))
+
+    assert tasks.stop_instance_workspaces.run(str(instance_id)) == {
+        "status": "success",
+        "submitted": 2,
+        "already_stopping": 1,
+    }
+    assert captured == [(created["instance_url"], "stored-admin-password")]
+
+    with sync_session_maker() as session:
+        after_instance = session.execute(
+            select(
+                Instance.action,
+                Instance.status,
+                Instance.state,
+                Instance.job_id,
+                Instance.step,
+                Instance.updated_at,
+            ).where(Instance.id == instance_id)
+        ).one()
+        assert after_instance == before_instance
+        assert session.scalar(select(func.count()).select_from(JobExecution)) == before_jobs
+        assert session.scalar(select(func.count()).select_from(Workspace)) == before_workspaces
+
+
+def test_daily_workspace_stop_missing_instance_is_noop(
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Treat deletion between dispatch and execution as a harmless no-op."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    assert tasks.stop_instance_workspaces.run(str(uuid4())) == {
+        "status": "noop",
+        "submitted": 0,
+        "already_stopping": 0,
+    }
+
+
+async def test_daily_workspace_stop_fails_once_and_logs_instance(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log one direct Coder failure without retrying the independent task."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    created = await create_instance(client, "DAILY TRY AND DIE")
+    instance_id = UUID(str(created["id"]))
+    await store_admin_password(session_maker, instance_id)
+    attempts = 0
+
+    def fail_submission(_instance_url: str, _password: SecretStr) -> None:
+        """Fail the only allowed submission attempt."""
+
+        nonlocal attempts
+        attempts += 1
+        msg = "Coder authentication failed"
+        raise coder.CoderRequestError(msg)
+
+    monkeypatch.setattr(coder, "submit_active_workspace_stops", fail_submission)
+
+    with pytest.raises(coder.CoderRequestError, match="authentication failed"):
+        tasks.stop_instance_workspaces.run(str(instance_id))
+
+    assert attempts == 1
+    assert str(instance_id) in caplog.text
 
 
 async def test_start_and_stop_jobs_reconcile_workspaces_before_application_deletion(

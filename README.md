@@ -523,6 +523,18 @@ redelivers the exact allowlisted step for `pending` and `error` jobs and first r
 `running` jobs to `pending`. Unknown task names are logged and ignored. The healthcheck and scanner
 are intentionally not tracked as jobs.
 
+Beat also schedules `coder_manager.dispatch_daily_workspace_stops` every day at midnight in
+`CODER_MANAGER_SCHEDULER_TIMEZONE` (`Europe/Paris` by default). The dispatcher reads every stored
+instance without filtering its lifecycle state and sends one independent
+`coder_manager.stop_instance_workspaces` task per instance, allowing the Celery worker pool to
+process instances in parallel. Each task reads the stored Coder URL and administrator credentials,
+lists all `running`, `starting`, and `stopping` workspaces directly from Coder, and submits one
+`stop` build for every `running` or `starting` workspace. A workspace already `stopping` is left
+untouched. The task returns immediately after all submissions: it does not call Argo CD, poll build
+status, rescan Coder, retry failures, create a `JobExecution`, or update instance/workspace rows.
+Submission failures are logged after the task has attempted the remaining workspaces for that
+instance, and a failed instance does not prevent the independently dispatched tasks for the others.
+
 Before mutating an existing Argo CD Application, instance reconciliation, start, stop, and deletion
 read its current operation phase. An Application in `Running` or `Terminating` is left untouched:
 the owned job and any members claimed by an update return to `pending` on the same step without an

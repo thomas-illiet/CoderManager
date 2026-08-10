@@ -18,11 +18,13 @@ from coder_manager.domains.coder.models import (
     CoderWorkspacePage,
 )
 from coder_manager.domains.coder.service import (
+    WorkspaceStopSubmissions,
     bootstrap_admin_account,
     cleanup_user_accounts,
     delete_all_workspaces,
     delete_user_accounts,
     stop_active_workspaces,
+    submit_active_workspace_stops,
 )
 
 __all__ = [
@@ -37,9 +39,11 @@ __all__ = [
     "CoderWorkspace",
     "CoderWorkspaceBuild",
     "CoderWorkspacePage",
+    "WorkspaceStopSubmissions",
     "bootstrap_admin_account",
     "cleanup_user_accounts",
     "delete_all_workspaces",
     "delete_user_accounts",
     "stop_active_workspaces",
+    "submit_active_workspace_stops",
 ]

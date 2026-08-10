@@ -3,6 +3,7 @@
 from datetime import timedelta
 
 from celery import Celery, signals
+from celery.schedules import crontab
 
 from coder_manager.config import get_settings
 from coder_manager.worker_database import initialize_worker_database, shutdown_worker_database
@@ -18,7 +19,7 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
-    timezone="UTC",
+    timezone=settings.scheduler_timezone,
     enable_utc=True,
     task_track_started=True,
     beat_schedule={
@@ -29,6 +30,10 @@ celery_app.conf.update(
         "check-instance-states": {
             "task": "coder_manager.check_instance_states",
             "schedule": timedelta(hours=1),
+        },
+        "dispatch-daily-workspace-stops": {
+            "task": "coder_manager.dispatch_daily_workspace_stops",
+            "schedule": crontab(minute=0, hour=0),
         },
     },
 )

@@ -18,6 +18,7 @@ from coder_manager.main import app
 from coder_manager.models import Database
 from coder_manager.models.base import Base
 from coder_manager.tasks import (
+    dispatch_daily_workspace_stops,
     retry_job_executions,
     step_01_create_schema,
     step_01_create_workspace,
@@ -37,6 +38,7 @@ from coder_manager.tasks import (
     step_03_remove_schema,
     step_04_remove_local_configuration,
     step_04_sync_templates,
+    stop_instance_workspaces,
 )
 from coder_manager.worker_database import derive_sync_database_url
 
@@ -48,6 +50,7 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep API tests independent from a running Redis broker."""
 
     for task in (
+        dispatch_daily_workspace_stops,
         retry_job_executions,
         step_01_create_schema,
         step_02_create_instance,
@@ -67,6 +70,7 @@ def disable_celery_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
         step_01_delete_workspace,
         step_01_sync_database,
         step_01_sync_template,
+        stop_instance_workspaces,
     ):
         monkeypatch.setattr(task, "delay", MagicMock())
 

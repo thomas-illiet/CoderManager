@@ -1,8 +1,9 @@
 """Application configuration."""
 
 from functools import lru_cache
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +22,7 @@ class Settings(BaseSettings):
     )
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    scheduler_timezone: str = "Europe/Paris"
     job_retry_interval_seconds: int = Field(default=60, ge=1)
     job_stale_after_seconds: int = Field(default=300, ge=1)
     template_sync_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
@@ -61,6 +63,18 @@ class Settings(BaseSettings):
     cyberark_production_key_name: str | None = None
     cyberark_production_safe: str | None = None
     default_admins: str = ""
+
+    @field_validator("scheduler_timezone")
+    @classmethod
+    def validate_scheduler_timezone(cls, value: str) -> str:
+        """Require a timezone understood by Celery and the Python runtime."""
+
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as error:
+            msg = "scheduler_timezone must be a valid IANA timezone"
+            raise ValueError(msg) from error
+        return value
 
 
 @lru_cache
