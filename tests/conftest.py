@@ -1,5 +1,6 @@
 """Shared API and database fixtures."""
 
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -11,6 +12,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
+
+os.environ.setdefault("CODER_MANAGER_DATABASE_SCHEMA", "public")
 
 from coder_manager.config import Settings, get_settings
 from coder_manager.database import get_session

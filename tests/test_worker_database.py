@@ -39,7 +39,7 @@ def test_worker_process_database_lifecycle(
     monkeypatch.setattr(
         worker_database,
         "get_settings",
-        lambda: SimpleNamespace(database_url=database_url),
+        lambda: SimpleNamespace(database_url=database_url, database_schema=None),
     )
     worker_database.shutdown_worker_database()
 

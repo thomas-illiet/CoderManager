@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     database_url: str = (
         "postgresql+asyncpg://coder_manager:coder_manager@localhost:5432/coder_manager"
     )
+    database_schema: str | None = None
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
     scheduler_timezone: str = "Europe/Paris"

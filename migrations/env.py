@@ -8,6 +8,11 @@ from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from coder_manager.config import get_settings
+from coder_manager.database_schema import (
+    configure_database_schema,
+    quote_postgresql_identifier,
+    resolve_database_schema,
+)
 from coder_manager.models import (  # noqa: F401
     Database,
     DatabaseAllocation,
@@ -26,7 +31,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+settings = get_settings()
+config.set_main_option("sqlalchemy.url", settings.database_url)
+database_schema = resolve_database_schema(settings.database_url, settings.database_schema)
 target_metadata = Base.metadata
 
 
@@ -40,6 +47,8 @@ def run_migrations_offline() -> None:
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
     )
+    if database_schema is not None:
+        context.execute(f"SET search_path TO {quote_postgresql_identifier(database_schema)}")
     with context.begin_transaction():
         context.run_migrations()
 
@@ -60,6 +69,7 @@ async def run_async_migrations() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    configure_database_schema(connectable, settings.database_url, database_schema)
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await connectable.dispose()

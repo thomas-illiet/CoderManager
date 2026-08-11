@@ -5,6 +5,7 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from coder_manager.config import get_settings
+from coder_manager.database_schema import configure_database_schema
 
 _SYNC_DRIVERS = {
     "postgresql+asyncpg": "postgresql+psycopg",
@@ -30,13 +31,20 @@ def initialize_worker_database() -> None:
 
     if _worker_engine is not None:
         return
-    _worker_engine = create_engine(
-        derive_sync_database_url(get_settings().database_url),
+    settings = get_settings()
+    worker_engine = create_engine(
+        derive_sync_database_url(settings.database_url),
         pool_pre_ping=True,
         pool_size=1,
         max_overflow=0,
     )
-    _worker_session_maker = sessionmaker(_worker_engine, expire_on_commit=False)
+    configure_database_schema(
+        worker_engine,
+        settings.database_url,
+        settings.database_schema,
+    )
+    _worker_engine = worker_engine
+    _worker_session_maker = sessionmaker(worker_engine, expire_on_commit=False)
 
 
 def get_worker_session_maker() -> sessionmaker[Session]:

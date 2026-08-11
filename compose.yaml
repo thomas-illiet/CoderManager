@@ -1,5 +1,6 @@
 x-database-environment: &database-environment
   CODER_MANAGER_DATABASE_URL: postgresql+asyncpg://coder_manager:coder_manager@postgres:5432/coder_manager
+  CODER_MANAGER_DATABASE_SCHEMA: ${CODER_MANAGER_DATABASE_SCHEMA:?CODER_MANAGER_DATABASE_SCHEMA is required}
 
 x-broker-environment: &broker-environment
   CODER_MANAGER_CELERY_BROKER_URL: redis://redis:6379/0
