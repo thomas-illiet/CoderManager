@@ -67,6 +67,14 @@ class Settings(BaseSettings):
     cyberark_production_safe: str | None = None
     default_admins: str = ""
 
+    def require_database_schema(self) -> str:
+        """Return the configured database schema or fail for a database consumer."""
+
+        if self.database_schema is None or not self.database_schema.strip():
+            msg = "CODER_MANAGER_DATABASE_SCHEMA is required"
+            raise ValueError(msg)
+        return self.database_schema
+
     @field_validator("scheduler_timezone")
     @classmethod
     def validate_scheduler_timezone(cls, value: str) -> str:

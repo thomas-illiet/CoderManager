@@ -9,11 +9,15 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from coder_manager.config import get_settings
-from coder_manager.database_schema import configure_database_schema
 
 settings = get_settings()
-engine = create_async_engine(settings.database_url, pool_pre_ping=True)
-configure_database_schema(engine, settings.database_url, settings.database_schema)
+engine = create_async_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    connect_args={
+        "server_settings": {"search_path": settings.require_database_schema()},
+    },
+)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 

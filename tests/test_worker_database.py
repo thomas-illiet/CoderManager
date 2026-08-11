@@ -4,7 +4,9 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import pytest
 from sqlalchemy.pool import QueuePool
 
 from coder_manager import worker_database
@@ -12,6 +14,7 @@ from coder_manager.celery_app import (
     initialize_worker_process_database,
     shutdown_worker_process_database,
 )
+from coder_manager.config import Settings
 
 
 def test_derive_sync_database_url() -> None:
@@ -27,6 +30,40 @@ def test_derive_sync_database_url() -> None:
         worker_database.derive_sync_database_url("sqlite+aiosqlite:////tmp/database.db")
         == "sqlite+pysqlite:////tmp/database.db"
     )
+
+
+@pytest.mark.parametrize("database_schema", [None, "", "   "])
+def test_database_schema_is_required(database_schema: str | None) -> None:
+    """Reject an absent or empty schema when a database consumer requests it."""
+
+    with pytest.raises(ValueError, match="CODER_MANAGER_DATABASE_SCHEMA is required"):
+        Settings(database_schema=database_schema).require_database_schema()
+
+
+def test_worker_database_passes_schema_to_psycopg(monkeypatch) -> None:
+    """Pass the configured PostgreSQL search path directly to psycopg."""
+
+    settings = Settings(
+        database_url="postgresql+asyncpg://user:secret@postgres:5432/database",
+        database_schema="coder_manager_schema",
+    )
+    engine = MagicMock()
+    create_engine = MagicMock(return_value=engine)
+    worker_database.shutdown_worker_database()
+    monkeypatch.setattr(worker_database, "get_settings", lambda: settings)
+    monkeypatch.setattr(worker_database, "create_engine", create_engine)
+
+    worker_database.initialize_worker_database()
+
+    create_engine.assert_called_once_with(
+        "postgresql+psycopg://user:secret@postgres:5432/database",
+        connect_args={"options": "-csearch_path=coder_manager_schema"},
+        pool_pre_ping=True,
+        pool_size=1,
+        max_overflow=0,
+    )
+    worker_database.shutdown_worker_database()
+    engine.dispose.assert_called_once_with()
 
 
 def test_worker_process_database_lifecycle(

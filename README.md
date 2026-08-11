@@ -13,7 +13,7 @@ templates. Argo CD Applications remain managed as part of the instance lifecycle
 
 ## Run locally
 
-Copy `.env.example` to `.env`, replace its example secrets, then start the complete stack:
+Set `CODER_MANAGER_DATABASE_SCHEMA` or copy `.env.example` to `.env`, then start the stack:
 
 ```bash
 docker compose up --build
@@ -37,14 +37,14 @@ uv run ruff check .
 uv run ty check src
 ```
 
-Use the same `.env` before running the API, migrations, worker, Beat, or Flower directly on the host.
-The example is organized into `COMMUN`, `API`, `WORKER`, `BEAT`, `MIGRATE`, and `FLOWER`
+Copy `.env.example` to `.env` before running the API, migrations, worker, Beat, or Flower directly on
+the host. The example is organized into `COMMUN`, `API`, `WORKER`, `BEAT`, `MIGRATE`, and `FLOWER`
 sections. `COMMUN` identifies values consumed by more than one service; it does not mean that every
 value is injected into every container. Compose explicitly gives each service only its required
-subset. `MIGRATE` uses the common database URL and schema, while `FLOWER` uses the common Celery
-broker and `FLOWER_UNAUTHENTICATED_API=true`. This opens Flower's internal API without authentication
-only on the localhost-bound interface. The worker publishes task events so Flower can display live
-task activity.
+subset. `MIGRATE` uses the common database URL and schema, while `FLOWER` uses the common Celery broker
+and `FLOWER_UNAUTHENTICATED_API=true`. This opens Flower's internal API without authentication only on
+the localhost-bound interface. The worker publishes task events so Flower can display live task
+activity.
 
 ## HTTP API
 
@@ -567,11 +567,8 @@ FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`.
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection
 pool after the process starts and disposes it during process shutdown. The worker derives the sync
 driver from `CODER_MANAGER_DATABASE_URL`. The API, migrations, and worker also require
-`CODER_MANAGER_DATABASE_SCHEMA`; it selects one existing, accessible PostgreSQL schema as the only
-`search_path` entry. Coder Manager never creates this schema and has no implicit `public` fallback.
-Alembic stores its `alembic_version` table in the selected schema, so each schema tracks its own
-migration state. The `public` value in `.env.example` is only a local example and is not an
-application default.
+`CODER_MANAGER_DATABASE_SCHEMA`, which is passed directly to PostgreSQL as the `search_path`.
+Coder Manager does not create or validate this externally managed schema.
 
 Member changes are reconciled by a two-step `instance.update` workflow rather than individual
 member tasks. `step_01_update_instance` claims pending members and reconciles the Argo CD access
