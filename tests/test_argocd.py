@@ -25,6 +25,16 @@ from coder_manager.domains.argocd.applications import application_name, applicat
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
+TEST_ARGOCD_TOKENS = {
+    "development": "super-secret-token",
+    "staging": "staging-secret-token",
+    "production": "production-secret-token",
+}
+TEST_APPLICATION_PREFIXES = {
+    "development": "managed",
+    "staging": "managed-staging",
+    "production": "managed-production",
+}
 EXPECTED_INSTANCE_HELM_ARGS = (
     f"--set global.baseDomain={TEST_INSTANCE_SLUG}.code-studio.dev.echonet\n"
     f"--set global.identifier={TEST_INSTANCE_SLUG}\n"
@@ -41,8 +51,6 @@ def configured_settings(**overrides: object) -> Settings:
 
     values: dict[str, object] = {
         "argocd_url": "https://argocd.test/root/",
-        "argocd_token": "super-secret-token",
-        "argocd_application_prefix": "managed",
         "argocd_region": " emea ",
         "argocd_repository_url": "https://git.test/platform.git",
         "argocd_repository_path": "charts/coder",
@@ -59,6 +67,10 @@ def configured_settings(**overrides: object) -> Settings:
         prefix = f"cyberark_{environment}"
         values.update(
             {
+                f"argocd_{environment}_token": TEST_ARGOCD_TOKENS[environment],
+                f"argocd_{environment}_application_prefix": (
+                    TEST_APPLICATION_PREFIXES[environment]
+                ),
                 f"{prefix}_app_id": f"{environment}-app",
                 f"{prefix}_cert_name": f"{environment}-cert",
                 f"{prefix}_key_name": f"{environment}-key",
@@ -74,12 +86,19 @@ def client_settings(**overrides: object) -> Settings:
 
     values: dict[str, object] = {
         "argocd_url": "https://argocd.test/root/",
-        "argocd_token": "super-secret-token",
-        "argocd_application_prefix": "managed",
         "argocd_development_project_name": "development-project",
         "argocd_staging_project_name": "staging-project",
         "argocd_production_project_name": "production-project",
     }
+    for environment in ("development", "staging", "production"):
+        values.update(
+            {
+                f"argocd_{environment}_token": TEST_ARGOCD_TOKENS[environment],
+                f"argocd_{environment}_application_prefix": (
+                    TEST_APPLICATION_PREFIXES[environment]
+                ),
+            }
+        )
     values.update(overrides)
     return Settings.model_validate(values)
 
@@ -356,6 +375,9 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         {"project": "staging-project"},
         {"project": "staging-project"},
     ]
+    assert all(
+        request.headers["authorization"] == "Bearer staging-secret-token" for request in requests
+    )
     assert update["spec"]["source"]["plugin"]["env"] == [
         {
             "name": "HELM_ARGS",
@@ -645,6 +667,9 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
         {"project": "production-project"},
     ]
     assert requests[1].headers["content-type"] == "application/json"
+    assert all(
+        request.headers["authorization"] == "Bearer production-secret-token" for request in requests
+    )
     assert requests[1].content == b""
 
 
@@ -827,12 +852,58 @@ def test_request_errors_do_not_include_token_or_response_body() -> None:
 
 
 def test_application_name_prefers_attachment_then_strict_slug() -> None:
-    """Resolve attached and strict slug Application names."""
+    """Resolve attached and environment-specific strict slug Application names."""
 
     config = ArgoCdClientConfig.from_settings(client_settings())
 
-    assert application_name(config, TEST_INSTANCE_SLUG, "attached") == "attached"
-    assert application_name(config, TEST_INSTANCE_SLUG, None) == TEST_APPLICATION_NAME
+    assert application_name(config, TEST_INSTANCE_SLUG, "attached", "production") == "attached"
+    assert (
+        application_name(config, TEST_INSTANCE_SLUG, None, "development") == TEST_APPLICATION_NAME
+    )
+    assert (
+        application_name(config, TEST_INSTANCE_SLUG, None, "staging")
+        == f"managed-staging-{TEST_INSTANCE_SLUG}"
+    )
+    assert (
+        application_name(config, TEST_INSTANCE_SLUG, None, "production")
+        == f"managed-production-{TEST_INSTANCE_SLUG}"
+    )
+
+
+@pytest.mark.parametrize("environment", ["development", "staging", "production"])
+def test_client_configuration_selects_environment_secrets_and_prefixes(
+    environment: str,
+) -> None:
+    """Select immutable environment-specific authentication and naming settings."""
+
+    config = ArgoCdClientConfig.from_settings(client_settings())
+
+    assert config.token_for(environment) == TEST_ARGOCD_TOKENS[environment]
+    assert config.application_prefix_for(environment) == TEST_APPLICATION_PREFIXES[environment]
+    assert TEST_ARGOCD_TOKENS[environment] not in repr(config)
+
+
+def test_one_client_switches_authorization_between_environments() -> None:
+    """Build authentication per request without leaking a previous environment token."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Record environment-specific existence requests."""
+
+        requests.append(request)
+        return httpx.Response(404)
+
+    config = ArgoCdClientConfig.from_settings(client_settings())
+    with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
+        for environment in ("development", "staging", "production"):
+            assert not client.application_exists(TEST_INSTANCE_SLUG, None, environment)
+
+    assert [request.headers["authorization"] for request in requests] == [
+        "Bearer super-secret-token",
+        "Bearer staging-secret-token",
+        "Bearer production-secret-token",
+    ]
 
 
 @pytest.mark.parametrize("skip_ssl_verify", [False, True])
@@ -897,8 +968,8 @@ def test_client_configuration_cannot_reconcile_application() -> None:
     [
         (Settings(), "Missing required Argo CD client settings"),
         (
-            client_settings(argocd_application_prefix="x" * 31),
-            "APPLICATION_PREFIX",
+            client_settings(argocd_development_application_prefix="x" * 31),
+            "CODER_MANAGER_ARGOCD_DEVELOPMENT_APPLICATION_PREFIX",
         ),
         (
             client_settings(argocd_staging_project_name=" "),
@@ -916,15 +987,62 @@ def test_invalid_client_configuration_is_rejected(
         ArgoCdClientConfig.from_settings(settings)
 
 
-def test_legacy_global_project_setting_is_not_supported() -> None:
-    """Require environment projects even when the removed global setting is supplied."""
+@pytest.mark.parametrize("environment", ["development", "staging", "production"])
+def test_environment_token_is_required(environment: str) -> None:
+    """Reject an empty bearer token for every supported environment."""
+
+    settings = client_settings(**{f"argocd_{environment}_token": " "})
+
+    with pytest.raises(
+        ArgoCdConfigurationError,
+        match=f"CODER_MANAGER_ARGOCD_{environment.upper()}_TOKEN",
+    ):
+        ArgoCdClientConfig.from_settings(settings)
+
+
+@pytest.mark.parametrize("environment", ["development", "staging", "production"])
+@pytest.mark.parametrize("prefix", [" ", "x" * 31])
+def test_environment_application_prefix_is_required_and_valid(
+    environment: str,
+    prefix: str,
+) -> None:
+    """Reject an empty or invalid Application prefix for every environment."""
+
+    settings = client_settings(**{f"argocd_{environment}_application_prefix": prefix})
+
+    with pytest.raises(
+        ArgoCdConfigurationError,
+        match=f"CODER_MANAGER_ARGOCD_{environment.upper()}_APPLICATION_PREFIX",
+    ):
+        ArgoCdClientConfig.from_settings(settings)
+
+
+def test_legacy_global_token_and_prefix_settings_are_not_supported() -> None:
+    """Reject removed global authentication and naming settings without fallback."""
 
     settings = Settings.model_validate(
         {
             "argocd_url": "https://argocd.test",
-            "argocd_token": "super-secret-token",
-            "argocd_project": "legacy-project",
+            "argocd_token": "legacy-token",
+            "argocd_application_prefix": "legacy-prefix",
         }
+    )
+
+    assert "argocd_token" not in Settings.model_fields
+    assert "argocd_application_prefix" not in Settings.model_fields
+    with pytest.raises(
+        ArgoCdConfigurationError,
+        match="CODER_MANAGER_ARGOCD_DEVELOPMENT_TOKEN",
+    ):
+        ArgoCdClientConfig.from_settings(settings)
+
+
+def test_legacy_global_project_setting_is_not_supported() -> None:
+    """Require environment projects even when the removed global setting is supplied."""
+
+    settings = client_settings(
+        argocd_development_project_name=None,
+        argocd_project="legacy-project",
     )
 
     assert "argocd_project" not in Settings.model_fields

@@ -40,9 +40,13 @@ class Settings(BaseSettings):
     )
     crypto_key: SecretStr | None = None
     argocd_url: str | None = None
-    argocd_token: SecretStr | None = None
+    argocd_development_token: SecretStr | None = None
+    argocd_staging_token: SecretStr | None = None
+    argocd_production_token: SecretStr | None = None
     argocd_skip_ssl_verify: bool = False
-    argocd_application_prefix: str = "coder"
+    argocd_development_application_prefix: str | None = None
+    argocd_staging_application_prefix: str | None = None
+    argocd_production_application_prefix: str | None = None
     argocd_region: str | None = None
     argocd_repository_url: str | None = None
     argocd_repository_path: str | None = None

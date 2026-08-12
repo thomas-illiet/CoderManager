@@ -37,36 +37,41 @@ class ArgoCdClientConfig:
     """Validated settings required to access one Argo CD Application."""
 
     url: str
-    token: str = field(repr=False)
+    tokens: Mapping[str, str] = field(repr=False)
     skip_ssl_verify: bool
     projects: Mapping[str, str]
-    application_prefix: str
+    application_prefixes: Mapping[str, str]
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ArgoCdClientConfig:
         """Validate the settings shared by read and mutation operations."""
 
-        required: dict[str, str | None] = {
-            "CODER_MANAGER_ARGOCD_URL": settings.argocd_url,
-            "CODER_MANAGER_ARGOCD_TOKEN": (
-                settings.argocd_token.get_secret_value() if settings.argocd_token else None
-            ),
-        }
+        required: dict[str, str | None] = {"CODER_MANAGER_ARGOCD_URL": settings.argocd_url}
+        required.update(_token_settings(settings))
         required.update(_project_settings(settings))
+        required.update(_application_prefix_settings(settings))
         missing = [name for name, value in required.items() if not value or not value.strip()]
         if missing:
             joined = ", ".join(sorted(missing))
             msg = f"Missing required Argo CD client settings: {joined}"
             raise ArgoCdConfigurationError(msg)
 
-        prefix = _application_prefix(settings.argocd_application_prefix)
         return cls(
             url=_required_value(required, "CODER_MANAGER_ARGOCD_URL").rstrip("/"),
-            token=_required_value(required, "CODER_MANAGER_ARGOCD_TOKEN"),
+            tokens=_tokens(required),
             skip_ssl_verify=settings.argocd_skip_ssl_verify,
             projects=_projects(required),
-            application_prefix=prefix,
+            application_prefixes=_application_prefixes(required),
         )
+
+    def token_for(self, environment: str) -> str:
+        """Return the Argo CD bearer token configured for one environment."""
+
+        try:
+            return self.tokens[environment]
+        except KeyError as error:  # pragma: no cover - callers use domain enum values
+            msg = f"Unsupported Argo CD token environment: {environment}"
+            raise ArgoCdConfigurationError(msg) from error
 
     def project_for(self, environment: str) -> str:
         """Return the Argo CD project configured for one environment."""
@@ -75,6 +80,15 @@ class ArgoCdClientConfig:
             return self.projects[environment]
         except KeyError as error:  # pragma: no cover - callers use domain enum values
             msg = f"Unsupported Argo CD project: {environment}"
+            raise ArgoCdConfigurationError(msg) from error
+
+    def application_prefix_for(self, environment: str) -> str:
+        """Return the Application name prefix configured for one environment."""
+
+        try:
+            return self.application_prefixes[environment]
+        except KeyError as error:  # pragma: no cover - callers use domain enum values
+            msg = f"Unsupported Argo CD Application prefix: {environment}"
             raise ArgoCdConfigurationError(msg) from error
 
 
@@ -111,10 +125,10 @@ class ArgoCdConfig(ArgoCdClientConfig):
 
         return cls(
             url=client.url,
-            token=client.token,
+            tokens=client.tokens,
             skip_ssl_verify=client.skip_ssl_verify,
             projects=client.projects,
-            application_prefix=client.application_prefix,
+            application_prefixes=client.application_prefixes,
             region=_required_value(required, "CODER_MANAGER_ARGOCD_REGION").upper(),
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
@@ -152,15 +166,77 @@ def _required_value(values: Mapping[str, str | None], name: str) -> str:
     return value.strip()
 
 
-def _application_prefix(raw_value: str) -> str:
+def _application_prefix(raw_value: str, setting_name: str) -> str:
     """Normalize and validate the Application name prefix."""
 
     prefix = raw_value.strip().lower()
     maximum_prefix_length = MAX_APPLICATION_NAME_LENGTH - UUID_HEX_LENGTH - 1
     if not APPLICATION_NAME_PATTERN.fullmatch(prefix) or len(prefix) > maximum_prefix_length:
-        msg = "CODER_MANAGER_ARGOCD_APPLICATION_PREFIX is not a valid DNS label prefix"
+        msg = f"{setting_name} is not a valid DNS label prefix"
         raise ArgoCdConfigurationError(msg)
     return prefix
+
+
+def _token_settings(settings: Settings) -> dict[str, str | None]:
+    """Collect the three environment-specific Argo CD bearer tokens."""
+
+    return {
+        _token_environment_name(environment): (
+            token.get_secret_value()
+            if (token := getattr(settings, f"argocd_{environment}_token")) is not None
+            else None
+        )
+        for environment in INSTANCE_ENVIRONMENTS
+    }
+
+
+def _tokens(values: Mapping[str, str | None]) -> Mapping[str, str]:
+    """Build an immutable token lookup for every environment."""
+
+    return MappingProxyType(
+        {
+            environment: _required_value(values, _token_environment_name(environment))
+            for environment in INSTANCE_ENVIRONMENTS
+        }
+    )
+
+
+def _token_environment_name(environment: str) -> str:
+    """Return the public bearer-token environment variable name."""
+
+    return f"CODER_MANAGER_ARGOCD_{environment}_TOKEN".upper()
+
+
+def _application_prefix_settings(settings: Settings) -> dict[str, str | None]:
+    """Collect the three environment-specific Application name prefixes."""
+
+    return {
+        _application_prefix_environment_name(environment): getattr(
+            settings,
+            f"argocd_{environment}_application_prefix",
+        )
+        for environment in INSTANCE_ENVIRONMENTS
+    }
+
+
+def _application_prefixes(values: Mapping[str, str | None]) -> Mapping[str, str]:
+    """Build an immutable validated prefix lookup for every environment."""
+
+    return MappingProxyType(
+        {
+            environment: _application_prefix(
+                _required_value(values, _application_prefix_environment_name(environment)),
+                _application_prefix_environment_name(environment),
+            )
+            for environment in INSTANCE_ENVIRONMENTS
+        }
+    )
+
+
+def _application_prefix_environment_name(environment: str) -> str:
+    """Return the public Application-prefix environment variable name."""
+
+    return f"CODER_MANAGER_ARGOCD_{environment}_APPLICATION_PREFIX".upper()
 
 
 def _project_settings(settings: Settings) -> dict[str, str | None]:

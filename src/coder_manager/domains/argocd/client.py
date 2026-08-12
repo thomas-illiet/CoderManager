@@ -54,7 +54,6 @@ class ArgoCdClient:
         self._config = config
         self._client = httpx.Client(
             base_url=f"{config.url}/",
-            headers={"Authorization": f"Bearer {config.token}"},
             timeout=httpx.Timeout(READ_TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS),
             verify=not config.skip_ssl_verify,
             follow_redirects=False,
@@ -94,7 +93,7 @@ class ArgoCdClient:
         deployment_config = self._deployment_config()
         environment = helm_values.environment
         project = self._config.project_for(environment)
-        name = application_name(self._config, slug, attached_name)
+        name = application_name(self._config, slug, attached_name, environment)
         desired = application_payload(
             deployment_config,
             name,
@@ -113,6 +112,7 @@ class ArgoCdClient:
         if existing is None:
             response = self._client.post(
                 "api/v1/applications",
+                headers=self._authorization_headers(environment),
                 params={"upsert": "false", "validate": "true"},
                 json=desired,
             )
@@ -133,6 +133,7 @@ class ArgoCdClient:
             path = f"api/v1/applications/{name}"
             response = self._client.put(
                 path,
+                headers=self._authorization_headers(environment),
                 params={"project": project, "validate": "true"},
                 json=application_update_payload(existing, desired),
             )
@@ -151,6 +152,7 @@ class ArgoCdClient:
         sync_path = f"api/v1/applications/{name}/sync"
         response = self._client.post(
             sync_path,
+            headers=self._authorization_headers(environment),
             params={"project": project},
             json={},
         )
@@ -176,7 +178,7 @@ class ArgoCdClient:
     ) -> ArgoCdApplicationStatus:
         """Return a sanitized snapshot of an Application's remote status."""
 
-        name = application_name(self._config, slug, attached_name)
+        name = application_name(self._config, slug, attached_name, environment)
         application = self._get_application(name, environment)
         if application is None:
             raise ArgoCdApplicationNotFoundError(name)
@@ -190,7 +192,7 @@ class ArgoCdClient:
     ) -> bool:
         """Return whether the strict instance Application exists."""
 
-        name = application_name(self._config, slug, attached_name)
+        name = application_name(self._config, slug, attached_name, environment)
         return self._get_application(name, environment) is not None
 
     def delete_application(
@@ -201,7 +203,7 @@ class ArgoCdClient:
     ) -> ArgoCdMutationStatus:
         """Delete an Application and its managed resources idempotently."""
 
-        name = application_name(self._config, slug, attached_name)
+        name = application_name(self._config, slug, attached_name, environment)
         project = self._config.project_for(environment)
         existing = self._get_application(name, environment)
         if existing is None:
@@ -211,7 +213,10 @@ class ArgoCdClient:
         path = f"api/v1/applications/{name}"
         response = self._client.delete(
             path,
-            headers={"Content-Type": "application/json"},
+            headers={
+                **self._authorization_headers(environment),
+                "Content-Type": "application/json",
+            },
             params={
                 "cascade": "true",
                 "propagationPolicy": "foreground",
@@ -229,12 +234,18 @@ class ArgoCdClient:
         path = f"api/v1/applications/{name}"
         response = self._client.get(
             path,
+            headers=self._authorization_headers(environment),
             params={"project": self._config.project_for(environment)},
         )
         if response.status_code == httpx.codes.NOT_FOUND:
             return None
         self._raise_for_response(response, "GET", path)
         return _json_object(response, path)
+
+    def _authorization_headers(self, environment: str) -> dict[str, str]:
+        """Build request-scoped authentication for one instance environment."""
+
+        return {"Authorization": f"Bearer {self._config.token_for(environment)}"}
 
     @staticmethod
     def _raise_for_response(response: httpx.Response, method: str, path: str) -> None:

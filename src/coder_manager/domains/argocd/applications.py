@@ -33,12 +33,13 @@ def application_name(
     config: ArgoCdClientConfig,
     slug: str,
     attached_name: str | None,
+    environment: str,
 ) -> str:
     """Return the attached or strict slug-based Application name."""
 
     if attached_name:
         return attached_name
-    return f"{config.application_prefix}-{slug}"
+    return f"{config.application_prefix_for(environment)}-{slug}"
 
 
 def application_payload(

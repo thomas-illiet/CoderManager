@@ -163,11 +163,11 @@ combination of application and environment remains unique.
 Instance creation is split into three durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
-`metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. The slug is required;
-there is no UUID fallback. Existing attached Application names are retained after their first
-successful reconciliation. The Application uses a Helm chart from the configured Git repository
-through the `argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's first
-administrator account before the instance reaches success.
+`metadata.name` is `<CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX>-<instance slug>`. The
+slug is required; there is no UUID fallback. Existing attached Application names are retained after
+their first successful reconciliation. The Application uses a Helm chart from the configured Git
+repository through the `argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's
+first administrator account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters. The
 `region` value comes from `CODER_MANAGER_ARGOCD_REGION` and is normalized to uppercase. Commas in
@@ -191,22 +191,23 @@ The slug names the Argo CD Application metadata; Coder Manager does not add Helm
 values without creating API member records. The static bootstrap username `admin` is always
 included in the allowed-user and administrator values.
 
-Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`, `CODER_MANAGER_ARGOCD_TOKEN`,
-`CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
+Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`,
+`CODER_MANAGER_ARGOCD_<ENVIRONMENT>_TOKEN`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`,
-`CODER_MANAGER_ARGOCD_REGION`, and
-one project and destination per environment with
+`CODER_MANAGER_ARGOCD_REGION`, and one token, Application prefix, project, and destination per
+environment with `CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX`,
 `CODER_MANAGER_ARGOCD_<ENVIRONMENT>_PROJECT_NAME` and
 `CODER_MANAGER_ARGOCD_<ENVIRONMENT>_DESTINATION_NAME`. Configure one CyberArk plugin map for each
-environment. Project and destination names, and CyberArk variable names, use the environments
-`DEVELOPMENT`, `STAGING`, and `PRODUCTION`. CyberArk variable names follow
+environment. Token, Application-prefix, project, destination, and CyberArk variable names use the
+environments `DEVELOPMENT`, `STAGING`, and `PRODUCTION`. CyberArk variable names follow
 `CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where
-fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and `SAFE`. The region, all three projects, all three
-destinations, and all 12 CyberArk values are required
-for Argo CD reconciliation; `.env.example` lists the complete configuration. TLS certificate
-verification is enabled by default; set
+fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and `SAFE`. The region, all three tokens, all three
+Application prefixes, all three projects, all three destinations, and all 12 CyberArk values are
+required for Argo CD reconciliation; `.env.example` lists the complete configuration. TLS
+certificate verification is enabled by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
-worker requests synchronization but does not wait for Argo CD health convergence.
+worker uses the token selected from the instance environment, requests synchronization, but does
+not wait for Argo CD health convergence.
 
 `POST /api/v1/instances/{id}/sync` creates an `instance.update` job for an idle successful or failed
 instance. Pending, running, and deleting instances return HTTP 409. Only one job can own an instance
