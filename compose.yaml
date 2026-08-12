@@ -5,6 +5,10 @@ x-database-environment: &database-environment
 x-broker-environment: &broker-environment
   CODER_MANAGER_CELERY_BROKER_URL: redis://redis:6379/0
 
+x-metrics-environment: &metrics-environment
+  CODER_MANAGER_METRICS_HOST: ${CODER_MANAGER_METRICS_HOST:-0.0.0.0}
+  CODER_MANAGER_METRICS_PORT: ${CODER_MANAGER_METRICS_PORT:-9808}
+
 x-api-worker-environment: &api-worker-environment
   CODER_MANAGER_CRYPTO_KEY: ${CODER_MANAGER_CRYPTO_KEY:-}
   CODER_MANAGER_ARGOCD_URL: ${CODER_MANAGER_ARGOCD_URL:-}
@@ -54,11 +58,13 @@ services:
   api:
     build: .
     environment:
-      <<: [*database-environment, *broker-environment, *api-worker-environment]
+      <<: [*database-environment, *broker-environment, *metrics-environment, *api-worker-environment]
       CODER_MANAGER_APP_NAME: ${CODER_MANAGER_APP_NAME:-Coder Manager}
       CODER_MANAGER_INSTANCE_DOMAIN: ${CODER_MANAGER_INSTANCE_DOMAIN:-code-studio}
     ports:
       - "8000:8000"
+    expose:
+      - "9808"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -68,14 +74,15 @@ services:
   worker:
     build: .
     command:
-      - celery
+      - coder-manager-celery
       - -A
       - coder_manager.celery_app:celery_app
       - worker
       - --loglevel=INFO
       - --events
     environment:
-      <<: [*database-environment, *broker-environment, *api-worker-environment]
+      <<: [*database-environment, *broker-environment, *metrics-environment, *api-worker-environment]
+      PROMETHEUS_MULTIPROC_DIR: /tmp/coder-manager-prometheus
       CODER_MANAGER_CELERY_RESULT_BACKEND: redis://redis:6379/1
       CODER_MANAGER_JOB_STALE_AFTER_SECONDS: ${CODER_MANAGER_JOB_STALE_AFTER_SECONDS:-300}
       CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS: ${CODER_MANAGER_TEMPLATE_SYNC_POLL_INTERVAL_SECONDS:-2}
@@ -105,6 +112,8 @@ services:
       CODER_MANAGER_CYBERARK_PRODUCTION_CERT_NAME: ${CODER_MANAGER_CYBERARK_PRODUCTION_CERT_NAME:-}
       CODER_MANAGER_CYBERARK_PRODUCTION_KEY_NAME: ${CODER_MANAGER_CYBERARK_PRODUCTION_KEY_NAME:-}
       CODER_MANAGER_CYBERARK_PRODUCTION_SAFE: ${CODER_MANAGER_CYBERARK_PRODUCTION_SAFE:-}
+    expose:
+      - "9808"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -121,9 +130,11 @@ services:
       - --loglevel=INFO
       - --schedule=/tmp/celerybeat-schedule
     environment:
-      <<: *broker-environment
+      <<: [*broker-environment, *metrics-environment]
       CODER_MANAGER_SCHEDULER_TIMEZONE: ${CODER_MANAGER_SCHEDULER_TIMEZONE:-Europe/Paris}
       CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS: ${CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS:-60}
+    expose:
+      - "9808"
     depends_on:
       migrate:
         condition: service_completed_successfully

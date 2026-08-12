@@ -15,6 +15,7 @@ dependencies = [
     "fastapi>=0.139.2",
     "flower>=2.0.1",
     "httpx>=0.28.1",
+    "prometheus-client>=0.26.0",
     "psycopg[binary]>=3.3.4",
     "pydantic-settings>=2.14.2",
     "python-multipart>=0.0.22",
@@ -24,6 +25,7 @@ dependencies = [
 
 [project.scripts]
 coder-manager = "coder_manager.main:run"
+coder-manager-celery = "coder_manager.celery_entrypoint:run"
 
 [build-system]
 requires = ["uv_build>=0.8.11,<0.9.0"]

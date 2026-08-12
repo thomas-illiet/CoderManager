@@ -228,13 +228,16 @@ def test_registered_step_names_and_beat_schedule() -> None:
     schedule = celery_app.conf.beat_schedule["retry-job-executions"]
     assert schedule["task"] == "coder_manager.retry_job_executions"
     assert schedule["schedule"] == timedelta(seconds=get_settings().job_retry_interval_seconds)
+    assert schedule["options"] == {"ignore_result": True}
     state_schedule = celery_app.conf.beat_schedule["check-instance-states"]
     assert state_schedule["task"] == "coder_manager.check_instance_states"
     assert state_schedule["schedule"] == timedelta(hours=1)
+    assert state_schedule["options"] == {"ignore_result": True}
     daily_schedule = celery_app.conf.beat_schedule["dispatch-daily-workspace-stops"]
     assert daily_schedule["task"] == "coder_manager.dispatch_daily_workspace_stops"
     assert daily_schedule["schedule"].minute == frozenset({0})
     assert daily_schedule["schedule"].hour == frozenset({0})
+    assert daily_schedule["options"] == {"ignore_result": True}
     assert celery_app.conf.timezone == get_settings().scheduler_timezone
     with pytest.raises(ValueError, match="valid IANA timezone"):
         Settings(scheduler_timezone="invalid/timezone")

@@ -1,5 +1,7 @@
 """FastAPI application entrypoint."""
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
@@ -9,8 +11,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from coder_manager.api.router import api_router
-from coder_manager.api.routes import health
 from coder_manager.config import get_settings
+from coder_manager.metrics import ApiMetrics, ApiMetricsMiddleware, start_metrics_server
 
 
 def redacted_validation_errors(error: RequestValidationError) -> list[dict[str, Any]]:
@@ -48,9 +50,27 @@ def create_app() -> FastAPI:
     """Build the HTTP application."""
 
     settings = get_settings()
-    application = FastAPI(title=settings.app_name, version="0.1.0")
+    metrics = ApiMetrics()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        """Expose metrics for the lifetime of the API process."""
+
+        server = start_metrics_server(
+            settings.metrics_host,
+            settings.metrics_port,
+            metrics.registry,
+        )
+        application.state.metrics_server = server
+        try:
+            yield
+        finally:
+            server.stop()
+
+    application = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+    application.state.api_metrics = metrics
+    application.add_middleware(ApiMetricsMiddleware, metrics=metrics)
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
-    application.include_router(health.router)
     application.include_router(api_router, prefix="/api/v1")
     return application
 

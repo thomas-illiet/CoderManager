@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     database_schema: str | None = None
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    metrics_host: str = "0.0.0.0"  # noqa: S104
+    metrics_port: int = Field(default=9808, ge=1, le=65535)
     scheduler_timezone: str = "Europe/Paris"
     job_retry_interval_seconds: int = Field(default=60, ge=1)
     job_stale_after_seconds: int = Field(default=300, ge=1)

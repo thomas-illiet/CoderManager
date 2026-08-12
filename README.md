@@ -22,7 +22,11 @@ docker compose up --build
 The API is then available at <http://localhost:8000>, with interactive documentation at
 <http://localhost:8000/docs>. Flower monitors the Celery worker at <http://127.0.0.1:5555>; its
 unauthenticated interface is bound to localhost and is not exposed on external network interfaces.
-The migration container applies pending migrations before the API, worker, and Beat scheduler start.
+Prometheus endpoints listen inside the Compose network at `http://api:9808/metrics`,
+`http://worker:9808/metrics`, and `http://beat:9808/metrics`. Each component also exposes its process
+liveness at `/health` on port `9808`. Port `9808` is not published on the host, and the API does not
+expose `/metrics` or `/health` on its application port `8000`. The migration container applies
+pending migrations before the API, worker, and Beat scheduler start.
 
 This release replaces the complete Alembic history with one fresh-install baseline. It has no
 upgrade, backfill, reconciliation, or supported `alembic stamp` path for an existing database.
@@ -46,13 +50,44 @@ and `FLOWER_UNAUTHENTICATED_API=true`. This opens Flower's internal API without 
 the localhost-bound interface. The worker publishes task events so Flower can display live task
 activity.
 
+## Prometheus metrics
+
+The API, worker, and Beat each expose unauthenticated `GET /metrics` and `GET /health` endpoints on
+their internal port `9808`. The health endpoint returns `{"status":"ok"}` for process liveness;
+every other path is rejected. Configure the listener bind address with
+`CODER_MANAGER_METRICS_HOST` and its port with `CODER_MANAGER_METRICS_PORT`. Compose injects those
+settings only into the three metric producers and declares the port with `expose` without publishing
+it on the host.
+
+The API reports request counts by method, normalized FastAPI route, and status; request durations by
+method and normalized route; and in-progress requests by method. Unmatched paths use the fixed
+`unmatched` route label, so request UUIDs and arbitrary paths do not create unbounded Prometheus
+series. The API metrics listener is separate from Uvicorn on port `8000`, so scrapes do not
+instrument themselves.
+
+The worker reports completed tasks by task name and state, task durations, and tasks currently in
+progress. Its prefork children write to `PROMETHEUS_MULTIPROC_DIR`, which the
+`coder-manager-celery` launcher clears before Celery imports the Prometheus client. The parent worker
+aggregates those files for each scrape. Beat reports successful scheduled task publications. Each
+Celery process exposes only the series belonging to its own component.
+
+To verify all three endpoints from the Compose network:
+
+```bash
+docker compose exec api python -c 'import urllib.request; print(urllib.request.urlopen("http://api:9808/metrics").status)'
+docker compose exec api python -c 'import urllib.request; print(urllib.request.urlopen("http://worker:9808/metrics").status)'
+docker compose exec api python -c 'import urllib.request; print(urllib.request.urlopen("http://beat:9808/metrics").status)'
+```
+
+The same checks can target `/health` on `api`, `worker`, and `beat`; each request returns HTTP `200`
+with `{"status":"ok"}`.
+
 ## HTTP API
 
 All endpoints are under `/api/v1`:
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/health` | API liveness |
 | `GET` | `/databases?page=1&page_size=20&name=primary` | Paginated database pool list |
 | `GET` | `/databases/statistics` | Global and per-database usage |
 | `POST` | `/databases/sync` | Request database synchronization |
