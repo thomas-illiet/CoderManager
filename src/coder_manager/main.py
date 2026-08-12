@@ -9,6 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from coder_manager.api.router import api_router
+from coder_manager.api.routes import health
 from coder_manager.config import get_settings
 
 
@@ -49,6 +50,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     application = FastAPI(title=settings.app_name, version="0.1.0")
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
+    application.include_router(health.router)
     application.include_router(api_router, prefix="/api/v1")
     return application
 
