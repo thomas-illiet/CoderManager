@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     argocd_development_destination_name: str | None = None
     argocd_staging_destination_name: str | None = None
     argocd_production_destination_name: str | None = None
+    oidc_issuer_url: str | None = None
+    oidc_audience: str | None = None
+    oidc_client_id: str | None = None
+    oidc_authorization_url: str | None = None
+    oidc_token_url: str | None = None
+    oidc_scopes: str = "openid,profile"
+    oidc_username_claim: str = "preferred_username"
+    oidc_allowed_users: str = ""
     cyberark_development_app_id: str | None = None
     cyberark_development_cert_name: str | None = None
     cyberark_development_key_name: str | None = None

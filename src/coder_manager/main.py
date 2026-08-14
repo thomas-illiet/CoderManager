@@ -1,17 +1,19 @@
 """FastAPI application entrypoint."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Request, status
+from fastapi import Depends, FastAPI, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2AuthorizationCodeBearer
 
 from coder_manager.api.router import api_router
-from coder_manager.config import get_settings
+from coder_manager.auth import OidcAuthenticator, OidcConfig, build_oidc_dependency
+from coder_manager.config import Settings, get_settings
 from coder_manager.metrics import ApiMetrics, ApiMetricsMiddleware, start_metrics_server
 
 
@@ -46,32 +48,66 @@ async def validation_exception_handler(
     )
 
 
-def create_app() -> FastAPI:
+def create_app(
+    *,
+    settings: Settings | None = None,
+    oidc_authenticator_factory: Callable[[OidcConfig], OidcAuthenticator] = OidcAuthenticator,
+) -> FastAPI:
     """Build the HTTP application."""
 
-    settings = get_settings()
+    settings = settings or get_settings()
     metrics = ApiMetrics()
+    oidc_config = OidcConfig.from_settings(settings)
+    oidc_authenticator = (
+        oidc_authenticator_factory(oidc_config) if oidc_config is not None else None
+    )
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-        """Expose metrics for the lifetime of the API process."""
+        """Initialize OIDC and expose metrics for the lifetime of the API process."""
 
-        server = start_metrics_server(
-            settings.metrics_host,
-            settings.metrics_port,
-            metrics.registry,
-        )
-        application.state.metrics_server = server
+        server = None
         try:
+            if oidc_authenticator is not None:
+                await oidc_authenticator.initialize()
+            server = start_metrics_server(
+                settings.metrics_host,
+                settings.metrics_port,
+                metrics.registry,
+            )
+            application.state.metrics_server = server
             yield
         finally:
-            server.stop()
+            if server is not None:
+                server.stop()
 
-    application = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
+    swagger_ui_init_oauth = None
+    if oidc_config is not None:
+        swagger_ui_init_oauth = {
+            "clientId": oidc_config.client_id,
+            "scopes": " ".join(oidc_config.scopes),
+            "usePkceWithAuthorizationCodeGrant": True,
+        }
+    application = FastAPI(
+        title=settings.app_name,
+        version="0.1.0",
+        lifespan=lifespan,
+        swagger_ui_init_oauth=swagger_ui_init_oauth,
+    )
     application.state.api_metrics = metrics
+    application.state.oidc_authenticator = oidc_authenticator
     application.add_middleware(ApiMetricsMiddleware, metrics=metrics)
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
-    application.include_router(api_router, prefix="/api/v1")
+    dependencies = None
+    if oidc_config is not None and oidc_authenticator is not None:
+        oauth2_scheme = OAuth2AuthorizationCodeBearer(
+            authorizationUrl=oidc_config.authorization_url,
+            tokenUrl=oidc_config.token_url,
+            scopes={scope: scope for scope in oidc_config.scopes},
+            auto_error=False,
+        )
+        dependencies = [Depends(build_oidc_dependency(oidc_authenticator, oauth2_scheme))]
+    application.include_router(api_router, prefix="/api/v1", dependencies=dependencies)
     return application
 
 
