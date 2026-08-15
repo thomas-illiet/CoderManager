@@ -28,7 +28,6 @@ from coder_manager.config import Settings
 from coder_manager.main import create_app
 
 ISSUER = "https://auth.example.com/realms/coder"
-AUDIENCE = "coder-manager-api"
 CLIENT_ID = "coder-manager-swagger"
 AUTHORIZATION_URL = f"{ISSUER}/protocol/openid-connect/auth"
 TOKEN_URL = f"{ISSUER}/protocol/openid-connect/token"
@@ -95,7 +94,6 @@ def oidc_settings(**overrides: object) -> Settings:
     values: dict[str, object] = {
         "database_schema": "public",
         "oidc_issuer_url": ISSUER,
-        "oidc_audience": AUDIENCE,
         "oidc_client_id": CLIENT_ID,
         "oidc_authorization_url": AUTHORIZATION_URL,
         "oidc_token_url": TOKEN_URL,
@@ -127,7 +125,6 @@ def signed_token(
 
     claims: dict[str, object] = {
         "iss": ISSUER,
-        "aud": AUDIENCE,
         "exp": int(time.time()) + 300,
         "preferred_username": "alice",
     }
@@ -172,7 +169,6 @@ def test_oidc_is_disabled_without_an_issuer() -> None:
 @pytest.mark.parametrize(
     ("field_name", "environment_name"),
     [
-        ("oidc_audience", "CODER_MANAGER_OIDC_AUDIENCE"),
         ("oidc_client_id", "CODER_MANAGER_OIDC_CLIENT_ID"),
         ("oidc_authorization_url", "CODER_MANAGER_OIDC_AUTHORIZATION_URL"),
         ("oidc_token_url", "CODER_MANAGER_OIDC_TOKEN_URL"),
@@ -280,7 +276,12 @@ async def test_valid_token_authorizes_case_insensitive_username() -> None:
     private_key, jwk = rsa_signing_key("key-1")
     provider = FakeOidcProvider([[jwk]])
     async for authenticator in initialized_authenticator(oidc_settings(), provider):
-        token = signed_token(private_key, "key-1", preferred_username="aLiCe")
+        token = signed_token(
+            private_key,
+            "key-1",
+            aud="ignored-audience",
+            preferred_username="aLiCe",
+        )
         assert await authenticator.authorize(token) == "aLiCe"
 
 
@@ -320,7 +321,6 @@ async def test_valid_token_rejects_users_outside_the_allowlist(settings: Setting
 @pytest.mark.parametrize(
     ("claims", "expected_status"),
     [
-        ({"aud": "another-api"}, 401),
         ({"iss": "https://another.example.com"}, 401),
         ({"exp": 1}, 401),
         ({"preferred_username": 42}, 403),

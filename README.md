@@ -55,14 +55,13 @@ activity.
 The HTTP API is unauthenticated when `CODER_MANAGER_OIDC_ISSUER_URL` is empty. When an issuer is
 configured, every endpoint under `/api/v1` requires an `Authorization: Bearer <JWT>` header. The API
 validates the token's RS256 signature against the provider's discovered JWKS and requires matching
-`iss`, `aud`, and `exp` claims. `/docs`, `/openapi.json`, and `/docs/oauth2-redirect` remain public, as
+`iss` and `exp` claims. `/docs`, `/openapi.json`, and `/docs/oauth2-redirect` remain public, as
 do the internal metrics and health endpoints on port `9808`.
 
 Configure the resource server and Swagger OAuth2 client with:
 
 ```dotenv
 CODER_MANAGER_OIDC_ISSUER_URL=https://auth.example.com/realms/coder
-CODER_MANAGER_OIDC_AUDIENCE=coder-manager-api
 CODER_MANAGER_OIDC_CLIENT_ID=coder-manager-swagger
 CODER_MANAGER_OIDC_AUTHORIZATION_URL=https://auth.example.com/realms/coder/protocol/openid-connect/auth
 CODER_MANAGER_OIDC_TOKEN_URL=https://auth.example.com/realms/coder/protocol/openid-connect/token
@@ -71,17 +70,16 @@ CODER_MANAGER_OIDC_USERNAME_CLAIM=preferred_username
 CODER_MANAGER_OIDC_ALLOWED_USERS=alice,bob
 ```
 
-Audience, client ID, authorization URL, and token URL are required whenever the issuer is set. All
-OIDC URLs must use HTTPS, and the scope list must contain `openid`. The username claim defaults to
+Client ID, authorization URL, and token URL are required whenever the issuer is set. All OIDC URLs
+must use HTTPS, and the scope list must contain `openid`. The username claim defaults to
 `preferred_username` and can be changed for another provider. Allowed usernames are trimmed,
 deduplicated, and compared case-insensitively. An empty allowlist denies every authenticated user.
 
 Swagger uses the Authorization Code flow with PKCE. Register
 `https://<api-host>/docs/oauth2-redirect` as an exact redirect URI in the identity provider, configure
 the Swagger client as public, enable Authorization Code and PKCE S256, and do not assign it a client
-secret. `CODER_MANAGER_OIDC_CLIENT_ID` configures only Swagger's public OAuth2 client; the API still
-validates tokens against the separate `CODER_MANAGER_OIDC_AUDIENCE`. Non-browser clients can obtain a
-token independently and send it directly as a Bearer token.
+secret. `CODER_MANAGER_OIDC_CLIENT_ID` configures Swagger's public OAuth2 client. Non-browser clients
+can obtain a token independently and send it directly as a Bearer token.
 
 At startup, the API retrieves `<issuer>/.well-known/openid-configuration`, requires an exact issuer
 match, validates the HTTPS `jwks_uri`, and preloads at least one RS256 signing key. Startup fails if

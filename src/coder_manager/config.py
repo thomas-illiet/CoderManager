@@ -60,7 +60,6 @@ class Settings(BaseSettings):
     argocd_staging_destination_name: str | None = None
     argocd_production_destination_name: str | None = None
     oidc_issuer_url: str | None = None
-    oidc_audience: str | None = None
     oidc_client_id: str | None = None
     oidc_authorization_url: str | None = None
     oidc_token_url: str | None = None

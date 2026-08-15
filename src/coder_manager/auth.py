@@ -39,7 +39,6 @@ class OidcConfig:
     """Hold validated OIDC resource-server and Swagger settings."""
 
     issuer_url: str
-    audience: str
     client_id: str
     authorization_url: str
     token_url: str
@@ -64,7 +63,6 @@ class OidcConfig:
                 "CODER_MANAGER_OIDC_ISSUER_URL",
                 allow_query=False,
             ),
-            audience=_required_value(settings.oidc_audience, "CODER_MANAGER_OIDC_AUDIENCE"),
             client_id=_required_value(settings.oidc_client_id, "CODER_MANAGER_OIDC_CLIENT_ID"),
             authorization_url=_require_https_url(
                 _required_value(
@@ -181,9 +179,8 @@ class OidcAuthenticator:
                 token,
                 signing_key,
                 algorithms=[OIDC_ALGORITHM],
-                audience=self.config.audience,
                 issuer=self.config.issuer_url,
-                options={"require": ["aud", "exp", "iss"]},
+                options={"require": ["exp", "iss"], "verify_aud": False},
             )
         except InvalidTokenError as error:
             raise _authentication_exception() from error
