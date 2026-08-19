@@ -27,7 +27,8 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 settings = get_settings()
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# ConfigParser reserves %, while SQLAlchemy URLs use it for percent-encoded credentials.
+config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 database_schema = settings.require_database_schema()
 target_metadata = Base.metadata
 

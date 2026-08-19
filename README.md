@@ -50,6 +50,10 @@ and `FLOWER_UNAUTHENTICATED_API=true`. This opens Flower's internal API without 
 the localhost-bound interface. The worker publishes task events so Flower can display live task
 activity.
 
+Credentials embedded in `CODER_MANAGER_DATABASE_URL` must be URL-encoded. For example, the password
+`*%?` is written as `%2A%25%3F` in the URL. Keep the standard single `%` characters in `.env`; the
+Alembic migration process handles its internal interpolation escaping.
+
 ## OIDC authentication
 
 The HTTP API is unauthenticated when `CODER_MANAGER_OIDC_ISSUER_URL` is empty. When an issuer is
