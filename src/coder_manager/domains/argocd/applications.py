@@ -18,9 +18,14 @@ if TYPE_CHECKING:
 
     from coder_manager.domains.argocd.config import ArgoCdClientConfig, ArgoCdConfig
 
-MANAGED_LABEL = "coder-manager/managed"
 INSTANCE_ID_LABEL = "coder-manager/instance-id"
-APPLICATION_NAMESPACE = "app-coder-system"
+ENVIRONMENT_LABEL = "environment"
+REGION_LABEL = "region"
+DOMAIN_LABEL = "domain"
+TIER_LABEL = "tier"
+DOMAIN_LABEL_VALUE = "code-station"
+TIER_LABEL_VALUE = "standard"
+APPLICATION_NAMESPACE = "app-coder-instance"
 ENVIRONMENT_VALUE_FILES = {
     "development": "values-dev.yaml",
     "staging": "values-stg.yaml",
@@ -104,8 +109,11 @@ def application_payload(
         "metadata": {
             "name": name,
             "labels": {
-                MANAGED_LABEL: "true",
                 INSTANCE_ID_LABEL: str(instance_id),
+                ENVIRONMENT_LABEL: helm_values.environment,
+                REGION_LABEL: config.region,
+                DOMAIN_LABEL: DOMAIN_LABEL_VALUE,
+                TIER_LABEL: TIER_LABEL_VALUE,
             },
         },
         "spec": {
@@ -174,6 +182,7 @@ def application_update_payload(
     metadata = dict(existing_metadata)
     labels = metadata.get("labels")
     merged_labels = dict(labels) if isinstance(labels, Mapping) else {}
+    merged_labels.pop("coder-manager/managed", None)
     desired_metadata = desired["metadata"]
     if not isinstance(desired_metadata, Mapping):  # pragma: no cover - internal invariant
         msg = "Invalid desired Application metadata"

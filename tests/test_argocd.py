@@ -167,8 +167,11 @@ def test_create_application_and_sync_contract() -> None:
     assert payload["metadata"] == {
         "name": result.application_name,
         "labels": {
-            "coder-manager/managed": "true",
             "coder-manager/instance-id": str(instance_id),
+            "environment": "development",
+            "region": "EMEA",
+            "domain": "code-station",
+            "tier": "standard",
         },
     }
     assert payload["spec"]["source"] == {
@@ -182,7 +185,7 @@ def test_create_application_and_sync_contract() -> None:
                     "name": "HELM_ARGS",
                     "value": (
                         "--values values-dev.yaml\n"
-                        "--namespace app-coder-system\n"
+                        "--namespace app-coder-instance\n"
                         "--set policy.config.allowedUsernames="
                         "admin\\,alice\\,root.admin\\,zoe\n"
                         "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
@@ -212,7 +215,7 @@ def test_create_application_and_sync_contract() -> None:
     assert "<secret:managed-database#password>" in helm_arguments
     assert payload["spec"]["destination"] == {
         "name": "development-cluster",
-        "namespace": "app-coder-system",
+        "namespace": "app-coder-instance",
     }
     assert payload["spec"]["syncPolicy"] == {
         "automated": {
@@ -250,6 +253,7 @@ def test_helm_values_file_and_project_match_environment(
     assert helm_arguments.startswith(f"--values {values_file}\n")
     assert helm_arguments.count("--values ") == 1
     assert payload["spec"]["project"] == project
+    assert payload["metadata"]["labels"]["environment"] == environment
 
 
 def test_database_secret_references_use_managed_database_name() -> None:
@@ -336,7 +340,10 @@ def test_existing_application_is_attached_and_overwritten() -> None:
             "name": attached_name,
             "resourceVersion": "42",
             "annotations": {"owner": "platform"},
-            "labels": {"existing": "kept"},
+            "labels": {
+                "existing": "kept",
+                "coder-manager/managed": "true",
+            },
         },
         "spec": {"project": "wrong"},
         "status": {"health": {"status": "Healthy"}},
@@ -351,9 +358,10 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         return httpx.Response(200, json={})
 
     config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    instance_id = uuid4()
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         result = client.ensure_application(
-            uuid4(),
+            instance_id,
             TEST_INSTANCE_SLUG,
             attached_name,
             (),
@@ -366,8 +374,14 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     update = json.loads(requests[1].content)
     assert update["metadata"]["resourceVersion"] == "42"
     assert update["metadata"]["annotations"] == {"owner": "platform"}
-    assert update["metadata"]["labels"]["existing"] == "kept"
-    assert update["metadata"]["labels"]["coder-manager/managed"] == "true"
+    assert update["metadata"]["labels"] == {
+        "existing": "kept",
+        "coder-manager/instance-id": str(instance_id),
+        "environment": "staging",
+        "region": "EMEA",
+        "domain": "code-station",
+        "tier": "standard",
+    }
     assert update["spec"]["project"] == "staging-project"
     assert [dict(request.url.params) for request in requests] == [
         {"project": "staging-project"},
@@ -383,7 +397,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--values values-stg.yaml\n"
-                "--namespace app-coder-system\n"
+                "--namespace app-coder-instance\n"
                 "--set policy.config.allowedUsernames=admin\n"
                 "--set policy.config.adminUsernames=admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -399,7 +413,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     }
     assert update["spec"]["destination"] == {
         "name": "staging-cluster",
-        "namespace": "app-coder-system",
+        "namespace": "app-coder-instance",
     }
     assert "status" not in update
 
@@ -550,7 +564,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--values values-prd.yaml\n"
-                "--namespace app-coder-system\n"
+                "--namespace app-coder-instance\n"
                 "--set policy.config.allowedUsernames=admin\\,alice\\,root.admin\n"
                 "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -559,7 +573,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
     ]
     assert update["spec"]["destination"] == {
         "name": "production-cluster",
-        "namespace": "app-coder-system",
+        "namespace": "app-coder-instance",
     }
 
 

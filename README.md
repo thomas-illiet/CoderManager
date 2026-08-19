@@ -239,15 +239,19 @@ connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` 
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
 `metadata.name` is `<CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX>-<instance slug>`. The
 slug is required; there is no UUID fallback. Existing attached Application names are retained after
-their first successful reconciliation. The Application uses a Helm chart from the configured Git
-repository through the `argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's
-first administrator account before the instance reaches success.
+their first successful reconciliation. Application metadata contains the managed labels
+`coder-manager/instance-id=<instance UUID>`, `environment=<instance environment>`,
+`region=<normalized CODER_MANAGER_ARGOCD_REGION>`, `domain=code-station`, and `tier=standard`.
+Reconciliation refreshes these managed labels while preserving labels owned by other actors. The
+Application uses a Helm chart from the configured Git repository through the
+`argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's first administrator
+account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters. The
 `region` value comes from `CODER_MANAGER_ARGOCD_REGION` and is normalized to uppercase. Commas in
 the two Helm scalar assignments are backslash-escaped so Helm keeps each list as one value; the
 chart still receives the comma-separated string.
-Both the Argo CD destination and `HELM_ARGS` target the `app-coder-system` namespace.
+Both the Argo CD destination and `HELM_ARGS` target the `app-coder-instance` namespace.
 `HELM_ARGS` loads `values-dev.yaml`, `values-stg.yaml`, or `values-prd.yaml` for development,
 staging, or production respectively.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
