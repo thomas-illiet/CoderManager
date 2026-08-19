@@ -25,7 +25,7 @@ DOMAIN_LABEL = "domain"
 TIER_LABEL = "tier"
 DOMAIN_LABEL_VALUE = "code-station"
 TIER_LABEL_VALUE = "standard"
-APPLICATION_NAMESPACE = "app-coder-instance"
+APPLICATION_NAMESPACE = "app-code-instance"
 ENVIRONMENT_VALUE_FILES = {
     "development": "values-dev.yaml",
     "staging": "values-stg.yaml",

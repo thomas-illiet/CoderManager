@@ -251,7 +251,7 @@ The plugin receives comma-separated `users` and `admins` values through `HELM_AR
 `region` value comes from `CODER_MANAGER_ARGOCD_REGION` and is normalized to uppercase. Commas in
 the two Helm scalar assignments are backslash-escaped so Helm keeps each list as one value; the
 chart still receives the comma-separated string.
-Both the Argo CD destination and `HELM_ARGS` target the `app-coder-instance` namespace.
+Both the Argo CD destination and `HELM_ARGS` target the `app-code-instance` namespace.
 `HELM_ARGS` loads `values-dev.yaml`, `values-stg.yaml`, or `values-prd.yaml` for development,
 staging, or production respectively.
 `HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the

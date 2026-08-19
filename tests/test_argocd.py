@@ -185,7 +185,7 @@ def test_create_application_and_sync_contract() -> None:
                     "name": "HELM_ARGS",
                     "value": (
                         "--values values-dev.yaml\n"
-                        "--namespace app-coder-instance\n"
+                        "--namespace app-code-instance\n"
                         "--set policy.config.allowedUsernames="
                         "admin\\,alice\\,root.admin\\,zoe\n"
                         "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
@@ -215,7 +215,7 @@ def test_create_application_and_sync_contract() -> None:
     assert "<secret:managed-database#password>" in helm_arguments
     assert payload["spec"]["destination"] == {
         "name": "development-cluster",
-        "namespace": "app-coder-instance",
+        "namespace": "app-code-instance",
     }
     assert payload["spec"]["syncPolicy"] == {
         "automated": {
@@ -397,7 +397,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--values values-stg.yaml\n"
-                "--namespace app-coder-instance\n"
+                "--namespace app-code-instance\n"
                 "--set policy.config.allowedUsernames=admin\n"
                 "--set policy.config.adminUsernames=admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -413,7 +413,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     }
     assert update["spec"]["destination"] == {
         "name": "staging-cluster",
-        "namespace": "app-coder-instance",
+        "namespace": "app-code-instance",
     }
     assert "status" not in update
 
@@ -564,7 +564,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             "name": "HELM_ARGS",
             "value": (
                 "--values values-prd.yaml\n"
-                "--namespace app-coder-instance\n"
+                "--namespace app-code-instance\n"
                 "--set policy.config.allowedUsernames=admin\\,alice\\,root.admin\n"
                 "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"
                 f"{EXPECTED_INSTANCE_HELM_ARGS}"
@@ -573,7 +573,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
     ]
     assert update["spec"]["destination"] == {
         "name": "production-cluster",
-        "namespace": "app-coder-instance",
+        "namespace": "app-code-instance",
     }
 
 
