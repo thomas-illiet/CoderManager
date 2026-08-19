@@ -66,14 +66,13 @@ CODER_MANAGER_OIDC_CLIENT_ID=coder-manager-swagger
 CODER_MANAGER_OIDC_AUTHORIZATION_URL=https://auth.example.com/realms/coder/protocol/openid-connect/auth
 CODER_MANAGER_OIDC_TOKEN_URL=https://auth.example.com/realms/coder/protocol/openid-connect/token
 CODER_MANAGER_OIDC_SCOPES=openid,profile
-CODER_MANAGER_OIDC_USERNAME_CLAIM=preferred_username
-CODER_MANAGER_OIDC_ALLOWED_USERS=alice,bob
 ```
 
 Client ID, authorization URL, and token URL are required whenever the issuer is set. All OIDC URLs
-must use HTTPS, and the scope list must contain `openid`. The username claim defaults to
-`preferred_username` and can be changed for another provider. Allowed usernames are trimmed,
-deduplicated, and compared case-insensitively. An empty allowlist denies every authenticated user.
+must use HTTPS, and the scope list must contain `openid`. Authorization requires a top-level `roles`
+claim containing a JSON array of strings with the `admin` role. Role matching is case-insensitive but
+does not normalize whitespace: `admin` and `ADMIN` match, while ` admin ` does not. A missing or
+malformed `roles` claim, or a claim without `admin`, returns HTTP `403` with `{"detail":"Access denied"}`.
 
 Swagger uses the Authorization Code flow with PKCE. Register
 `https://<api-host>/docs/oauth2-redirect` as an exact redirect URI in the identity provider, configure

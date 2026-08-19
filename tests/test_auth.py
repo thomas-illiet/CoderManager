@@ -17,7 +17,6 @@ from jwt.algorithms import RSAAlgorithm
 from coder_manager import main as main_module
 from coder_manager.auth import (
     AUTHENTICATION_ERROR,
-    AUTHORIZATION_ERROR,
     PROVIDER_ERROR,
     OidcAuthenticator,
     OidcConfig,
@@ -98,8 +97,6 @@ def oidc_settings(**overrides: object) -> Settings:
         "oidc_authorization_url": AUTHORIZATION_URL,
         "oidc_token_url": TOKEN_URL,
         "oidc_scopes": "openid,profile",
-        "oidc_username_claim": "preferred_username",
-        "oidc_allowed_users": " Alice,BOB ",
     }
     values.update(overrides)
     return Settings(**values)
@@ -126,7 +123,7 @@ def signed_token(
     claims: dict[str, object] = {
         "iss": ISSUER,
         "exp": int(time.time()) + 300,
-        "preferred_username": "alice",
+        "roles": ["admin"],
     }
     claims.update(overrides)
     for claim_name in removed_claims:
@@ -192,9 +189,7 @@ def test_oidc_urls_require_https(field_name: str) -> None:
     """Reject clear-text OIDC endpoints."""
 
     with pytest.raises(OidcConfigurationError, match="must be a valid HTTPS URL"):
-        OidcConfig.from_settings(
-            oidc_settings(**{field_name: "http://auth.example.com/oidc"})
-        )
+        OidcConfig.from_settings(oidc_settings(**{field_name: "http://auth.example.com/oidc"}))
 
 
 def test_oidc_scopes_require_openid() -> None:
@@ -202,13 +197,6 @@ def test_oidc_scopes_require_openid() -> None:
 
     with pytest.raises(OidcConfigurationError, match="must contain openid"):
         OidcConfig.from_settings(oidc_settings(oidc_scopes="profile,email"))
-
-
-def test_oidc_lists_reject_empty_items() -> None:
-    """Reject ambiguous empty entries inside comma-separated OIDC settings."""
-
-    with pytest.raises(OidcConfigurationError, match="contains an empty value"):
-        OidcConfig.from_settings(oidc_settings(oidc_allowed_users="alice,,bob"))
 
 
 @pytest.mark.asyncio
@@ -270,8 +258,9 @@ async def test_application_startup_initializes_oidc_before_metrics(
 
 
 @pytest.mark.asyncio
-async def test_valid_token_authorizes_case_insensitive_username() -> None:
-    """Authorize a valid claim independently from username casing."""
+@pytest.mark.parametrize("admin_role", ["admin", "Admin", "ADMIN"])
+async def test_valid_token_authorizes_case_insensitive_admin_role(admin_role: str) -> None:
+    """Authorize an admin role independently from casing and without a username."""
 
     private_key, jwk = rsa_signing_key("key-1")
     provider = FakeOidcProvider([[jwk]])
@@ -280,41 +269,42 @@ async def test_valid_token_authorizes_case_insensitive_username() -> None:
             private_key,
             "key-1",
             aud="ignored-audience",
-            preferred_username="aLiCe",
+            roles=["viewer", admin_role],
         )
-        assert await authenticator.authorize(token) == "aLiCe"
+        assert await authenticator.authorize(token) is None
 
 
 @pytest.mark.asyncio
-async def test_configurable_username_claim_is_used() -> None:
-    """Authorize with the configured top-level username claim."""
+async def test_role_matching_does_not_trim_claim_values() -> None:
+    """Reject an otherwise matching role when the claim value has whitespace."""
 
     private_key, jwk = rsa_signing_key("key-1")
     provider = FakeOidcProvider([[jwk]])
-    settings = oidc_settings(oidc_username_claim="login", oidc_allowed_users="carol")
-    async for authenticator in initialized_authenticator(settings, provider):
-        token = signed_token(private_key, "key-1", login="Carol")
-        assert await authenticator.authorize(token) == "Carol"
+    async for authenticator in initialized_authenticator(oidc_settings(), provider):
+        with pytest.raises(HTTPException) as caught:
+            await authenticator.authorize(signed_token(private_key, "key-1", roles=[" admin "]))
+        assert caught.value.status_code == 403
+        assert caught.value.detail == "Access denied"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "settings",
+    "roles",
     [
-        oidc_settings(oidc_allowed_users=""),
-        oidc_settings(oidc_allowed_users="bob"),
+        [],
+        ["viewer"],
     ],
 )
-async def test_valid_token_rejects_users_outside_the_allowlist(settings: Settings) -> None:
-    """Return a stable forbidden response for empty and non-matching allowlists."""
+async def test_valid_token_requires_admin_role(roles: list[str]) -> None:
+    """Return a stable forbidden response when the admin role is absent."""
 
     private_key, jwk = rsa_signing_key("key-1")
     provider = FakeOidcProvider([[jwk]])
-    async for authenticator in initialized_authenticator(settings, provider):
+    async for authenticator in initialized_authenticator(oidc_settings(), provider):
         with pytest.raises(HTTPException) as caught:
-            await authenticator.authorize(signed_token(private_key, "key-1"))
+            await authenticator.authorize(signed_token(private_key, "key-1", roles=roles))
         assert caught.value.status_code == 403
-        assert caught.value.detail == AUTHORIZATION_ERROR
+        assert caught.value.detail == "Access denied"
 
 
 @pytest.mark.asyncio
@@ -323,8 +313,12 @@ async def test_valid_token_rejects_users_outside_the_allowlist(settings: Setting
     [
         ({"iss": "https://another.example.com"}, 401),
         ({"exp": 1}, 401),
-        ({"preferred_username": 42}, 403),
-        ({"removed_claims": ("preferred_username",)}, 403),
+        ({"roles": None}, 403),
+        ({"roles": "admin"}, 403),
+        ({"roles": {"admin": True}}, 403),
+        ({"roles": [42]}, 403),
+        ({"roles": ["admin", 42]}, 403),
+        ({"removed_claims": ("roles",)}, 403),
         ({"removed_claims": ("exp",)}, 401),
     ],
 )
@@ -332,7 +326,7 @@ async def test_invalid_tokens_are_rejected(
     claims: dict[str, object],
     expected_status: int,
 ) -> None:
-    """Reject invalid JWT claims and unusable usernames."""
+    """Reject invalid JWT claims and malformed role claims."""
 
     private_key, jwk = rsa_signing_key("key-1")
     provider = FakeOidcProvider([[jwk]])
@@ -340,6 +334,8 @@ async def test_invalid_tokens_are_rejected(
         with pytest.raises(HTTPException) as caught:
             await authenticator.authorize(signed_token(private_key, "key-1", **claims))
         assert caught.value.status_code == expected_status
+        if expected_status == 403:
+            assert caught.value.detail == "Access denied"
 
 
 @pytest.mark.asyncio
@@ -351,7 +347,7 @@ async def test_unknown_key_refreshes_jwks() -> None:
     provider = FakeOidcProvider([[first_jwk], [first_jwk, second_jwk]])
     async for authenticator in initialized_authenticator(oidc_settings(), provider):
         token = signed_token(second_private_key, "key-2")
-        assert await authenticator.authorize(token) == "alice"
+        assert await authenticator.authorize(token) is None
         assert provider.jwks_calls == 2
 
 
@@ -394,14 +390,15 @@ async def test_api_authentication_contract_and_provider_status() -> None:
         forbidden_token = signed_token(
             private_key,
             "key-1",
-            preferred_username="mallory",
+            preferred_username="alice",
+            roles=["viewer"],
         )
         forbidden = await client.get(
             "/api/v1/jobs/not-a-uuid",
             headers={"Authorization": f"Bearer {forbidden_token}"},
         )
         assert forbidden.status_code == 403
-        assert forbidden.json() == {"detail": AUTHORIZATION_ERROR}
+        assert forbidden.json() == {"detail": "Access denied"}
 
         allowed = await client.get(
             "/api/v1/jobs/not-a-uuid",
@@ -412,9 +409,7 @@ async def test_api_authentication_contract_and_provider_status() -> None:
         provider.fail_jwks = True
         unavailable = await client.get(
             "/api/v1/jobs/not-a-uuid",
-            headers={
-                "Authorization": f"Bearer {signed_token(unknown_private_key, 'key-2')}"
-            },
+            headers={"Authorization": f"Bearer {signed_token(unknown_private_key, 'key-2')}"},
         )
         assert unavailable.status_code == 503
         assert unavailable.json() == {"detail": PROVIDER_ERROR}

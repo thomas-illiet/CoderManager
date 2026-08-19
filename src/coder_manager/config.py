@@ -64,8 +64,6 @@ class Settings(BaseSettings):
     oidc_authorization_url: str | None = None
     oidc_token_url: str | None = None
     oidc_scopes: str = "openid,profile"
-    oidc_username_claim: str = "preferred_username"
-    oidc_allowed_users: str = ""
     cyberark_development_app_id: str | None = None
     cyberark_development_cert_name: str | None = None
     cyberark_development_key_name: str | None = None

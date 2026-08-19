@@ -1,4 +1,4 @@
-"""OIDC discovery, JWT validation, and username authorization."""
+"""OIDC discovery, JWT validation, and role authorization."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -21,8 +21,10 @@ from coder_manager.config import Settings
 
 OIDC_TIMEOUT_SECONDS = 10.0
 OIDC_ALGORITHM = "RS256"
+OIDC_ROLES_CLAIM = "roles"
+OIDC_REQUIRED_ROLE = "admin"
 AUTHENTICATION_ERROR = "Invalid authentication credentials"
-AUTHORIZATION_ERROR = "User is not allowed"
+AUTHORIZATION_ERROR = "Access denied"
 PROVIDER_ERROR = "OIDC provider unavailable"
 
 
@@ -43,8 +45,6 @@ class OidcConfig:
     authorization_url: str
     token_url: str
     scopes: tuple[str, ...]
-    username_claim: str
-    allowed_users: frozenset[str]
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "OidcConfig | None":
@@ -53,10 +53,6 @@ class OidcConfig:
         issuer_url = _optional_value(settings.oidc_issuer_url)
         if issuer_url is None:
             return None
-        username_claim = settings.oidc_username_claim.strip()
-        if not username_claim:
-            msg = "CODER_MANAGER_OIDC_USERNAME_CLAIM must not be empty"
-            raise OidcConfigurationError(msg)
         return cls(
             issuer_url=_require_https_url(
                 issuer_url,
@@ -76,13 +72,11 @@ class OidcConfig:
                 "CODER_MANAGER_OIDC_TOKEN_URL",
             ),
             scopes=_parse_scopes(settings.oidc_scopes),
-            username_claim=username_claim,
-            allowed_users=_parse_allowed_users(settings.oidc_allowed_users),
         )
 
 
 class OidcAuthenticator:
-    """Discover an OIDC provider and authorize signed user tokens."""
+    """Discover an OIDC provider and authorize signed tokens by role."""
 
     def __init__(
         self,
@@ -128,8 +122,8 @@ class OidcAuthenticator:
             raise OidcConfigurationError(msg)
         self._jwk_client = client
 
-    async def authorize(self, token: str | None) -> str:
-        """Validate one bearer token and return its authorized username."""
+    async def authorize(self, token: str | None) -> None:
+        """Validate one bearer token and require the API administrator role."""
 
         if not token:
             raise _authentication_exception()
@@ -141,19 +135,18 @@ class OidcAuthenticator:
             raise _authentication_exception()
 
         signing_key = await self._signing_key(token)
-        if (
-            signing_key.algorithm_name != OIDC_ALGORITHM
-            or signing_key.public_key_use not in {None, "sig"}
-        ):
+        if signing_key.algorithm_name != OIDC_ALGORITHM or signing_key.public_key_use not in {
+            None,
+            "sig",
+        }:
             raise _authentication_exception()
 
         claims = self._decode(token, signing_key)
-        username = claims.get(self.config.username_claim)
-        if not isinstance(username, str) or not username.strip():
+        roles = claims.get(OIDC_ROLES_CLAIM)
+        if not isinstance(roles, list) or any(not isinstance(role, str) for role in roles):
             raise _authorization_exception()
-        if username.strip().casefold() not in self.config.allowed_users:
+        if not any(role.casefold() == OIDC_REQUIRED_ROLE.casefold() for role in roles):
             raise _authorization_exception()
-        return username
 
     async def _signing_key(self, token: str) -> jwt.PyJWK:
         """Return the token signing key through PyJWT's cached JWKS client."""
@@ -206,23 +199,23 @@ class OidcAuthenticator:
 def build_oidc_dependency(
     authenticator: OidcAuthenticator,
     scheme: OAuth2AuthorizationCodeBearer,
-) -> Callable[..., Awaitable[str]]:
+) -> Callable[..., Awaitable[None]]:
     """Build the FastAPI dependency that validates the OAuth2 bearer token."""
 
-    async def authorize_oidc_user(
+    async def authorize_oidc_request(
         token: Annotated[str | None, Security(scheme)],
-    ) -> str:
+    ) -> None:
         """Authorize one API request with the configured OIDC provider."""
 
         try:
-            return await authenticator.authorize(token)
+            await authenticator.authorize(token)
         except OidcProviderUnavailableError as error:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=PROVIDER_ERROR,
             ) from error
 
-    return authorize_oidc_user
+    return authorize_oidc_request
 
 
 def _create_jwk_client(jwks_uri: str) -> PyJWKClient:
@@ -274,15 +267,6 @@ def _parse_scopes(raw_value: str) -> tuple[str, ...]:
     return scopes
 
 
-def _parse_allowed_users(raw_value: str) -> frozenset[str]:
-    """Parse the case-insensitive OIDC username allowlist."""
-
-    if not raw_value.strip():
-        return frozenset()
-    users = _parse_comma_list(raw_value, "CODER_MANAGER_OIDC_ALLOWED_USERS")
-    return frozenset(user.casefold() for user in users)
-
-
 def _parse_comma_list(raw_value: str, environment_name: str) -> tuple[str, ...]:
     """Parse, trim, and deduplicate one comma-separated configuration list."""
 
@@ -304,6 +288,6 @@ def _authentication_exception() -> HTTPException:
 
 
 def _authorization_exception() -> HTTPException:
-    """Return the stable username authorization failure response."""
+    """Return the stable role authorization failure response."""
 
     return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=AUTHORIZATION_ERROR)
