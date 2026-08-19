@@ -249,12 +249,29 @@ class ArgoCdClient:
 
     @staticmethod
     def _raise_for_response(response: httpx.Response, method: str, path: str) -> None:
-        """Raise a sanitized domain error for a non-successful HTTP response."""
+        """Raise a domain error with Argo CD's structured message when available."""
 
         if HTTP_SUCCESS_MIN <= response.status_code < HTTP_SUCCESS_MAX:
             return
         msg = f"Argo CD {method} {path} returned HTTP {response.status_code}"
+        if response_message := _response_message(response):
+            msg = f"{msg}: {response_message}"
         raise ArgoCdRequestError(msg)
+
+
+def _response_message(response: httpx.Response) -> str | None:
+    """Return the exact non-empty JSON message without exposing any other response field."""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    message = payload.get("message")
+    if not isinstance(message, str) or not message.strip():
+        return None
+    return message
 
 
 def _json_object(response: httpx.Response, path: str) -> dict[str, Any]:

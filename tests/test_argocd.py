@@ -823,8 +823,86 @@ def test_invalid_existing_application_response_is_rejected(response: httpx.Respo
         )
 
 
-def test_request_errors_do_not_include_token_or_response_body() -> None:
-    """Verify the request errors do not include token or response body scenario."""
+def test_request_errors_include_exact_argocd_message_only() -> None:
+    """Include Argo CD's complete JSON message without exposing sibling response fields."""
+
+    remote_message = "application spec is invalid\n" + "full validation detail " * 250
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return a missing Application followed by an Argo CD validation error."""
+
+        if request.method == "GET":
+            return httpx.Response(httpx.codes.NOT_FOUND)
+        return httpx.Response(
+            httpx.codes.BAD_REQUEST,
+            json={
+                "error": "private sibling error",
+                "code": 3,
+                "message": remote_message,
+                "details": ["private sibling detail"],
+            },
+        )
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    with (
+        ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ArgoCdRequestError) as caught,
+    ):
+        client.ensure_application(
+            uuid4(),
+            TEST_INSTANCE_SLUG,
+            None,
+            (),
+            instance_helm_values(),
+        )
+
+    assert str(caught.value) == (
+        f"Argo CD POST api/v1/applications returned HTTP 400: {remote_message}"
+    )
+    assert "private sibling error" not in str(caught.value)
+    assert "private sibling detail" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(httpx.codes.BAD_REQUEST, text="private plain-text response"),
+        httpx.Response(httpx.codes.BAD_REQUEST, content=b"{"),
+        httpx.Response(httpx.codes.BAD_REQUEST, json=[]),
+        httpx.Response(httpx.codes.BAD_REQUEST, json={"error": "private error"}),
+        httpx.Response(httpx.codes.BAD_REQUEST, json={"message": ""}),
+        httpx.Response(httpx.codes.BAD_REQUEST, json={"message": "   "}),
+        httpx.Response(httpx.codes.BAD_REQUEST, json={"message": 42}),
+    ],
+)
+def test_request_errors_without_json_message_remain_generic(response: httpx.Response) -> None:
+    """Keep the generic error for every response without a usable JSON message."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return a missing Application followed by the parameterized invalid response."""
+
+        if request.method == "GET":
+            return httpx.Response(httpx.codes.NOT_FOUND)
+        return response
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    with (
+        ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ArgoCdRequestError) as caught,
+    ):
+        client.ensure_application(
+            uuid4(),
+            TEST_INSTANCE_SLUG,
+            None,
+            (),
+            instance_helm_values(),
+        )
+
+    assert str(caught.value) == "Argo CD POST api/v1/applications returned HTTP 400"
+
+
+def test_request_errors_do_not_include_token_or_unstructured_body() -> None:
+    """Exclude tokens and bodies that do not provide a structured JSON message."""
 
     def handler(_request: httpx.Request) -> httpx.Response:
         """Simulate the handler operation used by this scenario."""
