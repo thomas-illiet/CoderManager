@@ -14,10 +14,13 @@ from coder_manager.config import get_settings
 from coder_manager.crypto import InstancePasswordCipher
 from coder_manager.domains import coder
 from coder_manager.models import Instance
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 if TYPE_CHECKING:
     from pydantic import SecretStr
     from sqlalchemy.orm import Session, sessionmaker
+
+    from coder_manager.config import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +60,17 @@ def dispatch_daily_workspace_stops() -> dict[str, int | str]:
 def stop_instance_workspaces(instance_id: str) -> dict[str, int | str]:
     """Submit Coder stop builds for one instance without waiting or retrying."""
 
+    settings = get_settings()
+    url_config = InstancePublicUrlConfig.from_settings(settings)
     parsed_instance_id = UUID(instance_id)
     session_factory = worker_database.get_worker_session_maker()
     try:
-        credentials = _stored_instance_credentials(parsed_instance_id, session_factory)
+        credentials = _stored_instance_credentials(
+            parsed_instance_id,
+            session_factory,
+            settings,
+            url_config,
+        )
         if credentials is not None:
             instance_url, password = credentials
             result = coder.submit_active_workspace_stops(instance_url, password)
@@ -92,6 +102,8 @@ def stop_instance_workspaces(instance_id: str) -> dict[str, int | str]:
 def _stored_instance_credentials(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
+    settings: Settings,
+    url_config: InstancePublicUrlConfig,
 ) -> tuple[str, SecretStr] | None:
     """Read and decrypt one instance's administrator credentials without writing state."""
 
@@ -102,8 +114,8 @@ def _stored_instance_credentials(
         if instance.password_enc is None:
             msg = "Instance administrator password is missing"
             raise RuntimeError(msg)
-        password = InstancePasswordCipher(get_settings().crypto_key).decrypt(
+        password = InstancePasswordCipher(settings.crypto_key).decrypt(
             instance.password_enc,
             instance.id,
         )
-        return instance.instance_url, password
+        return url_config.url_for(instance.slug, instance.environment), password

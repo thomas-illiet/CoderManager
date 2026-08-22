@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
+from coder_manager.config import get_settings
 from coder_manager.domains import argocd
 from coder_manager.models import (
     Instance,
@@ -36,6 +37,7 @@ from coder_manager.tasks.common.registry import (
     dispatch_registered_step,
 )
 from coder_manager.tasks.instance._database import instance_helm_values
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -52,6 +54,8 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Claim members, reconcile Argo CD, and finalize the pass."""
 
+        settings = get_settings()
+        url_config = InstancePublicUrlConfig.from_settings(settings)
         (
             member_ids,
             members,
@@ -59,7 +63,7 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             attached_name,
             environment,
             public_url,
-        ) = _claim_members(claim, session_factory)
+        ) = _claim_members(claim, session_factory, url_config)
         try:
             helm_values = instance_helm_values(
                 required_resource_id(claim),
@@ -120,6 +124,7 @@ def _store_application_name(
 def _claim_members(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
+    url_config: InstancePublicUrlConfig,
 ) -> tuple[
     tuple[UUID, ...],
     tuple[tuple[str, str], ...],
@@ -164,7 +169,7 @@ def _claim_members(
             instance.slug,
             instance.argocd_application_name,
             instance.environment.value,
-            instance.instance_url,
+            url_config.url_for(instance.slug, instance.environment),
         )
 
 

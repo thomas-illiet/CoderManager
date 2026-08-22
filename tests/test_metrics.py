@@ -205,6 +205,33 @@ def test_celery_signal_handlers_route_worker_and_beat_events(
     assert calls[-1] == ("stop",)
 
 
+def test_worker_init_requires_public_url_config_without_affecting_beat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail worker startup on missing region while keeping Beat initialization independent."""
+
+    calls: list[tuple[object, ...]] = []
+    fake_metrics = SimpleNamespace(
+        initialize_component=lambda *args: calls.append(("initialize", *args)),
+        start_server=lambda *args: calls.append(("start", *args)),
+    )
+    monkeypatch.setattr(celery_app, "celery_metrics", fake_metrics)
+    monkeypatch.setattr(celery_app, "settings", Settings(argocd_region=None))
+
+    validation_step = celery_app.ValidateInstancePublicUrlConfig(None)
+    with pytest.raises(ValueError, match="CODER_MANAGER_ARGOCD_REGION is required"):
+        validation_step.start(None)
+
+    celery_app.initialize_worker_metrics()
+    celery_app.initialize_beat_metrics()
+
+    assert calls[0][0:2] == ("initialize", "worker")
+    assert calls[1:] == [
+        ("initialize", "beat"),
+        ("start", celery_app.settings.metrics_host, celery_app.settings.metrics_port),
+    ]
+
+
 def test_prepare_multiprocess_directory_removes_only_metric_databases(tmp_path: Path) -> None:
     """Clear stale metric files while retaining unrelated temporary content."""
 

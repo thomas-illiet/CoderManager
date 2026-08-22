@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from coder_manager.config import get_settings
 from coder_manager.crypto import InstancePasswordCipher
 from coder_manager.models import Instance
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 
 def store_verified_admin_password(instance: Instance, password: SecretStr) -> None:
@@ -24,6 +25,7 @@ def store_verified_admin_password(instance: Instance, password: SecretStr) -> No
 def stored_admin_password(
     instance_id: UUID,
     session_factory: sessionmaker[Session],
+    url_config: InstancePublicUrlConfig,
 ) -> tuple[str, SecretStr] | None:
     """Return the instance URL and stored administrator password when configured."""
 
@@ -38,4 +40,4 @@ def stored_admin_password(
             instance.password_enc,
             instance.id,
         )
-        return instance.instance_url, password
+        return url_config.url_for(instance.slug, instance.environment), password

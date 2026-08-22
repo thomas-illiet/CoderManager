@@ -41,6 +41,7 @@ from coder_manager.schemas import (
 )
 from coder_manager.tasks import step_01_sync_database
 from coder_manager.tasks.common.registry import DATABASE_SYNC_STEP_01, dispatch_registered_step
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 router = APIRouter(prefix="/databases", tags=["databases"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -190,6 +191,7 @@ async def sync_databases(session: SessionDependency) -> JobResponse:
 async def list_database_instances(
     database_id: UUID,
     session: SessionDependency,
+    settings: SettingsDependency,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> InstancePage:
@@ -203,8 +205,9 @@ async def list_database_instances(
         database_id=database_id,
     )
     pages = (total + page_size - 1) // page_size
+    public_url_config = InstancePublicUrlConfig.from_settings(settings)
     return InstancePage(
-        items=[InstanceRead.model_validate(instance) for instance in instances],
+        items=[InstanceRead.from_instance(instance, public_url_config) for instance in instances],
         page=page,
         page_size=page_size,
         total=total,

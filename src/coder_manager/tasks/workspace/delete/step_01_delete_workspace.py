@@ -18,6 +18,7 @@ from coder_manager.tasks.workspace._remote import (
     wait_workspace_build,
     workspace_remote_snapshot,
 )
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 
 @celery_app.task(name=WORKSPACE_DELETE_STEP_01_TASK)
@@ -29,11 +30,13 @@ def step_01_delete_workspace(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Delete the remote workspace idempotently and remove its local row."""
 
+        settings = get_settings()
+        url_config = InstancePublicUrlConfig.from_settings(settings)
         snapshot = workspace_remote_snapshot(
             required_resource_id(claim),
             session_factory,
+            url_config,
         )
-        settings = get_settings()
 
         def heartbeat() -> None:
             """Keep the durable claim alive during remote deletion."""

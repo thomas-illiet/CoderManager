@@ -505,6 +505,9 @@ async def test_database_instances_are_paginated_and_scoped(
     }
     assert all(item["database_id"] == database["id"] for item in returned_instances)
     assert all(item["schema_name"].startswith("coder_") for item in returned_instances)
+    assert {item["id"]: item["instance_url"] for item in returned_instances} == {
+        item["id"]: item["instance_url"] for item in expected_instances
+    }
     assert other_instance["id"] not in {item["id"] for item in returned_instances}
     assert other_database["id"] != database["id"]
 

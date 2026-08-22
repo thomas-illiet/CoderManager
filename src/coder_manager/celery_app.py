@@ -2,11 +2,12 @@
 
 from datetime import timedelta
 
-from celery import Celery, signals
+from celery import Celery, bootsteps, signals
 from celery.schedules import crontab
 
 from coder_manager.config import get_settings
 from coder_manager.metrics import CeleryMetrics, mark_worker_process_dead
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 from coder_manager.worker_database import initialize_worker_database, shutdown_worker_database
 
 settings = get_settings()
@@ -44,6 +45,23 @@ celery_app.conf.update(
 celery_metrics = CeleryMetrics()
 
 
+class ValidateInstancePublicUrlConfig(bootsteps.StartStopStep):
+    """Stop worker startup when its public URL configuration is invalid."""
+
+    def start(self, parent: object) -> None:
+        """Validate settings before the worker accepts any task."""
+
+        del parent
+        InstancePublicUrlConfig.from_settings(settings)
+
+
+worker_steps = celery_app.steps
+if worker_steps is None:  # pragma: no cover - Celery initializes this registry eagerly
+    msg = "Celery worker bootstep registry is unavailable"
+    raise RuntimeError(msg)
+worker_steps["worker"].add(ValidateInstancePublicUrlConfig)
+
+
 def _registered_task_names() -> tuple[str, ...]:
     """Return the loaded Coder Manager task names in stable order."""
 
@@ -52,7 +70,7 @@ def _registered_task_names() -> tuple[str, ...]:
 
 @signals.worker_init.connect
 def initialize_worker_metrics(**_kwargs: object) -> None:
-    """Initialize worker metric series before Celery forks pool children."""
+    """Initialize worker metrics before pool children fork."""
 
     celery_metrics.initialize_component("worker", _registered_task_names())
 

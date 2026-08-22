@@ -56,6 +56,7 @@ def create_app(
     """Build the HTTP application."""
 
     settings = settings or get_settings()
+    settings.require_instance_region()
     metrics = ApiMetrics()
     oidc_config = OidcConfig.from_settings(settings)
     oidc_authenticator = (
@@ -94,6 +95,13 @@ def create_app(
         lifespan=lifespan,
         swagger_ui_init_oauth=swagger_ui_init_oauth,
     )
+
+    def application_settings() -> Settings:
+        """Return the exact settings validated for this application instance."""
+
+        return settings
+
+    application.dependency_overrides[get_settings] = application_settings
     application.state.api_metrics = metrics
     application.state.oidc_authenticator = oidc_authenticator
     application.add_middleware(ApiMetricsMiddleware, metrics=metrics)

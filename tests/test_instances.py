@@ -43,6 +43,7 @@ from tests.conftest import TEST_CRYPTO_KEY
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 SECOND_INSTANCE_SLUG = "m8n5q3y0r4bc"
+TEST_INSTANCE_REGION = "emea"
 
 
 async def create_instance(
@@ -100,7 +101,10 @@ async def test_create_instance_get_and_missing(
     assert created["status"] == "pending"
     assert created["state"] == "stopped"
     assert created["argocd_application_name"] is None
-    assert created["instance_url"] == f"https://{TEST_INSTANCE_SLUG}.code-studio.dev.echonet"
+    assert created["instance_url"] == (
+        f"https://{TEST_INSTANCE_SLUG}.{TEST_INSTANCE_REGION}.code-studio.dev.echonet"
+    )
+    assert "instance_url" not in Instance.__table__.columns
     assert UUID(created["database_id"])
     assert created["schema_name"] == f"coder_{UUID(created['id']).hex}"
     assert datetime.fromisoformat(created["created_at"])
@@ -247,7 +251,9 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
             environment=environment,
         )
         assert re.fullmatch(r"[a-z0-9]{12}", instance["slug"])
-        assert instance["instance_url"].endswith(f"code-studio.{dns_label}.echonet")
+        assert instance["instance_url"].endswith(
+            f"{TEST_INSTANCE_REGION}.code-studio.{dns_label}.echonet"
+        )
     await create_instance(client, second_application)
 
     first_page = await client.get("/api/v1/instances", params={"page": 1, "page_size": 2})
@@ -265,21 +271,43 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
     assert all(item["application"] == first_application for item in filtered.json()["items"])
 
 
-async def test_instance_domain_is_configurable(
+async def test_instance_url_follows_current_settings_without_updating_instance(
     client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Build new instance URLs with the configured domain label."""
+    """Recompute one instance URL without mutating its persisted timestamp."""
 
     monkeypatch.setattr(
         instance_repositories,
         "generate_instance_slug",
         lambda: TEST_INSTANCE_SLUG,
     )
-    app.dependency_overrides[get_settings] = lambda: Settings(instance_domain="coder-studio")
     instance = await create_instance(client, "Mon Équipe / Portail")
+    instance_id = UUID(instance["id"])
+    async with session_maker() as session:
+        stored_before = await session.get(Instance, instance_id)
+        assert stored_before is not None
+        updated_at_before = stored_before.updated_at
 
-    assert instance["instance_url"] == f"https://{TEST_INSTANCE_SLUG}.coder-studio.dev.echonet"
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        argocd_region="APAC",
+        instance_domain="coder-studio",
+    )
+    response = await client.get(f"/api/v1/instances/{instance_id}")
+
+    assert response.status_code == 200
+    recomputed = response.json()
+    assert recomputed["id"] == instance["id"]
+    assert recomputed["instance_url"] == (
+        f"https://{TEST_INSTANCE_SLUG}.apac.coder-studio.dev.echonet"
+    )
+    assert recomputed["updated_at"] == instance["updated_at"]
+
+    async with session_maker() as session:
+        stored_after = await session.get(Instance, instance_id)
+        assert stored_after is not None
+        assert stored_after.updated_at == updated_at_before
 
 
 async def test_create_rejects_legacy_application_id_and_extra_name(client: AsyncClient) -> None:
@@ -588,7 +616,6 @@ def instance_record() -> SimpleNamespace:
         action="creating",
         status=InstanceStatus.PENDING,
         state=InstanceState.STOPPED,
-        instance_url="https://app.code-studio.dev.echonet",
         argocd_application_name="managed-attached",
         created_at=now,
         updated_at=now,
@@ -619,12 +646,9 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
         async def create(
             self,
             _payload: InstanceCreate,
-            *,
-            instance_domain: str,
         ) -> SimpleNamespace:
             """Simulate the repository create operation."""
 
-            assert instance_domain == "code-studio"
             return record
 
         async def request_deletion(self, _instance_id: UUID) -> SimpleNamespace:
@@ -638,14 +662,17 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
         environment=InstanceEnvironment.DEVELOPMENT,
     )
 
-    page = await instance_routes.list_instances(None, 1, 20, None)
-    fetched = await instance_routes.get_instance(record.id, None)
+    page = await instance_routes.list_instances(None, Settings(), 1, 20, None)
+    fetched = await instance_routes.get_instance(record.id, None, Settings())
     created = await instance_routes.create_instance(payload, None, Settings())
-    deleted = await instance_routes.delete_instance(record.id, None)
+    deleted = await instance_routes.delete_instance(record.id, None, Settings())
 
     assert page.total == 1
     assert fetched.id == record.id
     assert created.resource.id == record.id
+    assert created.resource.instance_url == (
+        f"https://{TEST_INSTANCE_SLUG}.{TEST_INSTANCE_REGION}.code-studio.dev.echonet"
+    )
     assert deleted.resource.id == record.id
 
 
@@ -672,12 +699,9 @@ async def test_create_instance_route_error_mapping(
         async def create(
             self,
             _payload: InstanceCreate,
-            *,
-            instance_domain: str,
         ) -> None:
             """Simulate the repository create operation."""
 
-            assert instance_domain == "code-studio"
             raise repository_error
 
     monkeypatch.setattr(instance_routes, "InstanceRepository", FailingRepository)
@@ -709,7 +733,7 @@ async def test_get_instance_route_not_found_mapping(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(instance_routes, "InstanceRepository", MissingRepository)
 
     with pytest.raises(HTTPException) as caught:
-        await instance_routes.get_instance(uuid4(), None)
+        await instance_routes.get_instance(uuid4(), None, Settings())
 
     assert caught.value.status_code == 404
 
@@ -836,6 +860,6 @@ async def test_delete_instance_route_error_mapping(
     monkeypatch.setattr(instance_routes, "InstanceRepository", FailingRepository)
 
     with pytest.raises(HTTPException) as caught:
-        await instance_routes.delete_instance(uuid4(), None)
+        await instance_routes.delete_instance(uuid4(), None, Settings())
 
     assert caught.value.status_code == expected_status

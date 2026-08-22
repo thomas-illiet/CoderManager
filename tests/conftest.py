@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import Session, sessionmaker
 
 os.environ.setdefault("CODER_MANAGER_DATABASE_SCHEMA", "public")
+os.environ["CODER_MANAGER_ARGOCD_REGION"] = "EMEA"
 
 from coder_manager.config import Settings, get_settings
 from coder_manager.database import get_session

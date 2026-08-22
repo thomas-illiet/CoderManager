@@ -24,6 +24,7 @@ from coder_manager.tasks.instance.update.step_01_update_instance import (
     _fail_members,
     _finalize_update,
 )
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -40,6 +41,8 @@ def step_02_cleanup_users(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Compare remote accounts with the manager snapshot and converge them."""
 
+        settings = get_settings()
+        url_config = InstancePublicUrlConfig.from_settings(settings)
         member_ids, expected_usernames, application_name = _claim_cleanup(
             claim,
             session_factory,
@@ -47,6 +50,7 @@ def step_02_cleanup_users(job_id: str) -> dict[str, str]:
         credentials = stored_admin_password(
             required_resource_id(claim),
             session_factory,
+            url_config,
         )
         if credentials is None:
             msg = "Instance administrator password is missing"
@@ -54,7 +58,7 @@ def step_02_cleanup_users(job_id: str) -> dict[str, str]:
         try:
             protected_usernames = {
                 coder.ADMIN_USERNAME,
-                *argocd.parse_default_admins(get_settings().default_admins),
+                *argocd.parse_default_admins(settings.default_admins),
             }
             instance_url, password = credentials
             coder.cleanup_user_accounts(

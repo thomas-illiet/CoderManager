@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
+from coder_manager.config import get_settings
 from coder_manager.domains import argocd
 from coder_manager.models import Instance, InstanceState, Member
 from coder_manager.tasks.common.execution import (
@@ -23,6 +24,7 @@ from coder_manager.tasks.common.registry import (
 )
 from coder_manager.tasks.instance._bootstrap import stored_admin_password
 from coder_manager.tasks.instance._database import instance_helm_values
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -37,6 +39,8 @@ def step_01_start_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Require complete local state and ensure the remote Application."""
 
+        settings = get_settings()
+        url_config = InstancePublicUrlConfig.from_settings(settings)
         with session_factory() as session:
             instance = session.get(Instance, claim.resource_id)
             if instance is None:
@@ -53,9 +57,9 @@ def step_01_start_instance(job_id: str) -> dict[str, str]:
             slug = instance.slug
             attached_name = instance.argocd_application_name
             environment = instance.environment.value
-            public_url = instance.instance_url
+            public_url = url_config.url_for(instance.slug, instance.environment)
 
-        credentials = stored_admin_password(instance_id, session_factory)
+        credentials = stored_admin_password(instance_id, session_factory, url_config)
         if credentials is None:
             msg = "Instance administrator password is missing"
             raise RuntimeError(msg)

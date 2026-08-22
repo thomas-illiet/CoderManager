@@ -42,7 +42,7 @@ class InstanceHelmValues:
         """Return the hostname of the public instance URL without its scheme."""
 
         hostname = urlsplit(self.public_url).hostname
-        if hostname is None:  # pragma: no cover - persisted instance URL invariant
+        if hostname is None:  # pragma: no cover - validated URL configuration invariant
             msg = "Instance public URL does not contain a hostname"
             raise ValueError(msg)
         return hostname

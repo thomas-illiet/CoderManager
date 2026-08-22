@@ -75,6 +75,7 @@ from coder_manager.tasks.common.registry import (
 )
 from coder_manager.tasks.instance import _bootstrap as bootstrap_helpers
 from coder_manager.tasks.instance import _database as database_helpers
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 from tests.conftest import TEST_CRYPTO_KEY
 from tests.test_workspaces import (
     create_instance,
@@ -353,6 +354,16 @@ async def test_daily_workspace_stop_submits_directly_without_database_writes(
     created = await create_instance(client, "DAILY DIRECT")
     instance_id = UUID(str(created["id"]))
     await store_admin_password(session_maker, instance_id)
+    daily_stops_module = import_module("coder_manager.tasks.daily_workspace_stops")
+    monkeypatch.setattr(
+        daily_stops_module,
+        "get_settings",
+        lambda: Settings(
+            crypto_key=TEST_CRYPTO_KEY,
+            argocd_region="APAC",
+            instance_domain="worker-studio",
+        ),
+    )
     captured: list[tuple[str, str]] = []
 
     def submit(instance_url: str, password: SecretStr) -> coder.WorkspaceStopSubmissions:
@@ -389,7 +400,9 @@ async def test_daily_workspace_stop_submits_directly_without_database_writes(
         "submitted": 2,
         "already_stopping": 1,
     }
-    assert captured == [(created["instance_url"], "stored-admin-password")]
+    worker_instance_url = f"https://{created['slug']}.apac.worker-studio.dev.echonet"
+    assert worker_instance_url != created["instance_url"]
+    assert captured == [(worker_instance_url, "stored-admin-password")]
 
     with sync_session_maker() as session:
         after_instance = session.execute(
@@ -1195,6 +1208,20 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     instance_id = UUID(str(instance["id"]))
     job_id = UUID(str(instance["job_id"]))
     await encrypt_allocated_database(session_maker, instance_id)
+    worker_settings = Settings(
+        argocd_region="APAC",
+        instance_domain="worker-studio",
+    )
+    create_step_module = import_module(
+        "coder_manager.tasks.instance.create.step_02_create_instance"
+    )
+    bootstrap_step_module = import_module(
+        "coder_manager.tasks.instance.create.step_03_bootstrap_admin"
+    )
+    monkeypatch.setattr(create_step_module, "get_settings", lambda: worker_settings)
+    monkeypatch.setattr(bootstrap_step_module, "get_settings", lambda: worker_settings)
+    worker_instance_url = f"https://{instance['slug']}.apac.worker-studio.dev.echonet"
+    assert worker_instance_url != instance["instance_url"]
     created_targets: list[postgresql.SchemaTarget] = []
     reconciled_values: list[argocd.InstanceHelmValues] = []
     bootstrapped: list[tuple[str, SecretStr]] = []
@@ -1247,12 +1274,10 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
 
     assert tasks.step_02_create_instance.run(str(job_id)) == {"status": "pending"}
     assert len(reconciled_values) == 1
-    assert reconciled_values[0].public_url == instance["instance_url"]
-    assert reconciled_values[0].base_domain == str(instance["instance_url"]).removeprefix(
-        "https://"
-    )
+    assert reconciled_values[0].public_url == worker_instance_url
+    assert reconciled_values[0].base_domain == worker_instance_url.removeprefix("https://")
     assert reconciled_values[0].wildcard_access_host == (
-        f"*.{str(instance['instance_url']).removeprefix('https://')}"
+        f"*.{worker_instance_url.removeprefix('https://')}"
     )
     assert reconciled_values[0].database_username == "coder_manager"
     assert reconciled_values[0].database_password.get_secret_value() == "managed-secret"
@@ -1275,7 +1300,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
 
     assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
     assert len(bootstrapped) == 1
-    assert bootstrapped[0][0] == instance["instance_url"]
+    assert bootstrapped[0][0] == worker_instance_url
     assert len(bootstrapped[0][1].get_secret_value()) == 43
     tasks.step_04_sync_templates.delay.assert_called_once_with(str(job_id))
     async with session_maker() as session:
@@ -1504,7 +1529,12 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     first_claim = claim_execution(job_id, INSTANCE_UPDATE_STEP_01_TASK, sync_session_maker)
     assert first_claim is not None
     update_module = import_module("coder_manager.tasks.instance.update.step_01_update_instance")
-    member_ids, *_ = update_module._claim_members(first_claim, sync_session_maker)
+    url_config = InstancePublicUrlConfig.from_settings(Settings(argocd_region="EMEA"))
+    member_ids, *_ = update_module._claim_members(
+        first_claim,
+        sync_session_maker,
+        url_config,
+    )
     assert len(member_ids) == 1
     assert (
         prepare_execution_retry(

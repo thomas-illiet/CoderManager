@@ -6,6 +6,7 @@ from pydantic import SecretStr
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
+from coder_manager.config import get_settings
 from coder_manager.domains import coder
 from coder_manager.models import Instance, JobExecution
 from coder_manager.tasks.common.execution import (
@@ -22,6 +23,7 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_UPDATE_STEP_02_TASK,
 )
 from coder_manager.tasks.instance._bootstrap import store_verified_admin_password
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 
 @celery_app.task(name=INSTANCE_CREATE_STEP_03_TASK)
@@ -33,6 +35,8 @@ def step_03_bootstrap_admin(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Bootstrap only missing credentials and persist them after remote success."""
 
+        settings = get_settings()
+        url_config = InstancePublicUrlConfig.from_settings(settings)
         instance_id = required_resource_id(claim)
         with session_factory() as session:
             instance = session.get(Instance, instance_id)
@@ -44,7 +48,7 @@ def step_03_bootstrap_admin(job_id: str) -> dict[str, str]:
                 msg = "Job execution is missing"
                 raise RuntimeError(msg)
             password_configured = instance.password_enc is not None
-            instance_url = instance.instance_url
+            instance_url = url_config.url_for(instance.slug, instance.environment)
             is_update = job.name == "instance.update"
 
         password: SecretStr | None = None

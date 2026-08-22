@@ -1,12 +1,14 @@
 """Coder instance request and response schemas."""
 
 from datetime import datetime
+from typing import Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from coder_manager.models import InstanceEnvironment, InstanceState, InstanceStatus
+from coder_manager.models import Instance, InstanceEnvironment, InstanceState, InstanceStatus
 from coder_manager.schemas.application_identifier import ApplicationIdentifier
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 
 class InstanceCreate(BaseModel):
@@ -38,6 +40,32 @@ class InstanceRead(BaseModel):
     schema_name: str | None = None
     created_at: datetime
     updated_at: datetime
+
+    @classmethod
+    def from_instance(
+        cls,
+        instance: Instance,
+        public_url_config: InstancePublicUrlConfig,
+    ) -> Self:
+        """Map one stored instance and runtime URL configuration to its API representation."""
+
+        return cls(
+            id=instance.id,
+            application=instance.application,
+            slug=instance.slug,
+            environment=instance.environment,
+            action=instance.action,
+            status=instance.status,
+            state=instance.state,
+            instance_url=public_url_config.url_for(instance.slug, instance.environment),
+            argocd_application_name=instance.argocd_application_name,
+            job_id=getattr(instance, "job_id", None),
+            step=getattr(instance, "step", None),
+            database_id=getattr(instance, "database_id", None),
+            schema_name=getattr(instance, "schema_name", None),
+            created_at=instance.created_at,
+            updated_at=instance.updated_at,
+        )
 
 
 class InstancePage(BaseModel):

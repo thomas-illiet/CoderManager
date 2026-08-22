@@ -1,10 +1,13 @@
 """Application configuration."""
 
+import re
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DNS_LABEL_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
 
 
 class Settings(BaseSettings):
@@ -38,7 +41,7 @@ class Settings(BaseSettings):
     workspace_delete_timeout_seconds: int = Field(default=1800, ge=1)
     instance_domain: str = Field(
         default="code-studio",
-        pattern=r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+        pattern=_DNS_LABEL_PATTERN,
     )
     crypto_key: SecretStr | None = None
     argocd_url: str | None = None
@@ -85,6 +88,18 @@ class Settings(BaseSettings):
             msg = "CODER_MANAGER_DATABASE_SCHEMA is required"
             raise ValueError(msg)
         return self.database_schema
+
+    def require_instance_region(self) -> str:
+        """Return the deployment region normalized as a public-hostname DNS label."""
+
+        if self.argocd_region is None or not self.argocd_region.strip():
+            msg = "CODER_MANAGER_ARGOCD_REGION is required"
+            raise ValueError(msg)
+        region = self.argocd_region.strip().lower()
+        if re.fullmatch(_DNS_LABEL_PATTERN, region) is None:
+            msg = "CODER_MANAGER_ARGOCD_REGION must be a valid DNS label"
+            raise ValueError(msg)
+        return region
 
     @field_validator("scheduler_timezone")
     @classmethod

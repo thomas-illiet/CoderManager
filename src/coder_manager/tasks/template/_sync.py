@@ -23,6 +23,7 @@ from coder_manager.models import (
     TemplateParameterType,
     TemplateScope,
 )
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -130,12 +131,13 @@ def compatible_template_ids(
         )
 
 
-def _prepare_deployment(
+def _prepare_deployment(  # noqa: PLR0913
     template_id: UUID,
     instance_id: UUID,
     commit: str,
     system_parameter_revision: int,
     session_factory: sessionmaker[Session],
+    url_config: InstancePublicUrlConfig,
 ) -> tuple[bool, str, SecretStr, UUID | None, tuple[tuple[str, str], ...]]:
     """Mark one target running and return its current remote version if reusable."""
 
@@ -150,6 +152,7 @@ def _prepare_deployment(
         if instance.password_enc is None:
             msg = "Coder administrator password is not initialized"
             raise TemplateTargetSyncError(msg)
+        instance_url = url_config.url_for(instance.slug, instance.environment)
 
         deployment = session.scalar(
             select(TemplateDeployment)
@@ -171,7 +174,7 @@ def _prepare_deployment(
             and deployment.applied_commit == commit
             and deployment.applied_system_parameter_revision == system_parameter_revision
         ):
-            return True, instance.instance_url, SecretStr(""), None, ()
+            return True, instance_url, SecretStr(""), None, ()
 
         if (
             deployment.target_commit != commit
@@ -195,7 +198,7 @@ def _prepare_deployment(
         session.commit()
         return (
             False,
-            instance.instance_url,
+            instance_url,
             password,
             reusable_version_id,
             system_values,
@@ -303,6 +306,8 @@ def sync_template_target(
 ) -> bool:
     """Synchronize one branch HEAD to one instance, returning whether work ran."""
 
+    settings = get_settings()
+    url_config = InstancePublicUrlConfig.from_settings(settings)
     (
         already_applied,
         instance_url,
@@ -315,11 +320,11 @@ def sync_template_target(
         archive.commit,
         snapshot.system_parameter_revision,
         session_factory,
+        url_config,
     )
     if already_applied:
         return False
 
-    settings = get_settings()
     version_name = f"git-{archive.commit}-p{snapshot.system_parameter_revision}"
     try:
         with CoderClient(instance_url) as client:

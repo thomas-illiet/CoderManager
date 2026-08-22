@@ -14,7 +14,6 @@ from coder_manager.models import (
     Database,
     DatabaseAllocation,
     Instance,
-    InstanceEnvironment,
     InstanceState,
     InstanceStatus,
     Member,
@@ -37,15 +36,10 @@ from coder_manager.tasks.common.registry import (
 
 MAX_ACTION_LENGTH = 255
 INSTANCE_SLUG_ALPHABET = string.ascii_lowercase + string.digits
-ENVIRONMENT_DNS_LABELS = {
-    InstanceEnvironment.DEVELOPMENT: "dev",
-    InstanceEnvironment.STAGING: "staging",
-    InstanceEnvironment.PRODUCTION: "cib",
-}
 
 
 class InstanceAlreadyExistsError(Exception):
-    """Raised when an instance conflicts with an existing placement or URL."""
+    """Raised when an instance conflicts with an existing placement or slug."""
 
 
 class InstanceNotFoundError(Exception):
@@ -68,17 +62,6 @@ def generate_instance_slug() -> str:
     """Generate one opaque DNS-safe instance slug."""
 
     return "".join(secrets.choice(INSTANCE_SLUG_ALPHABET) for _ in range(INSTANCE_SLUG_LENGTH))
-
-
-def instance_url(
-    slug: str,
-    payload: InstanceCreate,
-    instance_domain: str,
-) -> str:
-    """Build the immutable public URL for a new instance."""
-
-    environment = ENVIRONMENT_DNS_LABELS[payload.environment]
-    return f"https://{slug}.{instance_domain}.{environment}.echonet"
 
 
 class InstanceRepository:
@@ -136,8 +119,6 @@ class InstanceRepository:
     async def create(
         self,
         payload: InstanceCreate,
-        *,
-        instance_domain: str,
     ) -> Instance:
         """Create an instance and reserve capacity on the least utilized database."""
 
@@ -192,7 +173,6 @@ class InstanceRepository:
             action="creating",
             status=InstanceStatus.PENDING,
             state=InstanceState.STOPPED,
-            instance_url=instance_url(slug, payload, instance_domain),
             step=INSTANCE_CREATE_STEP_01,
         )
         job = add_job_execution(

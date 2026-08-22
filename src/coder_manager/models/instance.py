@@ -78,7 +78,6 @@ class Instance(Base):
             name="uq_instances_application_environment",
         ),
         UniqueConstraint("slug", name="uq_instances_slug"),
-        UniqueConstraint("instance_url", name="uq_instances_instance_url"),
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
@@ -124,7 +123,6 @@ class Instance(Base):
         nullable=False,
         default=InstanceState.STOPPED,
     )
-    instance_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     password_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     argocd_application_name: Mapped[str | None] = mapped_column(
         String(63),

@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from coder_manager import worker_database
 from coder_manager.celery_app import celery_app
+from coder_manager.config import get_settings
 from coder_manager.domains import argocd
 from coder_manager.models import Instance, InstanceState, Member
 from coder_manager.tasks.common.execution import (
@@ -22,6 +23,7 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_03_TASK,
 )
 from coder_manager.tasks.instance._database import instance_helm_values
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -36,6 +38,8 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
     def operation(claim: ExecutionClaim) -> dict[str, str]:
         """Reconcile Argo CD and finalize the instance."""
 
+        settings = get_settings()
+        url_config = InstancePublicUrlConfig.from_settings(settings)
         with session_factory() as session:
             instance = session.get(Instance, claim.resource_id)
             if instance is None:
@@ -52,7 +56,7 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
             slug = instance.slug
             attached_name = instance.argocd_application_name
             environment = instance.environment.value
-            public_url = instance.instance_url
+            public_url = url_config.url_for(instance.slug, instance.environment)
 
         helm_values = instance_helm_values(
             instance_id,

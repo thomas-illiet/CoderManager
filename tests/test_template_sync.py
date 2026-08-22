@@ -36,6 +36,7 @@ from coder_manager.tasks.template._sync import (
     TemplateSourceSnapshot,
     sync_template_target,
 )
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 from tests.conftest import TEST_CRYPTO_KEY
 from tests.test_workspaces import create_instance, create_template, set_instance_status
 
@@ -61,6 +62,7 @@ def test_template_sync_helpers_reject_missing_local_resources(
     sync_helpers = import_module("coder_manager.tasks.template._sync")
     missing_template = uuid4()
     missing_instance = uuid4()
+    url_config = InstancePublicUrlConfig.from_settings(Settings(argocd_region="EMEA"))
     with pytest.raises(sync_helpers.TemplateTargetSyncError, match="Template is missing"):
         sync_helpers.template_source_snapshot(missing_template, sync_session_maker)
     with pytest.raises(sync_helpers.TemplateTargetSyncError, match="Template is missing"):
@@ -74,6 +76,7 @@ def test_template_sync_helpers_reject_missing_local_resources(
             "a" * 40,
             0,
             sync_session_maker,
+            url_config,
         )
     with pytest.raises(sync_helpers.TemplateTargetSyncError, match="deployment is missing"):
         sync_helpers._store_remote_ids(

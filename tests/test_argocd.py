@@ -36,7 +36,7 @@ TEST_APPLICATION_PREFIXES = {
     "production": "managed-production",
 }
 EXPECTED_INSTANCE_HELM_ARGS = (
-    f"--set global.baseDomain={TEST_INSTANCE_SLUG}.code-studio.dev.echonet\n"
+    f"--set global.baseDomain={TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet\n"
     f"--set global.identifier={TEST_INSTANCE_SLUG}\n"
     "--set server.config.postgres.username=<secret:managed-database#username>\n"
     "--set server.config.postgres.password=<secret:managed-database#password>\n"
@@ -109,7 +109,7 @@ def instance_helm_values(**overrides: object) -> InstanceHelmValues:
     values: dict[str, object] = {
         "slug": TEST_INSTANCE_SLUG,
         "environment": "development",
-        "public_url": f"https://{TEST_INSTANCE_SLUG}.code-studio.dev.echonet",
+        "public_url": f"https://{TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet",
         "database_username": "db-user",
         "database_password": SecretStr("managed, secret"),
         "database_host": "postgres.internal",

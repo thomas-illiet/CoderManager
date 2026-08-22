@@ -50,6 +50,7 @@ from coder_manager.tasks import (
     step_01_update_instance,
 )
 from coder_manager.tasks.common.registry import dispatch_registered_step
+from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 router = APIRouter(prefix="/instances", tags=["instances"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
@@ -97,6 +98,7 @@ def kubernetes_provider_read(provider: InstanceKubernetes) -> InstanceKubernetes
 @router.get("", summary="List Coder instances")
 async def list_instances(
     session: SessionDependency,
+    settings: SettingsDependency,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=100)] = 20,
     application: ApplicationIdentifier | None = None,
@@ -109,8 +111,9 @@ async def list_instances(
         application=application,
     )
     pages = (total + page_size - 1) // page_size
+    public_url_config = InstancePublicUrlConfig.from_settings(settings)
     return InstancePage(
-        items=[InstanceRead.model_validate(instance) for instance in instances],
+        items=[InstanceRead.from_instance(instance, public_url_config) for instance in instances],
         page=page,
         page_size=page_size,
         total=total,
@@ -119,13 +122,17 @@ async def list_instances(
 
 
 @router.get("/{instance_id}", summary="Get a Coder instance")
-async def get_instance(instance_id: UUID, session: SessionDependency) -> InstanceRead:
+async def get_instance(
+    instance_id: UUID,
+    session: SessionDependency,
+    settings: SettingsDependency,
+) -> InstanceRead:
     """Return one instance or a 404 response."""
 
     instance = await InstanceRepository(session).get(instance_id)
     if instance is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Instance not found")
-    return InstanceRead.model_validate(instance)
+    return InstanceRead.from_instance(instance, InstancePublicUrlConfig.from_settings(settings))
 
 
 @router.get(
@@ -341,13 +348,10 @@ async def create_instance(
     session: SessionDependency,
     settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceRead]:
-    """Create an instance and generate its immutable public URL."""
+    """Create an instance and expose its runtime public URL."""
 
     try:
-        instance = await InstanceRepository(session).create(
-            payload,
-            instance_domain=settings.instance_domain,
-        )
+        instance = await InstanceRepository(session).create(payload)
     except InstanceAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -361,7 +365,13 @@ async def create_instance(
     job = await _job_read(session, getattr(instance, "job_id", None))
     if job is not None:
         dispatch_registered_step(step_01_create_schema.name, job.id)
-    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+    return JobResourceResponse(
+        resource=InstanceRead.from_instance(
+            instance,
+            InstancePublicUrlConfig.from_settings(settings),
+        ),
+        job=job,
+    )
 
 
 @router.post(
@@ -372,6 +382,7 @@ async def create_instance(
 async def start_instance(
     instance_id: UUID,
     session: SessionDependency,
+    settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceRead]:
     """Request a strict full reconciliation for one idle instance."""
 
@@ -390,7 +401,13 @@ async def start_instance(
     job = await _job_read(session, instance.job_id)
     if job is not None:
         dispatch_registered_step(step_01_start_instance.name, job.id)
-    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+    return JobResourceResponse(
+        resource=InstanceRead.from_instance(
+            instance,
+            InstancePublicUrlConfig.from_settings(settings),
+        ),
+        job=job,
+    )
 
 
 @router.post(
@@ -401,6 +418,7 @@ async def start_instance(
 async def stop_instance(
     instance_id: UUID,
     session: SessionDependency,
+    settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceRead]:
     """Stop active workspaces before deleting only the remote Application."""
 
@@ -419,7 +437,13 @@ async def stop_instance(
     job = await _job_read(session, instance.job_id)
     if job is not None:
         dispatch_registered_step(step_01_stop_workspaces.name, job.id)
-    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+    return JobResourceResponse(
+        resource=InstanceRead.from_instance(
+            instance,
+            InstancePublicUrlConfig.from_settings(settings),
+        ),
+        job=job,
+    )
 
 
 @router.post(
@@ -430,6 +454,7 @@ async def stop_instance(
 async def sync_instance(
     instance_id: UUID,
     session: SessionDependency,
+    settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceRead]:
     """Request one full Argo CD reconciliation for an idle instance."""
 
@@ -448,7 +473,13 @@ async def sync_instance(
     job = await _job_read(session, getattr(instance, "job_id", None))
     if job is not None:
         dispatch_registered_step(step_01_update_instance.name, job.id)
-    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+    return JobResourceResponse(
+        resource=InstanceRead.from_instance(
+            instance,
+            InstancePublicUrlConfig.from_settings(settings),
+        ),
+        job=job,
+    )
 
 
 @router.delete(
@@ -459,6 +490,7 @@ async def sync_instance(
 async def delete_instance(
     instance_id: UUID,
     session: SessionDependency,
+    settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceRead]:
     """Move a successfully reconciled instance to deleting/pending."""
 
@@ -477,7 +509,13 @@ async def delete_instance(
     job = await _job_read(session, getattr(instance, "job_id", None))
     if job is not None:
         dispatch_registered_step(step_01_remove_workspaces.name, job.id)
-    return JobResourceResponse(resource=InstanceRead.model_validate(instance), job=job)
+    return JobResourceResponse(
+        resource=InstanceRead.from_instance(
+            instance,
+            InstancePublicUrlConfig.from_settings(settings),
+        ),
+        job=job,
+    )
 
 
 async def _job_read(session: AsyncSession | None, job_id: UUID | None) -> JobRead | None:

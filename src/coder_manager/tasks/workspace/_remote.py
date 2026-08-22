@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from pydantic import SecretStr
     from sqlalchemy.orm import Session, sessionmaker
 
+    from coder_manager.utils.instance_urls import InstancePublicUrlConfig
+
 
 class WorkspaceRemoteError(Exception):
     """Raised when a remote workspace cannot be reconciled safely."""
@@ -62,6 +64,7 @@ class WorkspaceRemoteSnapshot:
 def workspace_remote_snapshot(
     workspace_id: UUID,
     session_factory: sessionmaker[Session],
+    url_config: InstancePublicUrlConfig,
 ) -> WorkspaceRemoteSnapshot:
     """Load and decrypt one stable workspace reconciliation snapshot."""
 
@@ -110,7 +113,7 @@ def workspace_remote_snapshot(
             id=workspace.id,
             name=workspace.name,
             username=member.username,
-            instance_url=instance.instance_url,
+            instance_url=url_config.url_for(instance.slug, instance.environment),
             password=password,
             coder_template_id=deployment.coder_template_id,
             coder_workspace_id=workspace.coder_workspace_id,

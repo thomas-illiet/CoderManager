@@ -16,6 +16,7 @@ from coder_manager.tasks.workspace import _remote
 def remote_snapshot(
     *,
     workspace_id: UUID | None = None,
+    instance_url: str = "https://coder.example.test",
 ) -> _remote.WorkspaceRemoteSnapshot:
     """Build a minimal stable snapshot for pure remote helper tests."""
 
@@ -23,7 +24,7 @@ def remote_snapshot(
         id=uuid4(),
         name="development",
         username="alice",
-        instance_url="https://coder.example.test",
+        instance_url=instance_url,
         password=SecretStr("password"),
         coder_template_id=uuid4(),
         coder_workspace_id=workspace_id,
@@ -32,6 +33,14 @@ def remote_snapshot(
         parameters_revision=0,
         applied_parameters_revision=None,
     )
+
+
+def test_workspace_snapshot_preserves_operation_public_url() -> None:
+    """Keep the URL calculated for this operation in its immutable remote snapshot."""
+
+    instance_url = "https://development.apac.worker-studio.dev.echonet"
+
+    assert remote_snapshot(instance_url=instance_url).instance_url == instance_url
 
 
 def test_find_remote_workspace_prefers_id_then_owner_name() -> None:

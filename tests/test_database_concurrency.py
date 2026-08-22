@@ -81,8 +81,7 @@ async def test_concurrent_reservations_never_exceed_instance_max(
                     InstanceCreate(
                         application=application,
                         environment="development",
-                    ),
-                    instance_domain="code-studio",
+                    )
                 )
             except InstanceDatabaseUnavailableError:
                 return "full"

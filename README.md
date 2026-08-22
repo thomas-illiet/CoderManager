@@ -28,9 +28,10 @@ liveness at `/health` on port `9808`. Port `9808` is not published on the host, 
 expose `/metrics` or `/health` on its application port `8000`. The migration container applies
 pending migrations before the API, worker, and Beat scheduler start.
 
-This release replaces the complete Alembic history with one fresh-install baseline. It has no
-upgrade, backfill, reconciliation, or supported `alembic stamp` path for an existing database.
-Destroy and recreate PostgreSQL before deploying this version.
+The migration chain starts with the fresh-install baseline `a868aa80dbea` and then applies an
+incremental migration that removes the persisted `instances.instance_url` column. A database
+already on the baseline can upgrade normally. Databases created from migration histories older
+than `a868aa80dbea` remain incompatible: recreate PostgreSQL rather than using `alembic stamp`.
 
 To run Python tooling directly on the host:
 
@@ -247,16 +248,18 @@ Application uses a Helm chart from the configured Git repository through the
 `argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's first administrator
 account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
-`cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters. The
-`region` value comes from `CODER_MANAGER_ARGOCD_REGION` and is normalized to uppercase. Commas in
-the two Helm scalar assignments are backslash-escaped so Helm keeps each list as one value; the
-chart still receives the comma-separated string.
+`cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
+`CODER_MANAGER_ARGOCD_REGION` and `CODER_MANAGER_INSTANCE_DOMAIN` are shared by the API and worker.
+Every public instance URL uses their current normalized values; Argo CD labels and the CyberArk map
+use the region's normalized uppercase value. Commas in the two Helm scalar assignments are
+backslash-escaped so Helm keeps each list as one value; the chart still receives the comma-separated
+string.
 Both the Argo CD destination and `HELM_ARGS` target the `app-code-instance` namespace.
 `HELM_ARGS` loads `values-dev.yaml`, `values-stg.yaml`, or `values-prd.yaml` for development,
 staging, or production respectively.
-`HELM_ARGS` sets `global.baseDomain` to the immutable instance URL's hostname without the
-`https://` scheme, sets `global.identifier` to the required immutable instance slug, and supplies
-the allocated managed database's
+At reconciliation time, `HELM_ARGS` sets `global.baseDomain` to the complete regional hostname
+calculated from the current configuration, without the `https://` scheme. It also sets
+`global.identifier` to the required immutable instance slug and supplies the allocated database's
 `server.config.postgres.host`, `database`, and `schema` values. The PostgreSQL username and password
 use the CyberArk references `<secret:<name>#username>` and `<secret:<name>#password>`, where
 `<name>` comes from the allocated managed database's `name` field, not its `database_name` field.
@@ -279,9 +282,10 @@ environment with `CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX`,
 environment. Token, Application-prefix, project, destination, and CyberArk variable names use the
 environments `DEVELOPMENT`, `STAGING`, and `PRODUCTION`. CyberArk variable names follow
 `CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where
-fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and `SAFE`. The region, all three tokens, all three
-Application prefixes, all three projects, all three destinations, and all 12 CyberArk values are
-required for Argo CD reconciliation; `.env.example` lists the complete configuration. TLS
+fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and `SAFE`. The region is required by the API and
+worker whenever they calculate an instance URL. All three tokens, all three Application prefixes,
+all three projects, all three destinations, and all 12 CyberArk values are required for Argo CD
+reconciliation; `.env.example` lists the complete configuration. TLS
 certificate verification is enabled by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
 worker uses the token selected from the instance environment, requests synchronization, but does
@@ -353,12 +357,31 @@ without exposing file or ciphertext material.
 `Cache-Control: no-store`; missing instances or providers return 404, while unavailable encryption
 or an unauthenticatable envelope returns a redacted 503.
 
-The API generates an immutable, globally unique, 12-character lowercase alphanumeric slug for each
-new instance and exposes it as `slug`. The immutable HTTPS URL combines that slug with the
-environment; for example, slug `k7m4p2x9q3ab` in `development` receives
-`https://k7m4p2x9q3ab.code-studio.dev.echonet`. Environment DNS labels are `dev`, `staging`, and
-`cib` for development, staging, and production respectively. The `code-studio` DNS label defaults
-from `CODER_MANAGER_INSTANCE_DOMAIN` and can be changed for newly created instances.
+The API generates and stores an immutable, globally unique, 12-character lowercase alphanumeric
+slug for each new instance and exposes it as `slug`. It stores the environment but not the public
+URL. Whenever the API or worker needs that URL, it combines the stored slug and environment with
+the current normalized lowercase `CODER_MANAGER_ARGOCD_REGION` and
+`CODER_MANAGER_INSTANCE_DOMAIN`. For example, slug `k7m4p2x9q3ab` in region `EMEA` and environment
+`development` resolves to `https://k7m4p2x9q3ab.emea.code-studio.dev.echonet`. Environment DNS
+labels are `dev`, `staging`, and `cib` for development, staging, and production respectively; the
+instance domain defaults to `code-studio`.
+
+Changing either the region or instance domain therefore changes the calculated URL for every
+existing instance after both the API and worker have restarted; it does not update instance rows or
+timestamps. The corresponding Argo CD `global.baseDomain` changes only when each Application is
+next reconciled. Provision the new DNS route and a matching regional wildcard certificate, such as
+`*.emea.code-studio.dev.echonet`, before restarting the services. A certificate for
+`*.code-studio.dev.echonet` does not cover the additional instance-slug and region labels.
+Keep both the old and new DNS, TLS, and routing paths valid throughout this transition. Coder Manager
+does not enqueue a global reconciliation automatically.
+
+Deploy the code and the migration that removes `instances.instance_url` as one coordinated change:
+enter maintenance, stop the API, Beat, and worker, apply the migration and matching application
+image, then start the new API and worker without reopening external traffic or ordinary scheduled
+work. Reconcile every existing Application and confirm its Helm values contain the new hostname
+before reopening the API, resuming Beat, or retiring the old route. Do not run old and new versions
+together. New code cannot create an instance while the old non-null column remains, and old code
+cannot operate after that column has been removed.
 
 Deletion is asynchronous. It is accepted after a successful create, update, start, or stop, returns
 HTTP 202, and changes the lifecycle to `deleting/pending`. Its four steps reserve workspace cleanup,
@@ -616,8 +639,9 @@ Beat also schedules `coder_manager.dispatch_daily_workspace_stops` every day at 
 `CODER_MANAGER_SCHEDULER_TIMEZONE` (`Europe/Paris` by default). The dispatcher reads every stored
 instance without filtering its lifecycle state and sends one independent
 `coder_manager.stop_instance_workspaces` task per instance, allowing the Celery worker pool to
-process instances in parallel. Each task reads the stored Coder URL and administrator credentials,
-lists all `running`, `starting`, and `stopping` workspaces directly from Coder, and submits one
+process instances in parallel. Each task calculates the Coder URL from the current region and
+instance-domain configuration, reads the stored administrator credentials, lists all `running`,
+`starting`, and `stopping` workspaces directly from Coder, and submits one
 `stop` build for every `running` or `starting` workspace. A workspace already `stopping` is left
 untouched. The task returns immediately after all submissions: it does not call Argo CD, poll build
 status, rescan Coder, retry failures, create a `JobExecution`, or update instance/workspace rows.
@@ -636,11 +660,15 @@ The result is committed only when the instance job, action, and status still mat
 taken before the remote request. This scanner performs no remote mutation and creates no
 `JobExecution`.
 
-The single Alembic baseline creates the complete current schema directly and has
-`down_revision = None`. Its downgrade removes the complete schema. It is intentionally fresh-only:
-an existing PostgreSQL database must be destroyed and recreated, and `alembic stamp` is not a
-supported deployment procedure. Deploy the schema with the same image as the API, worker, and Beat
-so every process uses the matching task registry and database contract.
+The Alembic chain starts with baseline `a868aa80dbea`, whose `down_revision = None` and whose
+downgrade removes the complete baseline schema. An incremental migration then removes the obsolete
+`instances.instance_url` column so URLs are always calculated from configuration. Databases already
+at `a868aa80dbea` can apply that migration normally. Migration histories older than the baseline
+remain incompatible and must be recreated; `alembic stamp` is not a supported deployment
+procedure. Because removed URL snapshots cannot be reconstructed faithfully, downgrading this
+incremental migration is allowed only while `instances` is empty; otherwise Alembic fails before
+changing the schema. Deploy migrations with the same image as the API, worker, and Beat so every
+process uses the matching task registry and database contract.
 
 FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`. Celery tasks use a
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection
