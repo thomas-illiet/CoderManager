@@ -71,7 +71,11 @@ def test_api_startup_rejects_an_invalid_instance_region(
 def test_create_app_injects_the_settings_it_validated() -> None:
     """Use one settings object consistently for startup and request dependencies."""
 
-    settings = Settings(argocd_region="APAC", instance_domain="coder-studio")
+    settings = Settings(
+        argocd_region="APAC",
+        instance_domain="coder-studio",
+        allow_unauthenticated_api=True,
+    )
     application = create_app(settings=settings)
 
     settings_dependency = application.dependency_overrides[get_settings]

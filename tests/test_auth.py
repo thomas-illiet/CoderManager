@@ -157,10 +157,31 @@ def authenticator_for(
     )
 
 
-def test_oidc_is_disabled_without_an_issuer() -> None:
-    """Keep the API open when no OIDC issuer is configured."""
+def test_missing_oidc_requires_explicit_unauthenticated_opt_in() -> None:
+    """Fail closed when neither OIDC nor unauthenticated mode is configured."""
 
-    assert OidcConfig.from_settings(Settings(oidc_issuer_url="")) is None
+    with pytest.raises(
+        OidcConfigurationError,
+        match="CODER_MANAGER_ALLOW_UNAUTHENTICATED_API=true",
+    ):
+        OidcConfig.from_settings(Settings(oidc_issuer_url="", allow_unauthenticated_api=False))
+
+
+def test_unauthenticated_api_requires_explicit_opt_in() -> None:
+    """Keep the API open only after an explicit deployment opt-in."""
+
+    settings = Settings(oidc_issuer_url="", allow_unauthenticated_api=True)
+
+    assert OidcConfig.from_settings(settings) is None
+
+
+def test_configured_oidc_takes_precedence_over_unauthenticated_opt_in() -> None:
+    """Never disable a configured OIDC provider through the open-mode flag."""
+
+    config = OidcConfig.from_settings(oidc_settings(allow_unauthenticated_api=True))
+
+    assert config is not None
+    assert config.issuer_url == ISSUER
 
 
 @pytest.mark.parametrize(
@@ -417,9 +438,11 @@ async def test_api_authentication_contract_and_provider_status() -> None:
 
 @pytest.mark.asyncio
 async def test_swagger_is_open_and_has_no_security_when_oidc_is_disabled() -> None:
-    """Keep existing open Swagger behavior when authentication is disabled."""
+    """Keep Swagger open after explicitly disabling API authentication."""
 
-    application = create_app(settings=Settings(database_schema="public"))
+    application = create_app(
+        settings=Settings(database_schema="public", allow_unauthenticated_api=True)
+    )
     async with AsyncClient(
         transport=ASGITransport(app=application),
         base_url="http://test",

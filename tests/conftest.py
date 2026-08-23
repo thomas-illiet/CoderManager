@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 os.environ.setdefault("CODER_MANAGER_DATABASE_SCHEMA", "public")
 os.environ["CODER_MANAGER_ARGOCD_REGION"] = "EMEA"
+os.environ["CODER_MANAGER_ALLOW_UNAUTHENTICATED_API"] = "true"
 
 from coder_manager.config import Settings, get_settings
 from coder_manager.database import get_session

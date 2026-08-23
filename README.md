@@ -13,7 +13,9 @@ templates. Argo CD Applications remain managed as part of the instance lifecycle
 
 ## Run locally
 
-Set `CODER_MANAGER_DATABASE_SCHEMA` or copy `.env.example` to `.env`, then start the stack:
+Set `CODER_MANAGER_DATABASE_SCHEMA` and configure OIDC, or explicitly set
+`CODER_MANAGER_ALLOW_UNAUTHENTICATED_API=true` for a local unauthenticated API. You can instead copy
+`.env.example` to `.env` and complete those values before starting the stack:
 
 ```bash
 docker compose up --build
@@ -57,11 +59,14 @@ Alembic migration process handles its internal interpolation escaping.
 
 ## OIDC authentication
 
-The HTTP API is unauthenticated when `CODER_MANAGER_OIDC_ISSUER_URL` is empty. When an issuer is
-configured, every endpoint under `/api/v1` requires an `Authorization: Bearer <JWT>` header. The API
-validates the token's RS256 signature against the provider's discovered JWKS and requires matching
-`iss` and `exp` claims. `/docs`, `/openapi.json`, and `/docs/oauth2-redirect` remain public, as
-do the internal metrics and health endpoints on port `9808`.
+The API fails to start when `CODER_MANAGER_OIDC_ISSUER_URL` is empty unless
+`CODER_MANAGER_ALLOW_UNAUTHENTICATED_API=true` explicitly opts into an open API. The opt-in is false
+by default and must only be used for an intentionally unauthenticated environment. When an issuer is
+configured, every endpoint under `/api/v1` requires an `Authorization: Bearer <JWT>` header, even if
+the unauthenticated opt-in is also present. The API validates the token's RS256 signature against the
+provider's discovered JWKS and requires matching `iss` and `exp` claims. `/docs`, `/openapi.json`,
+and `/docs/oauth2-redirect` remain public, as do the internal metrics and health endpoints on port
+`9808`.
 
 Configure the resource server and Swagger OAuth2 client with:
 
@@ -71,6 +76,12 @@ CODER_MANAGER_OIDC_CLIENT_ID=coder-manager-swagger
 CODER_MANAGER_OIDC_AUTHORIZATION_URL=https://auth.example.com/realms/coder/protocol/openid-connect/auth
 CODER_MANAGER_OIDC_TOKEN_URL=https://auth.example.com/realms/coder/protocol/openid-connect/token
 CODER_MANAGER_OIDC_SCOPES=openid,profile
+```
+
+For a deliberately open local API instead, leave the OIDC values empty and set:
+
+```dotenv
+CODER_MANAGER_ALLOW_UNAUTHENTICATED_API=true
 ```
 
 Client ID, authorization URL, and token URL are required whenever the issuer is set. All OIDC URLs

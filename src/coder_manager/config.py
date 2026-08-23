@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     argocd_development_destination_name: str | None = None
     argocd_staging_destination_name: str | None = None
     argocd_production_destination_name: str | None = None
+    allow_unauthenticated_api: bool = False
     oidc_issuer_url: str | None = None
     oidc_client_id: str | None = None
     oidc_authorization_url: str | None = None

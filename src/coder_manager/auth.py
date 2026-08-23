@@ -48,11 +48,17 @@ class OidcConfig:
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "OidcConfig | None":
-        """Return enabled OIDC configuration, or None when no issuer is configured."""
+        """Return OIDC configuration or require an explicit unauthenticated opt-in."""
 
         issuer_url = _optional_value(settings.oidc_issuer_url)
         if issuer_url is None:
-            return None
+            if settings.allow_unauthenticated_api:
+                return None
+            msg = (
+                "CODER_MANAGER_OIDC_ISSUER_URL is required unless "
+                "CODER_MANAGER_ALLOW_UNAUTHENTICATED_API=true"
+            )
+            raise OidcConfigurationError(msg)
         return cls(
             issuer_url=_require_https_url(
                 issuer_url,
