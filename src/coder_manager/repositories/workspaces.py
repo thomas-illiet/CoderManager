@@ -434,6 +434,8 @@ class WorkspaceRepository:
         for name, parameter in by_name.items():
             if name in supplied:
                 value = supplied[name]
+            elif previous is not None and parameter.mutable is False and name in previous_values:
+                value = previous_values[name]
             elif parameter.default_value is not None:
                 value = parameter.default_value
             elif parameter.required:

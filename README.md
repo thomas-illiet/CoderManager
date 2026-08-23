@@ -597,8 +597,9 @@ image from the same template.
 
 User parameter defaults are resolved into the visible workspace snapshot. Unknown names and
 missing required values are rejected. A `mutable: false` value can be assigned once but cannot
-later change. Deleting a parameter definition preserves existing workspace snapshots for history,
-while future Coder builds receive only parameters still defined on the template.
+later change; omitting it from a later PUT preserves its existing value, including when it is
+optional and has no default. Deleting a parameter definition preserves existing workspace snapshots
+for history, while future Coder builds receive only parameters still defined on the template.
 
 Creation starts in `creating/pending`; accepted updates and deletions return HTTP 202 and move to
 `updating/pending` or `deleting/pending`. Reads remain available during processing. Instance-owned

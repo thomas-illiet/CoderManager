@@ -508,8 +508,20 @@ async def test_workspace_user_parameter_defaults_immutability_and_history(
             "default_value": "eu",
         },
     )
+    license_parameter = await client.post(
+        parameter_url,
+        json={
+            "type": "user",
+            "name": "license",
+            "display_name": "License",
+            "required": False,
+            "mutable": False,
+            "default_value": None,
+        },
+    )
     assert project.status_code == 201
     assert region.status_code == 201
+    assert license_parameter.status_code == 201
 
     created_response = await client.post(
         "/api/v1/workspaces",
@@ -518,12 +530,16 @@ async def test_workspace_user_parameter_defaults_immutability_and_history(
             member,
             template,
             image,
-            parameters={"project_name": "alpha"},
+            parameters={"license": "locked", "project_name": "alpha"},
         ),
     )
     assert created_response.status_code == 201, created_response.text
     created = created_response.json()["resource"]
-    assert created["parameters"] == {"project_name": "alpha", "region": "eu"}
+    assert created["parameters"] == {
+        "license": "locked",
+        "project_name": "alpha",
+        "region": "eu",
+    }
     await set_workspace_status(session_maker, created["id"])
 
     immutable = await client.put(
@@ -562,6 +578,7 @@ async def test_workspace_user_parameter_defaults_immutability_and_history(
     )
     assert mutable.status_code == 202, mutable.text
     assert mutable.json()["resource"]["parameters"] == {
+        "license": "locked",
         "project_name": "alpha",
         "region": "us",
     }
@@ -584,6 +601,7 @@ async def test_workspace_user_parameter_defaults_immutability_and_history(
     )
     assert historical.status_code == 202, historical.text
     assert historical.json()["resource"]["parameters"] == {
+        "license": "locked",
         "project_name": "alpha",
         "region": "apac",
     }
