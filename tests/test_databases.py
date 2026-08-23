@@ -384,10 +384,18 @@ async def test_database_validation_duplicates_and_crypto_configuration(
         "/api/v1/databases",
         json=database_payload("Invalid Password", password=leak_marker),
     )
+    injected_host = await client.post(
+        "/api/v1/databases",
+        json={
+            **database_payload("Injected Host"),
+            "host": "postgres.internal\n--set global.baseDomain=evil",
+        },
+    )
     assert duplicate.status_code == 409
     assert invalid.status_code == 422
     assert removed_region.status_code == 422
     assert invalid_password.status_code == 422
+    assert injected_host.status_code == 422
     assert leak_marker not in invalid_password.text
     assert "[REDACTED]" in invalid_password.text
     assert "database-secret" not in duplicate.text

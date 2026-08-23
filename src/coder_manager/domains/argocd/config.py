@@ -361,6 +361,9 @@ def parse_default_admins(raw_value: str) -> tuple[str, ...]:
         msg = "CODER_MANAGER_DEFAULT_ADMINS contains an empty username"
         raise ArgoCdConfigurationError(msg)
     admins = {admin.strip().lower() for admin in raw_admins}
+    if any("\r" in admin or "\n" in admin for admin in admins):
+        msg = "CODER_MANAGER_DEFAULT_ADMINS contains a username with line breaks"
+        raise ArgoCdConfigurationError(msg)
     if any(len(admin) > MAX_USERNAME_LENGTH for admin in admins):
         msg = "CODER_MANAGER_DEFAULT_ADMINS contains a username longer than 255 characters"
         raise ArgoCdConfigurationError(msg)

@@ -428,6 +428,8 @@ async def test_missing_resources_and_invalid_payloads(client: AsyncClient) -> No
         {"username": "   ", "role": "user"},
         {"username": "a" * 256, "role": "user"},
         {"username": "alice,bob", "role": "user"},
+        {"username": "alice\n--set global.identifier=evil", "role": "user"},
+        {"username": "alice\r--set global.identifier=evil", "role": "user"},
         {"username": "alice", "role": "owner"},
         {"username": "alice", "role": "user", "extra": True},
     ],

@@ -33,6 +33,16 @@ class DatabaseMutableFields(BaseModel):
     database_name: NonEmptyString
     username: NonEmptyString
 
+    @field_validator("name", "host", "database_name", "username")
+    @classmethod
+    def reject_line_breaks(cls, value: str) -> str:
+        """Keep connection fields inside one generated Helm argument line."""
+
+        if "\r" in value or "\n" in value:
+            msg = "Database fields cannot contain line breaks"
+            raise ValueError(msg)
+        return value
+
 
 class DatabaseCreate(DatabaseMutableFields):
     """Payload accepted when adding a database to the pool."""

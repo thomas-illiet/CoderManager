@@ -302,6 +302,29 @@ def test_policy_username_lists_escape_helm_commas() -> None:
 
 
 @pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("database_host", "postgres.internal\n--set global.baseDomain=evil"),
+        ("database_name", "coder\r--set global.identifier=evil"),
+        ("managed_database_name", "managed\n--set server.config.kube=evil"),
+    ],
+)
+def test_helm_scalar_values_reject_line_breaks(field_name: str, value: str) -> None:
+    """Reject values that could append a second Helm command-line argument."""
+
+    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+
+    with pytest.raises(ArgoCdRequestError, match="cannot contain line breaks"):
+        application_payload(
+            config,
+            TEST_APPLICATION_NAME,
+            uuid4(),
+            (),
+            instance_helm_values(**{field_name: value}),
+        )
+
+
+@pytest.mark.parametrize(
     ("kubeconfig", "encoded"),
     [
         (b"\x00\xffarbitrary\nkubeconfig", "AP9hcmJpdHJhcnkKa3ViZWNvbmZpZw=="),
@@ -1155,6 +1178,10 @@ def test_legacy_global_project_setting_is_not_supported() -> None:
         (
             configured_settings(default_admins="x" * 256),
             "longer than 255",
+        ),
+        (
+            configured_settings(default_admins="alice\n--set global.identifier=evil"),
+            "username with line breaks",
         ),
         (
             configured_settings(argocd_production_destination_name=" "),

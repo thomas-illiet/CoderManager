@@ -30,6 +30,9 @@ class MemberCreate(BaseModel):
         if "," in normalized:
             msg = "Username cannot contain a comma"
             raise ValueError(msg)
+        if "\r" in normalized or "\n" in normalized:
+            msg = "Username cannot contain line breaks"
+            raise ValueError(msg)
         return normalized
 
 

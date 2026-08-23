@@ -161,6 +161,9 @@ def application_payload(
 def _helm_scalar_argument(name: str, value: str) -> str:
     """Build one unquoted Helm scalar assignment."""
 
+    if "\r" in value or "\n" in value:
+        msg = f"Helm argument {name} cannot contain line breaks"
+        raise ArgoCdRequestError(msg)
     escaped_value = value.replace("\\", "\\\\").replace(",", "\\,")
     return f"--set {name}={escaped_value}"
 
