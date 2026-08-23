@@ -212,7 +212,7 @@ class ArgoCdClient:
         existing = self._get_owned_application(name, environment, instance_id)
         if existing is None:
             return ArgoCdMutationStatus.COMPLETED
-        if application_operation_is_active(existing):
+        if application_operation_is_active(existing) or _application_deletion_is_pending(existing):
             return ArgoCdMutationStatus.DEFERRED
         path = f"api/v1/applications/{name}"
         response = self._client.delete(
@@ -230,7 +230,10 @@ class ArgoCdClient:
         if response.status_code == httpx.codes.NOT_FOUND:
             return ArgoCdMutationStatus.COMPLETED
         self._raise_for_response(response, "DELETE", path)
-        return ArgoCdMutationStatus.COMPLETED
+        remaining = self._get_owned_application(name, environment, instance_id)
+        return (
+            ArgoCdMutationStatus.COMPLETED if remaining is None else ArgoCdMutationStatus.DEFERRED
+        )
 
     def _get_owned_application(
         self,
@@ -295,6 +298,13 @@ def _response_message(response: httpx.Response) -> str | None:
     if not isinstance(message, str) or not message.strip():
         return None
     return message
+
+
+def _application_deletion_is_pending(application: dict[str, Any]) -> bool:
+    """Return whether Kubernetes accepted deletion but still exposes the object."""
+
+    metadata = application.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("deletionTimestamp") is not None
 
 
 def _json_object(response: httpx.Response, path: str) -> dict[str, Any]:

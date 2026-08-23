@@ -401,9 +401,11 @@ HTTP 202, and changes the lifecycle to `deleting/pending`. A failed `instance.cr
 reclassified through start, stop, or sync; DELETE instead abandons that provisioning attempt. When
 no verified administrator credential exists, failed-create cleanup starts directly with Application
 deletion rather than trying to contact Coder. Normal deletion first reserves workspace cleanup, then
-removes the Argo CD Application idempotently, executes `DROP SCHEMA IF EXISTS ... CASCADE`, and
-transactionally removes the local workspaces, members, database allocation, provider configuration,
-and instance. Local configuration is retained until final cleanup succeeds.
+requests foreground deletion of the Argo CD Application and remains on that durable step until a
+subsequent Argo `GET` returns 404. Only this confirmed absence permits
+`DROP SCHEMA IF EXISTS ... CASCADE`; a successful DELETE response alone never advances destructive
+database cleanup. The final transaction removes the local workspaces, members, database allocation,
+provider configuration, and instance. Local configuration is retained until final cleanup succeeds.
 
 Every endpoint that starts a resource job returns `{ "resource": ..., "job": ... }`; database
 synchronization returns `{ "job": ... }`. `GET /api/v1/jobs/{job_id}` exposes the current step,

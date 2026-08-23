@@ -2016,12 +2016,18 @@ async def test_delete_steps_keep_local_state_until_step_04(
     job_id = UUID(deletion.json()["job"]["id"])
     deleted_remote: list[tuple[UUID, str | None, str | None, str]] = []
     dropped_targets: list[postgresql.SchemaTarget] = []
+    deletion_results = iter(
+        [
+            argocd.ArgoCdMutationStatus.DEFERRED,
+            argocd.ArgoCdMutationStatus.COMPLETED,
+        ]
+    )
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
         lambda deleted_instance_id, slug, name, environment: (
             deleted_remote.append((deleted_instance_id, slug, name, environment))
-            or argocd.ArgoCdMutationStatus.COMPLETED
+            or next(deletion_results)
         ),
     )
     monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
@@ -2029,9 +2035,17 @@ async def test_delete_steps_keep_local_state_until_step_04(
     monkeypatch.setattr(postgresql, "drop_schema", dropped_targets.append)
 
     assert tasks.step_01_remove_workspaces.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "deferred"}
+    assert dropped_targets == []
+    async with session_maker() as session:
+        deferred_job = await session.get(JobExecution, job_id)
+        assert deferred_job is not None
+        assert deferred_job.step == INSTANCE_DELETE_STEP_02
+        assert deferred_job.status is JobStatus.PENDING
     assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "pending"}
     assert deleted_remote == [
-        (instance_id, str(deletion.json()["resource"]["slug"]), None, "development")
+        (instance_id, str(deletion.json()["resource"]["slug"]), None, "development"),
+        (instance_id, str(deletion.json()["resource"]["slug"]), None, "development"),
     ]
     assert tasks.step_03_remove_schema.run(str(job_id)) == {"status": "pending"}
     assert dropped_targets[0].schema_name == f"coder_{instance_id.hex}"

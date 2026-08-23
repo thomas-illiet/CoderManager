@@ -814,7 +814,7 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
 
 def test_delete_application_is_cascading_and_idempotent() -> None:
-    """Delete managed resources and tolerate an already absent Application."""
+    """Wait for confirmed absence and tolerate an already deleted Application."""
 
     requests: list[httpx.Request] = []
     responses = iter(
@@ -829,6 +829,16 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
                 },
             ),
             httpx.Response(200, json={}),
+            httpx.Response(
+                200,
+                json={
+                    "metadata": {
+                        "name": "attached",
+                        "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                        "deletionTimestamp": "2026-08-24T10:00:00Z",
+                    }
+                },
+            ),
             httpx.Response(404),
         )
     )
@@ -854,11 +864,12 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
             "production",
         )
 
-    assert first is ArgoCdMutationStatus.COMPLETED
+    assert first is ArgoCdMutationStatus.DEFERRED
     assert second is ArgoCdMutationStatus.COMPLETED
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/root/api/v1/applications/attached"),
         ("DELETE", "/root/api/v1/applications/attached"),
+        ("GET", "/root/api/v1/applications/attached"),
         ("GET", "/root/api/v1/applications/attached"),
     ]
     assert [dict(request.url.params) for request in requests] == [
@@ -869,12 +880,52 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
             "project": "production-project",
         },
         {"project": "production-project"},
+        {"project": "production-project"},
     ]
     assert requests[1].headers["content-type"] == "application/json"
     assert all(
         request.headers["authorization"] == "Bearer production-secret-token" for request in requests
     )
     assert requests[1].content == b""
+
+
+def test_delete_application_completes_after_immediate_confirmed_absence() -> None:
+    """Complete in one attempt when the post-delete observation is already 404."""
+
+    responses = iter(
+        (
+            httpx.Response(
+                200,
+                json={
+                    "metadata": {
+                        "name": "attached",
+                        "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                    }
+                },
+            ),
+            httpx.Response(200, json={}),
+            httpx.Response(404),
+        )
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Expose disappearance immediately after accepting DELETE."""
+
+        requests.append(request)
+        return next(responses)
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
+        result = client.delete_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            "attached",
+            "production",
+        )
+
+    assert result is ArgoCdMutationStatus.COMPLETED
+    assert [request.method for request in requests] == ["GET", "DELETE", "GET"]
 
 
 def test_read_status_service_uses_only_client_configuration(
