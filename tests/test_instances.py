@@ -10,7 +10,7 @@ import pytest
 from fastapi import HTTPException
 from httpx import AsyncClient
 from pydantic import SecretStr
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +28,7 @@ from coder_manager.models import (
     InstanceState,
     InstanceStatus,
     JobExecution,
+    JobStatus,
 )
 from coder_manager.repositories import (
     InstanceActionConflictError,
@@ -39,6 +40,7 @@ from coder_manager.repositories import (
 )
 from coder_manager.repositories import instances as instance_repositories
 from coder_manager.schemas import InstanceCreate
+from coder_manager.tasks import step_02_remove_instance
 from tests.conftest import TEST_CRYPTO_KEY
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
@@ -546,6 +548,55 @@ async def test_delete_requires_creation_success_and_marks_deleting(
 
     repeated = await client.delete(f"/api/v1/instances/{created['id']}")
     assert repeated.status_code == 409
+
+
+async def test_failed_creation_cannot_be_reclassified_and_can_be_abandoned(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Keep failed provisioning owned by its create job until explicit cleanup."""
+
+    created = await create_instance(client, "FAILED CREATE")
+    instance_id = UUID(created["id"])
+    create_job_id = UUID(created["job_id"])
+    async with session_maker() as session:
+        instance = await session.get(Instance, instance_id)
+        create_job = await session.get(JobExecution, create_job_id)
+        assert instance is not None
+        assert create_job is not None
+        instance.status = InstanceStatus.ERROR
+        create_job.status = JobStatus.ERROR
+        await session.commit()
+
+    step_02_remove_instance.delay.reset_mock()
+    blocked = [
+        await client.post(f"/api/v1/instances/{instance_id}/start"),
+        await client.post(f"/api/v1/instances/{instance_id}/stop"),
+        await client.post(f"/api/v1/instances/{instance_id}/sync"),
+    ]
+    assert [response.status_code for response in blocked] == [409, 409, 409]
+    async with session_maker() as session:
+        preserved = await session.get(Instance, instance_id)
+        jobs_before_cleanup = await session.scalar(select(func.count()).select_from(JobExecution))
+        assert preserved is not None
+        assert preserved.action == "creating"
+        assert preserved.status is InstanceStatus.ERROR
+        assert preserved.job_id == create_job_id
+        assert preserved.step == "step_01_create_schema"
+        assert jobs_before_cleanup == 1
+
+    cleanup = await client.delete(f"/api/v1/instances/{instance_id}")
+
+    assert cleanup.status_code == 202
+    assert cleanup.json()["resource"]["action"] == "deleting"
+    assert cleanup.json()["resource"]["step"] == "step_02_remove_instance"
+    assert cleanup.json()["job"]["step"] == "step_02_remove_instance"
+    cleanup_job_id = UUID(cleanup.json()["job"]["id"])
+    step_02_remove_instance.delay.assert_called_once_with(str(cleanup_job_id))
+    async with session_maker() as session:
+        create_job = await session.get(JobExecution, create_job_id)
+        assert create_job is not None
+        assert create_job.status is JobStatus.ERROR
 
 
 async def test_delete_missing_instance_returns_not_found(client: AsyncClient) -> None:

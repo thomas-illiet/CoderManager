@@ -395,10 +395,13 @@ together. New code cannot create an instance while the old non-null column remai
 cannot operate after that column has been removed.
 
 Deletion is asynchronous. It is accepted after a successful create, update, start, or stop, returns
-HTTP 202, and changes the lifecycle to `deleting/pending`. Its four steps reserve workspace cleanup,
-remove the Argo CD Application idempotently, execute `DROP SCHEMA IF EXISTS ... CASCADE`, then
-transactionally remove the local workspaces, members, database allocation, provider configuration,
-and instance. Local configuration is retained until the fourth step succeeds.
+HTTP 202, and changes the lifecycle to `deleting/pending`. A failed `instance.create` cannot be
+reclassified through start, stop, or sync; DELETE instead abandons that provisioning attempt. When
+no verified administrator credential exists, failed-create cleanup starts directly with Application
+deletion rather than trying to contact Coder. Normal deletion first reserves workspace cleanup, then
+removes the Argo CD Application idempotently, executes `DROP SCHEMA IF EXISTS ... CASCADE`, and
+transactionally removes the local workspaces, members, database allocation, provider configuration,
+and instance. Local configuration is retained until final cleanup succeeds.
 
 Every endpoint that starts a resource job returns `{ "resource": ..., "job": ... }`; database
 synchronization returns `{ "job": ... }`. `GET /api/v1/jobs/{job_id}` exposes the current step,

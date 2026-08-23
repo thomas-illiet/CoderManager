@@ -48,8 +48,9 @@ from coder_manager.tasks import (
     step_01_start_instance,
     step_01_stop_workspaces,
     step_01_update_instance,
+    step_02_remove_instance,
 )
-from coder_manager.tasks.common.registry import dispatch_registered_step
+from coder_manager.tasks.common.registry import INSTANCE_DELETE_STEP_02, dispatch_registered_step
 from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 router = APIRouter(prefix="/instances", tags=["instances"])
@@ -492,7 +493,7 @@ async def delete_instance(
     session: SessionDependency,
     settings: SettingsDependency,
 ) -> JobResourceResponse[InstanceRead]:
-    """Move a successfully reconciled instance to deleting/pending."""
+    """Delete a reconciled instance or abandon a failed creation."""
 
     try:
         instance = await InstanceRepository(session).request_deletion(instance_id)
@@ -504,11 +505,16 @@ async def delete_instance(
     except InstanceActionConflictError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Only a successfully reconciled instance can be deleted",
+            detail="Instance cannot be deleted in its current lifecycle state",
         ) from error
     job = await _job_read(session, getattr(instance, "job_id", None))
     if job is not None:
-        dispatch_registered_step(step_01_remove_workspaces.name, job.id)
+        task_name = (
+            step_02_remove_instance.name
+            if job.step == INSTANCE_DELETE_STEP_02
+            else step_01_remove_workspaces.name
+        )
+        dispatch_registered_step(task_name, job.id)
     return JobResourceResponse(
         resource=InstanceRead.from_instance(
             instance,

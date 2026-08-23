@@ -26,6 +26,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_01_TASK,
     INSTANCE_DELETE_STEP_01,
     INSTANCE_DELETE_STEP_01_TASK,
+    INSTANCE_DELETE_STEP_02,
+    INSTANCE_DELETE_STEP_02_TASK,
     INSTANCE_START_STEP_01,
     INSTANCE_START_STEP_01_TASK,
     INSTANCE_STOP_STEP_01,
@@ -62,6 +64,12 @@ def generate_instance_slug() -> str:
     """Generate one opaque DNS-safe instance slug."""
 
     return "".join(secrets.choice(INSTANCE_SLUG_ALPHABET) for _ in range(INSTANCE_SLUG_LENGTH))
+
+
+def _creation_is_incomplete(instance: Instance) -> bool:
+    """Return whether the original provisioning workflow has not completed."""
+
+    return instance.action == "creating" and instance.status is not InstanceStatus.SUCCESS
 
 
 class InstanceRepository:
@@ -206,7 +214,7 @@ class InstanceRepository:
         return stored_instance
 
     async def request_deletion(self, instance_id: UUID) -> Instance:
-        """Atomically request deletion of a successfully reconciled instance."""
+        """Atomically request deletion or cleanup of a failed creation."""
 
         # Lock the instance so only one lifecycle transition can win.
         instance = await self._session.scalar(
@@ -218,26 +226,39 @@ class InstanceRepository:
         if instance is None:
             await self._session.rollback()
             raise InstanceNotFoundError
-        if (
-            instance.action not in {"creating", "updating", "starting", "stopping"}
-            or instance.status is not InstanceStatus.SUCCESS
-        ):
+        failed_creation = instance.action == "creating" and instance.status is InstanceStatus.ERROR
+        successfully_reconciled = (
+            instance.action
+            in {
+                "creating",
+                "updating",
+                "starting",
+                "stopping",
+            }
+            and instance.status is InstanceStatus.SUCCESS
+        )
+        if not successfully_reconciled and not failed_creation:
             await self._session.rollback()
             raise InstanceActionConflictError
 
         # The worker performs destructive cleanup asynchronously from this request.
+        skip_workspace_cleanup = failed_creation and instance.password_enc is None
+        task_name = (
+            INSTANCE_DELETE_STEP_02_TASK if skip_workspace_cleanup else INSTANCE_DELETE_STEP_01_TASK
+        )
+        step = INSTANCE_DELETE_STEP_02 if skip_workspace_cleanup else INSTANCE_DELETE_STEP_01
         instance.action = "deleting"
         instance.status = InstanceStatus.PENDING
         job = add_job_execution(
             self._session,
             name="instance.delete",
-            task_name=INSTANCE_DELETE_STEP_01_TASK,
+            task_name=task_name,
             resource_type="instance",
             resource_id=instance.id,
-            step=INSTANCE_DELETE_STEP_01,
+            step=step,
         )
         instance.job_id = job.id
-        instance.step = INSTANCE_DELETE_STEP_01
+        instance.step = step
         await self._session.commit()
         stored_instance = await self._session.scalar(
             select(Instance)
@@ -261,10 +282,11 @@ class InstanceRepository:
         if instance is None:
             await self._session.rollback()
             raise InstanceNotFoundError
-        if instance.action == "deleting" or instance.status in {
-            InstanceStatus.PENDING,
-            InstanceStatus.RUNNING,
-        }:
+        if (
+            _creation_is_incomplete(instance)
+            or instance.action == "deleting"
+            or instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}
+        ):
             await self._session.rollback()
             raise InstanceActionConflictError
 
@@ -343,10 +365,11 @@ class InstanceRepository:
         if instance is None:
             await self._session.rollback()
             raise InstanceNotFoundError
-        if instance.action == "deleting" or instance.status in {
-            InstanceStatus.PENDING,
-            InstanceStatus.RUNNING,
-        }:
+        if (
+            _creation_is_incomplete(instance)
+            or instance.action == "deleting"
+            or instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}
+        ):
             await self._session.rollback()
             raise InstanceActionConflictError
 
