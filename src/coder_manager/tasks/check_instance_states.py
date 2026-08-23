@@ -64,6 +64,7 @@ def check_instance_states() -> dict[str, int]:
     for snapshot in instances:
         try:
             exists = argocd.instance_application_exists(
+                snapshot.id,
                 snapshot.slug,
                 snapshot.attached_name,
                 snapshot.environment,

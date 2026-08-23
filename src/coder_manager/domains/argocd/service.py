@@ -41,6 +41,7 @@ def reconcile_instance_application(
 
 
 def delete_instance_application(
+    instance_id: UUID,
     slug: str,
     attached_name: str | None,
     environment: str,
@@ -49,10 +50,11 @@ def delete_instance_application(
 
     config = ArgoCdConfig.from_settings(get_settings())
     with ArgoCdClient(config) as client:
-        return client.delete_application(slug, attached_name, environment)
+        return client.delete_application(instance_id, slug, attached_name, environment)
 
 
 def instance_application_exists(
+    instance_id: UUID,
     slug: str,
     attached_name: str | None,
     environment: str,
@@ -62,10 +64,11 @@ def instance_application_exists(
 
     config = ArgoCdConfig.from_settings(settings or get_settings())
     with ArgoCdClient(config) as client:
-        return client.application_exists(slug, attached_name, environment)
+        return client.application_exists(instance_id, slug, attached_name, environment)
 
 
 def read_instance_application_status(
+    instance_id: UUID,
     slug: str,
     attached_name: str | None,
     environment: str,
@@ -75,4 +78,4 @@ def read_instance_application_status(
 
     config = ArgoCdClientConfig.from_settings(settings)
     with ArgoCdClient(config) as client:
-        return client.get_application_status(slug, attached_name, environment)
+        return client.get_application_status(instance_id, slug, attached_name, environment)

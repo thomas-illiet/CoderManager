@@ -799,6 +799,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     instance_id = UUID(instance["id"])
 
     def remote_status(
+        observed_instance_id: UUID,
         slug: str,
         attached_name: str | None,
         environment: str,
@@ -806,6 +807,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     ) -> argocd.ArgoCdApplicationStatus:
         """Simulate the remote status operation used by this scenario."""
 
+        assert observed_instance_id == instance_id
         assert slug == instance["slug"]
         assert attached_name is None
         assert environment == "development"
@@ -839,6 +841,7 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
     ("remote_error", "expected_status"),
     [
         (argocd.ArgoCdApplicationNotFoundError("missing"), 404),
+        (argocd.ArgoCdApplicationOwnershipError("foreign"), 409),
         (argocd.ArgoCdConfigurationError("missing config"), 503),
         (argocd.ArgoCdRequestError("remote error"), 502),
         (httpx.ConnectError("connection failed"), 502),
@@ -865,6 +868,7 @@ async def test_instance_status_route_error_mapping(
             return record
 
     def fail_status(
+        _instance_id: UUID,
         _slug: str,
         _attached_name: str | None,
         _environment: str,

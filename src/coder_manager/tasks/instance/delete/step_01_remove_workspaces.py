@@ -73,7 +73,12 @@ def step_01_remove_workspaces(job_id: str) -> dict[str, str]:
         instance_url, password = credentials
 
         restored_name = attached_name
-        if not argocd.instance_application_exists(slug, attached_name, environment):
+        if not argocd.instance_application_exists(
+            instance_id,
+            slug,
+            attached_name,
+            environment,
+        ):
             helm_values = instance_helm_values(
                 instance_id,
                 slug,

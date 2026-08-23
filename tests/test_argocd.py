@@ -11,6 +11,7 @@ from pydantic import SecretBytes, SecretStr
 from coder_manager.config import Settings
 from coder_manager.domains.argocd import (
     ArgoCdApplicationNotFoundError,
+    ArgoCdApplicationOwnershipError,
     ArgoCdClient,
     ArgoCdClientConfig,
     ArgoCdConfig,
@@ -24,6 +25,7 @@ from coder_manager.domains.argocd import service as argocd_service
 from coder_manager.domains.argocd.applications import application_name, application_payload
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
+TEST_INSTANCE_ID = UUID("12345678-1234-5678-1234-567812345678")
 TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 TEST_ARGOCD_TOKENS = {
     "development": "super-secret-token",
@@ -135,7 +137,7 @@ def test_create_application_and_sync_contract() -> None:
         return httpx.Response(200, json={})
 
     config = ArgoCdConfig.from_settings(configured_settings())
-    instance_id = UUID("12345678-1234-5678-1234-567812345678")
+    instance_id = TEST_INSTANCE_ID
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         result = client.ensure_application(
             instance_id,
@@ -366,6 +368,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
             "labels": {
                 "existing": "kept",
                 "coder-manager/managed": "true",
+                "coder-manager/instance-id": str(TEST_INSTANCE_ID),
             },
         },
         "spec": {"project": "wrong"},
@@ -381,7 +384,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         return httpx.Response(200, json={})
 
     config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
-    instance_id = uuid4()
+    instance_id = TEST_INSTANCE_ID
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         result = client.ensure_application(
             instance_id,
@@ -441,6 +444,111 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert "status" not in update
 
 
+@pytest.mark.parametrize(
+    "labels",
+    [
+        {},
+        {"coder-manager/instance-id": str(uuid4())},
+    ],
+)
+def test_reconciliation_rejects_unowned_application(labels: dict[str, str]) -> None:
+    """Never overwrite or defer an Application without exact instance ownership."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return an active but unowned Application."""
+
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "metadata": {"name": TEST_APPLICATION_NAME, "labels": labels},
+                "status": {"operationState": {"phase": "Running"}},
+            },
+        )
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    with (
+        ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ArgoCdApplicationOwnershipError, match="is not owned"),
+    ):
+        client.ensure_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            None,
+            (),
+            instance_helm_values(),
+        )
+
+    assert [request.method for request in requests] == ["GET"]
+
+
+def test_create_conflict_rejects_application_owned_by_another_instance() -> None:
+    """Fence the adoption race after Argo reports a create conflict."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return a foreign owner only after the conflicting create."""
+
+        requests.append(request)
+        if request.method == "GET" and len(requests) == 1:
+            return httpx.Response(404)
+        if request.method == "POST":
+            return httpx.Response(409)
+        return httpx.Response(
+            200,
+            json={
+                "metadata": {
+                    "name": TEST_APPLICATION_NAME,
+                    "labels": {"coder-manager/instance-id": str(uuid4())},
+                }
+            },
+        )
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    with (
+        ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ArgoCdApplicationOwnershipError, match="is not owned"),
+    ):
+        client.ensure_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            None,
+            (),
+            instance_helm_values(),
+        )
+
+    assert [request.method for request in requests] == ["GET", "POST", "GET"]
+
+
+def test_deletion_rejects_unowned_application() -> None:
+    """Never delete an Application without exact instance ownership."""
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return one Application whose ownership label is missing."""
+
+        requests.append(request)
+        return httpx.Response(200, json={"metadata": {"name": "attached"}})
+
+    config = ArgoCdConfig.from_settings(configured_settings())
+    with (
+        ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ArgoCdApplicationOwnershipError, match="is not owned"),
+    ):
+        client.delete_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            "attached",
+            "development",
+        )
+
+    assert [request.method for request in requests] == ["GET"]
+
+
 @pytest.mark.parametrize("phase", ["Running", "Terminating"])
 def test_active_application_operation_defers_reconciliation(phase: str) -> None:
     """Avoid every reconciliation mutation while Argo CD is already processing."""
@@ -454,7 +562,10 @@ def test_active_application_operation_defers_reconciliation(phase: str) -> None:
         return httpx.Response(
             200,
             json={
-                "metadata": {"name": TEST_APPLICATION_NAME},
+                "metadata": {
+                    "name": TEST_APPLICATION_NAME,
+                    "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                },
                 "status": {"operationState": {"phase": phase}},
             },
         )
@@ -462,7 +573,7 @@ def test_active_application_operation_defers_reconciliation(phase: str) -> None:
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         result = client.ensure_application(
-            uuid4(),
+            TEST_INSTANCE_ID,
             TEST_INSTANCE_SLUG,
             None,
             (),
@@ -493,7 +604,10 @@ def test_operation_started_by_update_defers_explicit_sync() -> None:
             return httpx.Response(
                 200,
                 json={
-                    "metadata": {"name": TEST_APPLICATION_NAME},
+                    "metadata": {
+                        "name": TEST_APPLICATION_NAME,
+                        "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                    },
                     "status": {"operationState": {"phase": phase}},
                 },
             )
@@ -502,7 +616,7 @@ def test_operation_started_by_update_defers_explicit_sync() -> None:
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         result = client.ensure_application(
-            uuid4(),
+            TEST_INSTANCE_ID,
             TEST_INSTANCE_SLUG,
             None,
             (),
@@ -519,7 +633,10 @@ def test_terminal_or_unknown_operation_phase_allows_reconciliation(phase: str) -
 
     requests: list[httpx.Request] = []
     existing = {
-        "metadata": {"name": TEST_APPLICATION_NAME},
+        "metadata": {
+            "name": TEST_APPLICATION_NAME,
+            "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+        },
         "status": {"operationState": {"phase": phase}},
     }
 
@@ -532,7 +649,7 @@ def test_terminal_or_unknown_operation_phase_allows_reconciliation(phase: str) -
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         result = client.ensure_application(
-            uuid4(),
+            TEST_INSTANCE_ID,
             TEST_INSTANCE_SLUG,
             None,
             (),
@@ -558,7 +675,15 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
             get_count += 1
             if get_count == 1:
                 return httpx.Response(404)
-            return httpx.Response(200, json={"metadata": {"name": "attached"}})
+            return httpx.Response(
+                200,
+                json={
+                    "metadata": {
+                        "name": "attached",
+                        "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                    }
+                },
+            )
         if request.method == "POST" and request.url.path.endswith("/applications"):
             return httpx.Response(409)
         return httpx.Response(200, json={})
@@ -566,7 +691,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         client.ensure_application(
-            uuid4(),
+            TEST_INSTANCE_ID,
             TEST_INSTANCE_SLUG,
             "attached",
             (),
@@ -605,7 +730,10 @@ def test_application_status_is_read_without_triggering_sync() -> None:
 
     requests: list[httpx.Request] = []
     response_payload = {
-        "metadata": {"name": "attached"},
+        "metadata": {
+            "name": "attached",
+            "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+        },
         "status": {
             "sync": {"status": "Synced", "revision": "abc123"},
             "health": {"status": "Healthy"},
@@ -622,7 +750,12 @@ def test_application_status_is_read_without_triggering_sync() -> None:
 
     config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        remote = client.get_application_status(TEST_INSTANCE_SLUG, "attached", "production")
+        remote = client.get_application_status(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            "attached",
+            "production",
+        )
 
     assert remote.application_name == "attached"
     assert remote.sync_status == "Synced"
@@ -640,7 +773,13 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
     responses = iter(
         (
-            httpx.Response(200, json={"status": {"sync": {"status": 12}}}),
+            httpx.Response(
+                200,
+                json={
+                    "metadata": {"labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)}},
+                    "status": {"sync": {"status": 12}},
+                },
+            ),
             httpx.Response(404),
         )
     )
@@ -652,9 +791,19 @@ def test_application_status_handles_missing_or_partial_remote_state() -> None:
 
     config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        partial = client.get_application_status(TEST_INSTANCE_SLUG, None, "development")
+        partial = client.get_application_status(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            None,
+            "development",
+        )
         with pytest.raises(ArgoCdApplicationNotFoundError):
-            client.get_application_status(TEST_INSTANCE_SLUG, "missing", "development")
+            client.get_application_status(
+                TEST_INSTANCE_ID,
+                TEST_INSTANCE_SLUG,
+                "missing",
+                "development",
+            )
 
     assert partial.application_name == TEST_APPLICATION_NAME
     assert partial.sync_status is None
@@ -670,7 +819,15 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
     requests: list[httpx.Request] = []
     responses = iter(
         (
-            httpx.Response(200, json={"metadata": {"name": "attached"}}),
+            httpx.Response(
+                200,
+                json={
+                    "metadata": {
+                        "name": "attached",
+                        "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                    }
+                },
+            ),
             httpx.Response(200, json={}),
             httpx.Response(404),
         )
@@ -684,8 +841,18 @@ def test_delete_application_is_cascading_and_idempotent() -> None:
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        first = client.delete_application(TEST_INSTANCE_SLUG, "attached", "production")
-        second = client.delete_application(TEST_INSTANCE_SLUG, "attached", "production")
+        first = client.delete_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            "attached",
+            "production",
+        )
+        second = client.delete_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            "attached",
+            "production",
+        )
 
     assert first is ArgoCdMutationStatus.COMPLETED
     assert second is ArgoCdMutationStatus.COMPLETED
@@ -735,6 +902,7 @@ def test_read_status_service_uses_only_client_configuration(
 
         def get_application_status(
             self,
+            _instance_id: UUID,
             _slug: str,
             _attached_name: str | None,
             _environment: str,
@@ -746,6 +914,7 @@ def test_read_status_service_uses_only_client_configuration(
     monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
 
     result = argocd_service.read_instance_application_status(
+        TEST_INSTANCE_ID,
         TEST_INSTANCE_SLUG,
         None,
         "staging",
@@ -770,14 +939,22 @@ def test_active_application_operation_defers_deletion(phase: str) -> None:
         return httpx.Response(
             200,
             json={
-                "metadata": {"name": "attached"},
+                "metadata": {
+                    "name": "attached",
+                    "labels": {"coder-manager/instance-id": str(TEST_INSTANCE_ID)},
+                },
                 "status": {"operationState": {"phase": phase}},
             },
         )
 
     config = ArgoCdConfig.from_settings(configured_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
-        result = client.delete_application(TEST_INSTANCE_SLUG, "attached", "development")
+        result = client.delete_application(
+            TEST_INSTANCE_ID,
+            TEST_INSTANCE_SLUG,
+            "attached",
+            "development",
+        )
 
     assert result is ArgoCdMutationStatus.DEFERRED
     assert [(request.method, request.url.path) for request in requests] == [
@@ -790,7 +967,7 @@ def test_delete_instance_application_uses_process_configuration(
 ) -> None:
     """Use the configured client when the worker invokes the deletion service."""
 
-    deleted: list[tuple[str, str | None, str]] = []
+    deleted: list[tuple[UUID, str, str | None, str]] = []
 
     class StubClient:
         """Capture calls made by the process-wide deletion service."""
@@ -808,25 +985,27 @@ def test_delete_instance_application_uses_process_configuration(
 
         def delete_application(
             self,
+            instance_id: UUID,
             slug: str,
             attached_name: str | None,
             environment: str,
         ) -> ArgoCdMutationStatus:
             """Capture the requested Application deletion."""
 
-            deleted.append((slug, attached_name, environment))
+            deleted.append((instance_id, slug, attached_name, environment))
             return ArgoCdMutationStatus.COMPLETED
 
     monkeypatch.setattr(argocd_service, "get_settings", configured_settings)
     monkeypatch.setattr(argocd_service, "ArgoCdClient", StubClient)
 
     result = argocd_service.delete_instance_application(
+        TEST_INSTANCE_ID,
         TEST_INSTANCE_SLUG,
         "attached",
         "staging",
     )
 
-    assert deleted == [(TEST_INSTANCE_SLUG, "attached", "staging")]
+    assert deleted == [(TEST_INSTANCE_ID, TEST_INSTANCE_SLUG, "attached", "staging")]
     assert result is ArgoCdMutationStatus.COMPLETED
 
 
@@ -1012,7 +1191,12 @@ def test_one_client_switches_authorization_between_environments() -> None:
     config = ArgoCdClientConfig.from_settings(client_settings())
     with ArgoCdClient(config, transport=httpx.MockTransport(handler)) as client:
         for environment in ("development", "staging", "production"):
-            assert not client.application_exists(TEST_INSTANCE_SLUG, None, environment)
+            assert not client.application_exists(
+                TEST_INSTANCE_ID,
+                TEST_INSTANCE_SLUG,
+                None,
+                environment,
+            )
 
     assert [request.headers["authorization"] for request in requests] == [
         "Bearer super-secret-token",

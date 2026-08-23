@@ -48,7 +48,12 @@ def step_01_stop_workspaces(job_id: str) -> dict[str, str]:
             attached_name = instance.argocd_application_name
             environment = instance.environment.value
 
-        if argocd.instance_application_exists(slug, attached_name, environment):
+        if argocd.instance_application_exists(
+            required_resource_id(claim),
+            slug,
+            attached_name,
+            environment,
+        ):
             credentials = stored_admin_password(
                 required_resource_id(claim),
                 session_factory,

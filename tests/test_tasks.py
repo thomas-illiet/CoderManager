@@ -502,19 +502,27 @@ async def test_start_and_stop_jobs_reconcile_workspaces_before_application_delet
 
     events: list[str] = []
 
-    def application_exists(_slug: str, _name: str | None, environment: str) -> bool:
+    def application_exists(
+        observed_instance_id: UUID,
+        _slug: str,
+        _name: str | None,
+        environment: str,
+    ) -> bool:
         """Verify stop existence checks use the instance environment."""
 
+        assert observed_instance_id == instance_id
         assert environment == "development"
         return True
 
     def delete_application(
+        deleted_instance_id: UUID,
         _slug: str,
         _name: str | None,
         environment: str,
     ) -> argocd.ArgoCdMutationStatus:
         """Verify stop deletion uses the instance environment."""
 
+        assert deleted_instance_id == instance_id
         assert environment == "development"
         events.append("application")
         return argocd.ArgoCdMutationStatus.COMPLETED
@@ -1131,7 +1139,12 @@ async def test_hourly_state_audit_observes_idle_instances_and_isolates_errors(
         records[1]["slug"]: False,
     }
 
-    def observe(slug: str, _attached_name: str | None, environment: str) -> bool:
+    def observe(
+        _instance_id: UUID,
+        slug: str,
+        _attached_name: str | None,
+        environment: str,
+    ) -> bool:
         """Return two observations and fail one independently."""
 
         assert environment == "development"
@@ -1173,9 +1186,15 @@ async def test_hourly_state_audit_discards_concurrent_lifecycle_change(
         stored.step = None
         await session.commit()
 
-    def observe(_slug: str, _attached_name: str | None, environment: str) -> bool:
+    def observe(
+        observed_instance_id: UUID,
+        _slug: str,
+        _attached_name: str | None,
+        environment: str,
+    ) -> bool:
         """Change lifecycle state while the Argo observation is in flight."""
 
+        assert observed_instance_id == instance_id
         assert environment == "development"
         with sync_session_maker() as session:
             stored = session.get(Instance, instance_id)
@@ -2000,8 +2019,8 @@ async def test_delete_steps_keep_local_state_until_step_04(
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda slug, name, environment: (
-            deleted_remote.append((instance_id, slug, name, environment))
+        lambda deleted_instance_id, slug, name, environment: (
+            deleted_remote.append((deleted_instance_id, slug, name, environment))
             or argocd.ArgoCdMutationStatus.COMPLETED
         ),
     )

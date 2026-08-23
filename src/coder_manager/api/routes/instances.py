@@ -308,6 +308,7 @@ async def get_instance_status(
     try:
         remote = await run_in_threadpool(
             argocd.read_instance_application_status,
+            instance.id,
             instance.slug,
             instance.argocd_application_name,
             instance.environment.value,
@@ -317,6 +318,11 @@ async def get_instance_status(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Argo CD Application not found",
+        ) from error
+    except argocd.ArgoCdApplicationOwnershipError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Argo CD Application ownership conflict",
         ) from error
     except argocd.ArgoCdConfigurationError as error:
         raise HTTPException(

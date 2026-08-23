@@ -250,8 +250,10 @@ Instance creation is split into three durable steps. The first opens a short-liv
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
 `metadata.name` is `<CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX>-<instance slug>`. The
-slug is required; there is no UUID fallback. Existing attached Application names are retained after
-their first successful reconciliation. Application metadata contains the managed labels
+slug is required; there is no UUID fallback. Existing Applications are accepted only when their
+`coder-manager/instance-id` label already matches the local instance UUID; an absent or different
+owner is a conflict and is never adopted, overwritten, observed, or deleted. Attached Application
+names are retained after their first successful reconciliation. Application metadata contains the managed labels
 `coder-manager/instance-id=<instance UUID>`, `environment=<instance environment>`,
 `region=<normalized CODER_MANAGER_ARGOCD_REGION>`, `domain=code-station`, and `tier=standard`.
 Reconciliation refreshes these managed labels while preserving labels owned by other actors. The

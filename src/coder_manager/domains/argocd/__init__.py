@@ -8,6 +8,7 @@ from coder_manager.domains.argocd.config import (
 )
 from coder_manager.domains.argocd.errors import (
     ArgoCdApplicationNotFoundError,
+    ArgoCdApplicationOwnershipError,
     ArgoCdConfigurationError,
     ArgoCdRequestError,
 )
@@ -26,6 +27,7 @@ from coder_manager.domains.argocd.service import (
 
 __all__ = [
     "ArgoCdApplicationNotFoundError",
+    "ArgoCdApplicationOwnershipError",
     "ArgoCdApplicationStatus",
     "ArgoCdClient",
     "ArgoCdClientConfig",

@@ -8,6 +8,7 @@ from coder_manager.tasks.common.execution import (
     ExecutionClaim,
     advance_execution,
     defer_execution,
+    required_resource_id,
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import (
@@ -34,7 +35,12 @@ def step_02_remove_instance(job_id: str) -> dict[str, str]:
             slug = instance.slug
             attached_name = instance.argocd_application_name
             environment = instance.environment.value
-        deletion = argocd.delete_instance_application(slug, attached_name, environment)
+        deletion = argocd.delete_instance_application(
+            required_resource_id(claim),
+            slug,
+            attached_name,
+            environment,
+        )
         if deletion is argocd.ArgoCdMutationStatus.DEFERRED:
             deferred = defer_execution(claim, session_factory)
             return {"status": "deferred" if deferred else "noop"}

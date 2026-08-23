@@ -16,6 +16,7 @@ from coder_manager.domains.argocd.applications import (
 from coder_manager.domains.argocd.config import ArgoCdClientConfig, ArgoCdConfig
 from coder_manager.domains.argocd.errors import (
     ArgoCdApplicationNotFoundError,
+    ArgoCdApplicationOwnershipError,
     ArgoCdConfigurationError,
     ArgoCdRequestError,
 )
@@ -101,7 +102,7 @@ class ArgoCdClient:
             members,
             helm_values,
         )
-        existing = self._get_application(name, environment)
+        existing = self._get_owned_application(name, environment, instance_id)
         if existing is not None and application_operation_is_active(existing):
             return ArgoCdReconcileResult(
                 status=ArgoCdMutationStatus.DEFERRED,
@@ -117,7 +118,7 @@ class ArgoCdClient:
                 json=desired,
             )
             if response.status_code == httpx.codes.CONFLICT:
-                existing = self._get_application(name, environment)
+                existing = self._get_owned_application(name, environment, instance_id)
                 if existing is None:
                     self._raise_for_response(response, "POST", "api/v1/applications")
                 if existing is not None and application_operation_is_active(existing):
@@ -141,7 +142,7 @@ class ArgoCdClient:
 
         # Re-read immediately before sync because creation or update may start an
         # automated operation.
-        current = self._get_application(name, environment)
+        current = self._get_owned_application(name, environment, instance_id)
         if current is not None and application_operation_is_active(current):
             return ArgoCdReconcileResult(
                 status=ArgoCdMutationStatus.DEFERRED,
@@ -172,6 +173,7 @@ class ArgoCdClient:
 
     def get_application_status(
         self,
+        instance_id: UUID,
         slug: str,
         attached_name: str | None,
         environment: str,
@@ -179,13 +181,14 @@ class ArgoCdClient:
         """Return a sanitized snapshot of an Application's remote status."""
 
         name = application_name(self._config, slug, attached_name, environment)
-        application = self._get_application(name, environment)
+        application = self._get_owned_application(name, environment, instance_id)
         if application is None:
             raise ArgoCdApplicationNotFoundError(name)
         return application_status(name, application)
 
     def application_exists(
         self,
+        instance_id: UUID,
         slug: str,
         attached_name: str | None,
         environment: str,
@@ -193,10 +196,11 @@ class ArgoCdClient:
         """Return whether the strict instance Application exists."""
 
         name = application_name(self._config, slug, attached_name, environment)
-        return self._get_application(name, environment) is not None
+        return self._get_owned_application(name, environment, instance_id) is not None
 
     def delete_application(
         self,
+        instance_id: UUID,
         slug: str,
         attached_name: str | None,
         environment: str,
@@ -205,7 +209,7 @@ class ArgoCdClient:
 
         name = application_name(self._config, slug, attached_name, environment)
         project = self._config.project_for(environment)
-        existing = self._get_application(name, environment)
+        existing = self._get_owned_application(name, environment, instance_id)
         if existing is None:
             return ArgoCdMutationStatus.COMPLETED
         if application_operation_is_active(existing):
@@ -227,6 +231,25 @@ class ArgoCdClient:
             return ArgoCdMutationStatus.COMPLETED
         self._raise_for_response(response, "DELETE", path)
         return ArgoCdMutationStatus.COMPLETED
+
+    def _get_owned_application(
+        self,
+        name: str,
+        environment: str,
+        instance_id: UUID,
+    ) -> dict[str, Any] | None:
+        """Fetch an Application and require exact instance ownership when present."""
+
+        application = self._get_application(name, environment)
+        if application is None:
+            return None
+        metadata = application.get("metadata")
+        labels = metadata.get("labels") if isinstance(metadata, dict) else None
+        owner = labels.get("coder-manager/instance-id") if isinstance(labels, dict) else None
+        if owner != str(instance_id):
+            msg = f"Argo CD Application {name} is not owned by instance {instance_id}"
+            raise ArgoCdApplicationOwnershipError(msg)
+        return application
 
     def _get_application(self, name: str, environment: str) -> dict[str, Any] | None:
         """Fetch one Application, returning none only for an explicit 404 response."""
