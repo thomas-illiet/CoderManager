@@ -30,10 +30,11 @@ liveness at `/health` on port `9808`. Port `9808` is not published on the host, 
 expose `/metrics` or `/health` on its application port `8000`. The migration container applies
 pending migrations before the API, worker, and Beat scheduler start.
 
-The migration chain starts with the fresh-install baseline `a868aa80dbea` and then applies an
-incremental migration that removes the persisted `instances.instance_url` column. A database
-already on the baseline can upgrade normally. Databases created from migration histories older
-than `a868aa80dbea` remain incompatible: recreate PostgreSQL rather than using `alembic stamp`.
+The migration chain starts with the fresh-install baseline `a868aa80dbea`, removes the persisted
+`instances.instance_url` column, and adds private durable storage for an administrator bootstrap
+candidate. A database already on the baseline can upgrade normally. Databases created from
+migration histories older than `a868aa80dbea` remain incompatible: recreate PostgreSQL rather than
+using `alembic stamp`.
 
 To run Python tooling directly on the host:
 
@@ -349,13 +350,16 @@ instance, and return 409 while another transition is active or deletion is in pr
 and health statuses, current operation phase, revision, and latest reconciliation timestamp.
 
 The bootstrap account has the static username `admin`, email `admin@coder.local`, and display name
-`Coder Admin`. Coder Manager generates a unique password and, only after Coder confirms a successful
-bootstrap, encrypts it in
-`instances.password_enc` with `CODER_MANAGER_CRYPTO_KEY`, and binds the ciphertext to the instance
-UUID. `GET /api/v1/instances/{id}/admin` returns the static username and email with the decrypted
-password whenever `password_enc` is present; it does not depend on `job_executions`. A bootstrap job
-skips the remote bootstrap when the instance already has a stored password. Failed or running
-bootstrap attempts leave the password unset and unavailable. The response uses
+`Coder Admin`. Coder Manager generates a unique password, encrypts it with
+`CODER_MANAGER_CRYPTO_KEY`, binds the ciphertext to the instance UUID, and commits it privately in
+`instances.password_candidate_enc` before contacting Coder. A retry always reuses that same
+candidate, including after Coder accepted the account but the worker crashed before recording the
+success. Only after Coder confirms the bootstrap does the same transaction promote the ciphertext
+to `instances.password_enc`, clear the candidate, and advance the job. Failed or running attempts
+therefore leave the verified password unset and unavailable. `GET /api/v1/instances/{id}/admin`
+returns the static username and email with the decrypted password only when `password_enc` is
+present; it does not expose the candidate or depend on `job_executions`. A bootstrap job skips the
+remote bootstrap when the instance already has a stored password. The response uses
 `Cache-Control: no-store`.
 
 `POST /api/v1/instances/{id}/provider` is a create-only `multipart/form-data` upload whose required
@@ -680,14 +684,16 @@ taken before the remote request. This scanner performs no remote mutation and cr
 `JobExecution`.
 
 The Alembic chain starts with baseline `a868aa80dbea`, whose `down_revision = None` and whose
-downgrade removes the complete baseline schema. An incremental migration then removes the obsolete
-`instances.instance_url` column so URLs are always calculated from configuration. Databases already
-at `a868aa80dbea` can apply that migration normally. Migration histories older than the baseline
-remain incompatible and must be recreated; `alembic stamp` is not a supported deployment
-procedure. Because removed URL snapshots cannot be reconstructed faithfully, downgrading this
-incremental migration is allowed only while `instances` is empty; otherwise Alembic fails before
-changing the schema. Deploy migrations with the same image as the API, worker, and Beat so every
-process uses the matching task registry and database contract.
+downgrade removes the complete baseline schema. Incremental migrations then remove the obsolete
+`instances.instance_url` column so URLs are always calculated from configuration and add the
+private `instances.password_candidate_enc` bootstrap field. Databases already at `a868aa80dbea`
+can apply them normally. Migration histories older than the baseline remain incompatible and must
+be recreated; `alembic stamp` is not a supported deployment procedure. Because removed URL
+snapshots cannot be reconstructed faithfully, downgrading the URL migration is allowed only while
+`instances` is empty. Downgrading the bootstrap-candidate migration is refused while any candidate
+is present, because it may be the only credential able to recover a remotely accepted account.
+Deploy migrations with the same image as the API, worker, and Beat so every process uses the
+matching task registry and database contract.
 
 FastAPI and Alembic keep the asynchronous SQLAlchemy engine backed by `asyncpg`. Celery tasks use a
 separate synchronous engine backed by `psycopg`; each worker process creates its own one-connection

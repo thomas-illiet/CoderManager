@@ -12,16 +12,6 @@ from coder_manager.models import Instance
 from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
 
-def store_verified_admin_password(instance: Instance, password: SecretStr) -> None:
-    """Encrypt and store a password verified by the remote bootstrap."""
-
-    if instance.password_enc is None:
-        instance.password_enc = InstancePasswordCipher(get_settings().crypto_key).encrypt(
-            password,
-            instance.id,
-        )
-
-
 def stored_admin_password(
     instance_id: UUID,
     session_factory: sessionmaker[Session],

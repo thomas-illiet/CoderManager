@@ -167,6 +167,9 @@ async def test_instance_admin_endpoint_requires_stored_password(
     async with session_maker() as session:
         instance = await session.get(Instance, instance_id)
         assert instance is not None
+        instance.password_candidate_enc = InstancePasswordCipher(
+            SecretStr(TEST_CRYPTO_KEY)
+        ).encrypt(SecretStr("prepared-but-unverified"), instance_id)
         await session.commit()
 
     pending = await client.get(f"/api/v1/instances/{instance_id}/admin")
@@ -175,6 +178,8 @@ async def test_instance_admin_endpoint_requires_stored_password(
     assert pending.status_code == 404
     assert pending.headers["cache-control"] == "no-store"
     assert pending.json() == {"detail": "Instance admin account not initialized"}
+    regular = await client.get(f"/api/v1/instances/{instance_id}")
+    assert "password_candidate_enc" not in regular.json()
     assert missing.status_code == 404
     assert missing.json() == {"detail": "Instance not found"}
 

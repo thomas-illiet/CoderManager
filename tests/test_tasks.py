@@ -22,6 +22,7 @@ from coder_manager.celery_app import celery_app
 from coder_manager.config import Settings, get_settings
 from coder_manager.crypto import (
     InstancePasswordCipher,
+    InstancePasswordDecryptionError,
     KubeconfigCipher,
     KubeconfigDecryptionError,
     PasswordCipher,
@@ -44,6 +45,7 @@ from coder_manager.models import (
     WorkspaceStatus,
 )
 from coder_manager.tasks.common.execution import (
+    advance_execution,
     claim_execution,
     complete_execution,
     prepare_execution_retry,
@@ -103,6 +105,14 @@ def configure_worker(
     )
     monkeypatch.setattr(
         bootstrap_helpers,
+        "get_settings",
+        lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
+    )
+    bootstrap_step_module = import_module(
+        "coder_manager.tasks.instance.create.step_03_bootstrap_admin"
+    )
+    monkeypatch.setattr(
+        bootstrap_step_module,
         "get_settings",
         lambda: Settings(crypto_key=TEST_CRYPTO_KEY),
     )
@@ -1230,6 +1240,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     worker_settings = Settings(
         argocd_region="APAC",
         instance_domain="worker-studio",
+        crypto_key=TEST_CRYPTO_KEY,
     )
     create_step_module = import_module(
         "coder_manager.tasks.instance.create.step_02_create_instance"
@@ -1449,19 +1460,27 @@ async def test_bootstrap_stores_password_only_after_success_and_never_reprocesse
         assert failed_job.status is JobStatus.ERROR
         assert failed_instance.status is InstanceStatus.ERROR
         assert failed_instance.password_enc is None
+        assert failed_instance.password_candidate_enc is not None
+        prepared_password = (
+            InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY))
+            .decrypt(failed_instance.password_candidate_enc, instance_id)
+            .get_secret_value()
+        )
+        assert prepared_password == observed_passwords[0]
 
     assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
     assert len(observed_passwords) == 2
-    assert observed_passwords[0] != observed_passwords[1]
+    assert observed_passwords[0] == observed_passwords[1]
     async with session_maker() as session:
         bootstrapped_instance = await session.get(Instance, instance_id)
         assert bootstrapped_instance is not None
         assert bootstrapped_instance.password_enc is not None
+        assert bootstrapped_instance.password_candidate_enc is None
         assert (
             InstancePasswordCipher(SecretStr(TEST_CRYPTO_KEY))
             .decrypt(bootstrapped_instance.password_enc, instance_id)
             .get_secret_value()
-            == observed_passwords[1]
+            == observed_passwords[0]
         )
     assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
 
@@ -1493,6 +1512,127 @@ async def test_bootstrap_stores_password_only_after_success_and_never_reprocesse
     )
     assert tasks.step_03_bootstrap_admin.run(str(redundant_job_id)) == {"status": "pending"}
     assert tasks.step_04_sync_templates.run(str(redundant_job_id)) == {"status": "success"}
+
+
+async def test_bootstrap_recovers_remote_success_after_local_crash(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse the committed candidate after reclaiming a crashed running attempt."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "BOOTSTRAP CRASH")
+    instance_id = UUID(str(instance["id"]))
+    job_id = UUID(str(instance["job_id"]))
+    with sync_session_maker() as session:
+        job = session.get(JobExecution, job_id)
+        stored = session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        job.task_name = INSTANCE_CREATE_STEP_03_TASK
+        job.step = INSTANCE_CREATE_STEP_03
+        stored.step = INSTANCE_CREATE_STEP_03
+        session.commit()
+
+    bootstrap_step_module = import_module(
+        "coder_manager.tasks.instance.create.step_03_bootstrap_admin"
+    )
+    first_claim = claim_execution(job_id, INSTANCE_CREATE_STEP_03_TASK, sync_session_maker)
+    assert first_claim is not None
+    settings = Settings(crypto_key=TEST_CRYPTO_KEY)
+    preparation = bootstrap_step_module._prepare_bootstrap(
+        first_claim,
+        sync_session_maker,
+        settings,
+        InstancePublicUrlConfig.from_settings(settings),
+    )
+    assert preparation is not None
+    assert preparation.password is not None
+    observed_passwords: list[str] = []
+    monkeypatch.setattr(
+        coder,
+        "bootstrap_admin_account",
+        lambda _url, password: observed_passwords.append(password.get_secret_value()),
+    )
+    coder.bootstrap_admin_account(preparation.instance_url, preparation.password)
+    accepted_password = preparation.password.get_secret_value()
+
+    unavailable = await client.get(f"/api/v1/instances/{instance_id}/admin")
+    assert unavailable.status_code == 404
+    async with session_maker() as session:
+        after_crash = await session.get(Instance, instance_id)
+        assert after_crash is not None
+        assert after_crash.password_enc is None
+        assert after_crash.password_candidate_enc is not None
+
+    assert (
+        prepare_execution_retry(
+            job_id,
+            stale_before=datetime.now(UTC) + timedelta(seconds=1),
+            session_factory=sync_session_maker,
+        )
+        == INSTANCE_CREATE_STEP_03_TASK
+    )
+    assert (
+        advance_execution(
+            first_claim,
+            next_task_name=INSTANCE_CREATE_STEP_04_TASK,
+            next_step=INSTANCE_CREATE_STEP_04,
+            session_factory=sync_session_maker,
+            mutate=bootstrap_step_module._promote_password,
+        )
+        is False
+    )
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
+    assert observed_passwords == [accepted_password, accepted_password]
+    async with session_maker() as session:
+        recovered = await session.get(Instance, instance_id)
+        assert recovered is not None
+        assert recovered.password_enc is not None
+        assert recovered.password_candidate_enc is None
+
+
+async def test_bootstrap_rejects_a_corrupted_candidate_before_remote_access(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+    sync_session_maker: sessionmaker[Session],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed before Coder when the durable candidate cannot authenticate."""
+
+    configure_worker(monkeypatch, sync_session_maker)
+    instance = await create_instance(client, "BOOTSTRAP CORRUPT")
+    instance_id = UUID(str(instance["id"]))
+    job_id = UUID(str(instance["job_id"]))
+    with sync_session_maker() as session:
+        job = session.get(JobExecution, job_id)
+        stored = session.get(Instance, instance_id)
+        assert job is not None
+        assert stored is not None
+        job.task_name = INSTANCE_CREATE_STEP_03_TASK
+        job.step = INSTANCE_CREATE_STEP_03
+        stored.step = INSTANCE_CREATE_STEP_03
+        stored.password_candidate_enc = b"corrupted"
+        session.commit()
+
+    monkeypatch.setattr(
+        coder,
+        "bootstrap_admin_account",
+        lambda _url, _password: pytest.fail("remote bootstrap must not be called"),
+    )
+    with pytest.raises(InstancePasswordDecryptionError):
+        tasks.step_03_bootstrap_admin.run(str(job_id))
+
+    async with session_maker() as session:
+        failed_job = await session.get(JobExecution, job_id)
+        failed_instance = await session.get(Instance, instance_id)
+        assert failed_job is not None
+        assert failed_instance is not None
+        assert failed_job.status is JobStatus.ERROR
+        assert failed_instance.password_enc is None
+        assert failed_instance.password_candidate_enc == b"corrupted"
 
 
 async def test_attempt_fencing_rejects_late_worker_completion(

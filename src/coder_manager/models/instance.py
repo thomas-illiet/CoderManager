@@ -124,6 +124,7 @@ class Instance(Base):
         default=InstanceState.STOPPED,
     )
     password_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    password_candidate_enc: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     argocd_application_name: Mapped[str | None] = mapped_column(
         String(63),
         nullable=True,
