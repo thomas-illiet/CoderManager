@@ -119,7 +119,7 @@ def workspace_remote_snapshot(
             id=workspace.id,
             name=workspace.name,
             username=member.username,
-            instance_url=url_config.url_for(instance.slug, instance.environment),
+            instance_url=url_config.url_for(instance.slug),
             password=password,
             coder_template_id=deployment.coder_template_id,
             coder_workspace_id=workspace.coder_workspace_id,

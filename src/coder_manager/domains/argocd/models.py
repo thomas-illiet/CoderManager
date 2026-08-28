@@ -27,7 +27,6 @@ class InstanceHelmValues:
     """Instance-specific public endpoint and managed database Helm values."""
 
     slug: str
-    environment: str
     public_url: str
     database_username: str
     database_password: SecretStr

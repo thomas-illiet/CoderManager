@@ -16,7 +16,6 @@ from coder_manager.crypto import (
 from coder_manager.database import get_session
 from coder_manager.models import (
     TemplateParameter,
-    TemplateParameterScope,
     TemplateParameterType,
 )
 from coder_manager.repositories import (
@@ -54,30 +53,14 @@ PARAMETER_CREATE_EXAMPLES: dict[str, Example] = {
             "default_value": None,
         },
     },
-    "system_global": {
-        "summary": "Global encrypted system parameter",
+    "system": {
+        "summary": "Encrypted system parameter",
         "value": {
             "type": "system",
             "name": "registry_token",
             "display_name": "Registry token",
             "description": "",
-            "scope": "global",
             "value": "write-only-secret",
-        },
-    },
-    "system_environment": {
-        "summary": "Environment-specific encrypted system parameter",
-        "value": {
-            "type": "system",
-            "name": "registry_url",
-            "display_name": "Registry URL",
-            "description": "",
-            "scope": "environment",
-            "values": {
-                "development": "registry.dev.example.com",
-                "staging": "registry.stg.example.com",
-                "production": "registry.example.com",
-            },
         },
     },
 }
@@ -100,16 +83,8 @@ def parameter_read(parameter: TemplateParameter) -> TemplateParameterRead:
     """Build one representation without exposing encrypted values."""
 
     value_configured: bool | None = None
-    values_configured: dict[str, bool] | None = None
     if parameter.type is TemplateParameterType.SYSTEM:
-        targets = {value.target.value for value in parameter.system_values}
-        if parameter.scope is TemplateParameterScope.GLOBAL:
-            value_configured = "global" in targets
-        else:
-            values_configured = {
-                environment: environment in targets
-                for environment in ("development", "staging", "production")
-            }
+        value_configured = parameter.system_value is not None
     return TemplateParameterRead(
         id=parameter.id,
         template_id=parameter.template_id,
@@ -120,9 +95,7 @@ def parameter_read(parameter: TemplateParameter) -> TemplateParameterRead:
         required=parameter.required,
         mutable=parameter.mutable,
         default_value=parameter.default_value,
-        scope=parameter.scope,
         value_configured=value_configured,
-        values_configured=values_configured,
         created_at=parameter.created_at,
         updated_at=parameter.updated_at,
     )
@@ -236,7 +209,7 @@ async def update_template_parameter(  # noqa: PLR0913
     except TemplateParameterImmutableFieldError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Template parameter type and scope are immutable",
+            detail="Template parameter type is immutable",
         ) from error
     except TemplateParameterSyncInProgressError as error:
         raise _sync_conflict() from error

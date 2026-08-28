@@ -45,7 +45,7 @@ INSTANCE_SLUG_ALPHABET = string.ascii_lowercase + string.digits
 
 
 class InstanceAlreadyExistsError(Exception):
-    """Raised when an instance conflicts with an existing placement or slug."""
+    """Raised when an instance conflicts with an existing application or slug."""
 
 
 class InstanceNotFoundError(Exception):
@@ -111,7 +111,6 @@ class InstanceRepository:
         result = await self._session.scalars(
             list_statement.order_by(
                 Instance.application,
-                Instance.environment,
                 Instance.id,
             )
             .offset((page - 1) * page_size)
@@ -181,7 +180,6 @@ class InstanceRepository:
             id=instance_id,
             application=payload.application,
             slug=slug,
-            environment=payload.environment,
             action="creating",
             status=InstanceStatus.PENDING,
             state=InstanceState.STOPPED,

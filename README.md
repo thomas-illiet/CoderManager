@@ -31,12 +31,10 @@ liveness at `/health` on port `9808`. Port `9808` is not published on the host, 
 expose `/metrics` or `/health` on its application port `8000`. The migration container applies
 pending migrations before the API, worker, and Beat scheduler start.
 
-The migration chain starts with the fresh-install baseline `a868aa80dbea`, removes the persisted
-`instances.instance_url` column, adds private durable storage for an administrator bootstrap
-candidate, and replaces legacy template placement with explicit instance assignments. The last
-change deliberately creates no assignment or deployment backfill and therefore requires
-`template_deployments` to be empty before upgrade. Databases created from migration histories older
-than `a868aa80dbea` remain incompatible: recreate PostgreSQL rather than using `alembic stamp`.
+The migration history is the single fresh-install baseline `e669afab6842`. It contains the complete
+current schema and has no upgrade path from any earlier Coder Manager database. Recreate the
+configured PostgreSQL schema or database before deploying this version; never use `alembic stamp`
+to attach the new history to existing objects.
 
 To run Python tooling directly on the host:
 
@@ -228,20 +226,21 @@ the request remains observable and retryable even when the broker is temporarily
 
 ## Instances API
 
-Instances are identified by their application and environment; they do not have their own name.
+Instances are identified by their application; they do not have their own name or environment.
 The list endpoint accepts an optional `application` query parameter.
 
 Creation payload:
 
 ```json
 {
-  "application": "MY-BUSINESS-APPLICATION",
-  "environment": "development"
+  "application": "MY-BUSINESS-APPLICATION"
 }
 ```
 
-Supported environments are `development`, `staging`, and `production`. A new instance starts with
-`state` set to `stopped`, `action` set to `creating`, and `status` set to `pending`. `state` is an
+The deployment itself has one required `CODER_MANAGER_ENVIRONMENT`: `development`, `staging`, or
+`production`. This infrastructure value is not accepted by the Instance API and is not stored on
+instance rows. A new instance starts with `state` set to `stopped`, `action` set to `creating`, and
+`status` set to `pending`. `state` is an
 observed value stored only by Coder Manager: `started` means that the Argo CD Application exists,
 while `stopped` means that it is absent. It does not describe Argo health or pod readiness. Actions
 include `starting` and `stopping`; statuses are limited to `pending`, `running`, `success`, and
@@ -249,17 +248,18 @@ include `starting` and `stopping`; statuses are limited to `pending`, `running`,
 
 `application` is an externally managed free-form identifier. It is trimmed, converted to uppercase,
 and limited to 255 characters. Coder Manager does not verify it against an internal catalog. The
-combination of application and environment remains unique.
+application remains globally unique within one Coder Manager deployment.
 
 Instance creation is split into three durable steps. The first opens a short-lived PostgreSQL
 connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` with the schema
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
-`metadata.name` is `<CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX>-<instance slug>`. The
+`metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. The
 slug is required; there is no UUID fallback. Existing Applications are accepted only when their
-`coder-manager/instance-id` label already matches the local instance UUID; an absent or different
-owner is a conflict and is never adopted, overwritten, observed, or deleted. Attached Application
-names are retained after their first successful reconciliation. Application metadata contains the managed labels
-`coder-manager/instance-id=<instance UUID>`, `environment=<instance environment>`,
+`coder-manager/instance-id` and `environment` labels already match the local instance UUID and
+`CODER_MANAGER_ENVIRONMENT`; an absent or different owner is a conflict and is never adopted,
+overwritten, observed, or deleted. Attached Application names are retained after their first
+successful reconciliation. Application metadata contains the managed labels
+`coder-manager/instance-id=<instance UUID>`, `environment=<CODER_MANAGER_ENVIRONMENT>`,
 `region=<normalized CODER_MANAGER_ARGOCD_REGION>`, `domain=code-station`, and `tier=standard`.
 Reconciliation refreshes these managed labels while preserving labels owned by other actors. The
 Application uses a Helm chart from the configured Git repository through the
@@ -267,16 +267,17 @@ Application uses a Helm chart from the configured Git repository through the
 account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
 `cyberark` map containing `appId`, `certName`, `keyName`, `region`, and `safe` parameters.
-`CODER_MANAGER_ARGOCD_REGION` and `CODER_MANAGER_INSTANCE_DOMAIN` are shared by the API and worker.
-Every public instance URL uses their current normalized values; Argo CD labels and the CyberArk map
-use the region's normalized uppercase value. Commas in the two Helm scalar assignments are
+`CODER_MANAGER_INSTANCE_BASE_DOMAIN` is shared by the API and worker and supplies the complete
+hostname suffix used by every public instance URL. Argo CD labels and the CyberArk map use
+`CODER_MANAGER_ARGOCD_REGION`'s normalized uppercase value. Commas in the two Helm scalar assignments are
 backslash-escaped so Helm keeps each list as one value; the chart still receives the comma-separated
 string.
 Both the Argo CD destination and `HELM_ARGS` target the `app-code-instance` namespace.
-`HELM_ARGS` loads `values-dev.yaml`, `values-stg.yaml`, or `values-prd.yaml` for development,
-staging, or production respectively.
-At reconciliation time, `HELM_ARGS` sets `global.baseDomain` to the complete regional hostname
-calculated from the current configuration, without the `https://` scheme. It also sets
+`HELM_ARGS` does not load an environment-specific values file and does not inject an environment
+Helm value.
+At reconciliation time, `HELM_ARGS` sets `global.baseDomain` to the instance's complete public
+hostname (the immutable slug followed by the configured base domain), without the `https://`
+scheme. It also sets
 `global.identifier` to the required immutable instance slug and supplies the allocated database's
 `server.config.postgres.host`, `database`, and `schema` values. The PostgreSQL username and password
 use the CyberArk references `<secret:<name>#username>` and `<secret:<name>#password>`, where
@@ -291,23 +292,18 @@ values without creating API member records. The static bootstrap username `admin
 included in the allowed-user and administrator values.
 
 Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`,
-`CODER_MANAGER_ARGOCD_<ENVIRONMENT>_TOKEN`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
+`CODER_MANAGER_ARGOCD_TOKEN`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`,
-`CODER_MANAGER_ARGOCD_REGION`, and one token, Application prefix, project, and destination per
-environment with `CODER_MANAGER_ARGOCD_<ENVIRONMENT>_APPLICATION_PREFIX`,
-`CODER_MANAGER_ARGOCD_<ENVIRONMENT>_PROJECT_NAME` and
-`CODER_MANAGER_ARGOCD_<ENVIRONMENT>_DESTINATION_NAME`. Configure one CyberArk plugin map for each
-environment. Token, Application-prefix, project, destination, and CyberArk variable names use the
-environments `DEVELOPMENT`, `STAGING`, and `PRODUCTION`. CyberArk variable names follow
-`CODER_MANAGER_CYBERARK_<ENVIRONMENT>_<FIELD>`, where
-fields are `APP_ID`, `CERT_NAME`, `KEY_NAME`, and `SAFE`. The region is required by the API and
-worker whenever they calculate an instance URL. All three tokens, all three Application prefixes,
-all three projects, all three destinations, and all 12 CyberArk values are required for Argo CD
-reconciliation; `.env.example` lists the complete configuration. TLS
+`CODER_MANAGER_ARGOCD_REGION`, `CODER_MANAGER_ARGOCD_APPLICATION_PREFIX`,
+`CODER_MANAGER_ARGOCD_PROJECT_NAME`, and `CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure the
+single CyberArk plugin map with `CODER_MANAGER_CYBERARK_APP_ID`,
+`CODER_MANAGER_CYBERARK_CERT_NAME`, `CODER_MANAGER_CYBERARK_KEY_NAME`, and
+`CODER_MANAGER_CYBERARK_SAFE`. `CODER_MANAGER_ENVIRONMENT` is required by the API and worker and
+selects no credentials, project, destination, file, or URL; it is used only for the managed Argo CD
+label and ownership check. `.env.example` lists the complete configuration. TLS
 certificate verification is enabled by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
-worker uses the token selected from the instance environment, requests synchronization, but does
-not wait for Argo CD health convergence.
+worker requests synchronization but does not wait for Argo CD health convergence.
 
 `POST /api/v1/instances/{id}/sync` creates an `instance.update` job for an idle successful or failed
 instance. Pending, running, and deleting instances return HTTP 409. Only one job can own an instance
@@ -379,30 +375,20 @@ without exposing file or ciphertext material.
 or an unauthenticatable envelope returns a redacted 503.
 
 The API generates and stores an immutable, globally unique, 12-character lowercase alphanumeric
-slug for each new instance and exposes it as `slug`. It stores the environment but not the public
-URL. Whenever the API or worker needs that URL, it combines the stored slug and environment with
-the current normalized lowercase `CODER_MANAGER_ARGOCD_REGION` and
-`CODER_MANAGER_INSTANCE_DOMAIN`. For example, slug `k7m4p2x9q3ab` in region `EMEA` and environment
-`development` resolves to `https://k7m4p2x9q3ab.emea.code-studio.dev.echonet`. Environment DNS
-labels are `dev`, `staging`, and `cib` for development, staging, and production respectively; the
-instance domain defaults to `code-studio`.
+slug for each new instance and exposes it as `slug`. It does not persist the public URL. Whenever
+the API or worker needs that URL, it combines the slug with the required
+`CODER_MANAGER_INSTANCE_BASE_DOMAIN`. The setting is a complete lowercase DNS hostname without a
+scheme, path, port, or trailing dot. For example, slug `k7m4p2x9q3ab` and base domain
+`emea.code-studio.echonet` resolve to
+`https://k7m4p2x9q3ab.emea.code-studio.echonet`.
 
-Changing either the region or instance domain therefore changes the calculated URL for every
-existing instance after both the API and worker have restarted; it does not update instance rows or
-timestamps. The corresponding Argo CD `global.baseDomain` changes only when each Application is
-next reconciled. Provision the new DNS route and a matching regional wildcard certificate, such as
-`*.emea.code-studio.dev.echonet`, before restarting the services. A certificate for
-`*.code-studio.dev.echonet` does not cover the additional instance-slug and region labels.
+Changing the base domain changes the calculated URL for every existing instance after both the API
+and worker have restarted; it does not update instance rows or timestamps. The corresponding Argo
+CD `global.baseDomain` changes only when each Application is next reconciled. Provision the new DNS
+route and a matching wildcard certificate, such as `*.emea.code-studio.echonet`, before restarting
+the services.
 Keep both the old and new DNS, TLS, and routing paths valid throughout this transition. Coder Manager
 does not enqueue a global reconciliation automatically.
-
-Deploy the code and the migration that removes `instances.instance_url` as one coordinated change:
-enter maintenance, stop the API, Beat, and worker, apply the migration and matching application
-image, then start the new API and worker without reopening external traffic or ordinary scheduled
-work. Reconcile every existing Application and confirm its Helm values contain the new hostname
-before reopening the API, resuming Beat, or retiring the old route. Do not run old and new versions
-together. New code cannot create an instance while the old non-null column remains, and old code
-cannot operate after that column has been removed.
 
 Deletion is asynchronous. It is accepted after a successful create, update, start, or stop, returns
 HTTP 202, and changes the lifecycle to `deleting/pending`. A failed `instance.create` cannot be
@@ -545,7 +531,7 @@ accepted from workspace clients:
 }
 ```
 
-A global system parameter has one write-only value:
+A system parameter has one write-only value:
 
 ```json
 {
@@ -553,45 +539,26 @@ A global system parameter has one write-only value:
   "name": "registry_token",
   "display_name": "Registry token",
   "description": "",
-  "scope": "global",
   "value": "write-only-secret"
 }
 ```
 
-An environment-scoped system parameter requires exactly one value for every supported environment,
-without fallback:
-
-```json
-{
-  "type": "system",
-  "name": "registry_url",
-  "display_name": "Registry URL",
-  "description": "",
-  "scope": "environment",
-  "values": {
-    "development": "registry.dev.example.com",
-    "staging": "registry.stg.example.com",
-    "production": "registry.example.com"
-  }
-}
-```
-
-System values are encrypted with AES-256-GCM using the parameter UUID and concrete target as
-associated data. Reads expose only `value_configured` or the three `values_configured` flags.
-Omitting `value` or `values` on PUT retains the existing encrypted values; changing only display
-metadata does not advance the system parameter revision. `type`, `name`, and system `scope` cannot
-be changed. Parameter mutations are rejected while that template is synchronizing or an assignment
-transition for it remains retryable.
+System values are stored in a private one-to-one table and encrypted with AES-256-GCM using the
+parameter UUID as associated data. Reads expose only `value_configured`. Omitting `value` on PUT
+retains the existing encrypted value; changing only display metadata does not advance the system
+parameter revision. `type` and `name` cannot be changed. The removed `scope`, `values`, and
+`values_configured` fields are rejected. Parameter mutations are rejected while that template is
+synchronizing or an assignment transition for it remains retryable.
 
 `POST /templates/{id}/sync` returns an empty HTTP 202 response after committing a durable
 fire-and-forget job. The worker fetches the current branch HEAD once and synchronizes only explicit
 `created/success` assignments whose instances are currently `started/success`; it never creates a
 missing assignment and there is no automatic instance-bootstrap synchronization. System parameters
-are resolved for each target environment and sent to Coder as `user_variable_values`. The version
-name is `git-<commit>-p<system_parameter_revision>`. A system value change immediately makes an
-existing deployment outdated, but synchronization remains manual. CoderManager stores only the
-current deployment state for each assignment and exposes it through the instance-template list; it
-keeps no local template-version history.
+are decrypted once per assignment and sent to Coder as `user_variable_values`. The version name is
+`git-<commit>-p<system_parameter_revision>`. A system value change immediately makes an existing
+deployment outdated, but synchronization remains manual. CoderManager stores only the current
+deployment state for each assignment and exposes it through the instance-template list; it keeps no
+local template-version history.
 
 The worker image contains Git and OpenSSH. Mount the SSH identity read-only for `appuser`. SSH uses
 batch mode, disables host-key verification and `known_hosts`, uses identity-only authentication,
@@ -695,8 +662,8 @@ Beat also schedules `coder_manager.dispatch_daily_workspace_stops` every day at 
 `CODER_MANAGER_SCHEDULER_TIMEZONE` (`Europe/Paris` by default). The dispatcher reads every stored
 instance without filtering its lifecycle state and sends one independent
 `coder_manager.stop_instance_workspaces` task per instance, allowing the Celery worker pool to
-process instances in parallel. Each task calculates the Coder URL from the current region and
-instance-domain configuration, reads the stored administrator credentials, lists all `running`,
+process instances in parallel. Each task calculates the Coder URL from the current instance base
+domain, reads the stored administrator credentials, lists all `running`,
 `starting`, and `stopping` workspaces directly from Coder, and submits one
 `stop` build for every `running` or `starting` workspace. A workspace already `stopping` is left
 untouched. The task returns immediately after all submissions: it does not call Argo CD, poll build
@@ -716,19 +683,12 @@ The result is committed only when the instance job, action, and status still mat
 taken before the remote request. This scanner performs no remote mutation and creates no
 `JobExecution`.
 
-The Alembic chain starts with baseline `a868aa80dbea`, whose `down_revision = None` and whose
-downgrade removes the complete baseline schema. Incremental migrations then remove the obsolete
-`instances.instance_url` column so URLs are always calculated from configuration and add the
-private `instances.password_candidate_enc` bootstrap field. The next migration removes the legacy
-template-placement columns, creates explicit assignments, and makes each deployment one-to-one
-with an assignment. It intentionally performs no assignment or deployment backfill, so
-`template_deployments` must be empty before upgrading it. Its downgrade reconstructs legacy
-template/instance placement from assignments. Migration histories older than the baseline remain
-incompatible and must be recreated; `alembic stamp` is not a supported deployment procedure.
-Because removed URL snapshots cannot be reconstructed faithfully, downgrading the URL migration is
-allowed only while `instances` is empty. Downgrading the bootstrap-candidate migration is refused
-while any candidate is present, because it may be the only credential able to recover a remotely
-accepted account.
+The Alembic history contains only baseline `e669afab6842`, whose `down_revision = None` and whose
+downgrade removes the complete schema, including PostgreSQL enum types. Every database carrying an
+earlier revision is intentionally incompatible and must be recreated before this image starts;
+`alembic stamp` is not a supported deployment procedure. Wiping the Coder Manager database does not
+remove remote Argo CD Applications, Coder resources, or managed PostgreSQL schemas. Decommission
+those resources before recreating a deployment that contains real instances.
 Deploy migrations with the same image as the API, worker, and Beat so every process uses the
 matching task registry and database contract.
 

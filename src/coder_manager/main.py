@@ -17,17 +17,43 @@ from coder_manager.config import Settings, get_settings
 from coder_manager.metrics import ApiMetrics, ApiMetricsMiddleware, start_metrics_server
 
 
+def is_secret_field_name(value: object) -> bool:
+    """Return whether a field name denotes credential-bearing input."""
+
+    field_name = str(value).lower()
+    return any(marker in field_name for marker in ("password", "secret", "token")) or (
+        field_name in {"value", "values"}
+    )
+
+
+def input_contains_secret(value: object) -> bool:
+    """Find sensitive fields inside a rejected payload without inspecting their values."""
+
+    if isinstance(value, dict):
+        return any(
+            is_secret_field_name(key) or input_contains_secret(nested)
+            for key, nested in value.items()
+        )
+    if isinstance(value, list | tuple):
+        return any(input_contains_secret(item) for item in value)
+    return False
+
+
+def validation_error_contains_secret(detail: dict[str, Any]) -> bool:
+    """Return whether a validation detail contains credential-bearing input."""
+
+    return any(is_secret_field_name(part) for part in detail.get("loc", ())) or (
+        input_contains_secret(detail.get("input"))
+    )
+
+
 def redacted_validation_errors(error: RequestValidationError) -> list[dict[str, Any]]:
     """Remove credential inputs from validation details before returning them."""
 
     errors: list[dict[str, Any]] = []
     for detail in error.errors():
         safe_detail = dict(detail)
-        if any(
-            credential in str(part).lower()
-            for part in detail.get("loc", ())
-            for credential in ("password", "token")
-        ):
+        if validation_error_contains_secret(detail):
             safe_detail["input"] = "[REDACTED]"
             safe_detail.pop("ctx", None)
         errors.append(safe_detail)
@@ -42,9 +68,11 @@ async def validation_exception_handler(
 
     if not isinstance(error, RequestValidationError):  # pragma: no cover - registration invariant
         raise error
+    contains_secret = any(validation_error_contains_secret(detail) for detail in error.errors())
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={"detail": jsonable_encoder(redacted_validation_errors(error))},
+        headers={"Cache-Control": "no-store"} if contains_secret else None,
     )
 
 
@@ -56,7 +84,8 @@ def create_app(
     """Build the HTTP application."""
 
     settings = settings or get_settings()
-    settings.require_instance_region()
+    settings.require_environment()
+    settings.require_instance_base_domain()
     metrics = ApiMetrics()
     oidc_config = OidcConfig.from_settings(settings)
     oidc_authenticator = (

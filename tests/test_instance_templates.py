@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from coder_manager.api.routes import instance_templates as instance_template_routes
 from coder_manager.models import (
     Instance,
-    InstanceEnvironment,
     InstanceState,
     InstanceStatus,
     JobExecution,
@@ -84,7 +83,6 @@ async def create_instance(
         instance = Instance(
             application=application or f"ASSIGN-{uuid4().hex[:8].upper()}",
             slug=uuid4().hex[:12],
-            environment=InstanceEnvironment.DEVELOPMENT,
             action="created" if ready else "creating",
             status=InstanceStatus.SUCCESS if ready else InstanceStatus.PENDING,
             state=InstanceState.STARTED if ready else InstanceState.STOPPED,

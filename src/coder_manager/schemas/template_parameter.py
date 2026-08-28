@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import (
@@ -11,10 +11,9 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
-    model_validator,
 )
 
-from coder_manager.models import TemplateParameterScope, TemplateParameterType
+from coder_manager.models import TemplateParameterType
 
 ParameterName = Annotated[
     str,
@@ -26,7 +25,6 @@ DisplayName = Annotated[
 ]
 Description = Annotated[str, StringConstraints(max_length=4096)]
 PARAMETER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-ENVIRONMENTS = frozenset({"development", "staging", "production"})
 
 
 class ParameterNamedFields(BaseModel):
@@ -62,24 +60,7 @@ class SystemTemplateParameterCreate(ParameterNamedFields):
     """Create one encrypted system-provided template parameter."""
 
     type: Literal[TemplateParameterType.SYSTEM]
-    scope: TemplateParameterScope
-    value: str | None = None
-    values: dict[str, str] | None = None
-
-    @model_validator(mode="after")
-    def validate_values(self) -> Self:
-        """Require exactly the value shape selected by the system scope."""
-
-        if self.scope is TemplateParameterScope.GLOBAL:
-            valid = self.value is not None and self.values is None
-        else:
-            valid = (
-                self.value is None and self.values is not None and set(self.values) == ENVIRONMENTS
-            )
-        if not valid:
-            msg = "system parameter values must exactly match scope"
-            raise ValueError(msg)
-        return self
+    value: str
 
 
 TemplateParameterCreate = Annotated[
@@ -107,29 +88,10 @@ class UserTemplateParameterUpdate(ParameterUpdateFields):
 
 
 class SystemTemplateParameterUpdate(ParameterUpdateFields):
-    """Replace one system parameter while optionally rotating its secret values."""
+    """Replace one system parameter while optionally rotating its secret value."""
 
     type: Literal[TemplateParameterType.SYSTEM]
-    scope: TemplateParameterScope
     value: str | None = None
-    values: dict[str, str] | None = None
-
-    @model_validator(mode="after")
-    def validate_values(self) -> Self:
-        """Allow omission, otherwise require the complete selected value shape."""
-
-        if self.value is None and self.values is None:
-            return self
-        if self.scope is TemplateParameterScope.GLOBAL:
-            valid = self.value is not None and self.values is None
-        else:
-            valid = (
-                self.value is None and self.values is not None and set(self.values) == ENVIRONMENTS
-            )
-        if not valid:
-            msg = "system parameter values must exactly match scope"
-            raise ValueError(msg)
-        return self
 
 
 TemplateParameterUpdate = Annotated[
@@ -152,9 +114,7 @@ class TemplateParameterRead(BaseModel):
     required: bool | None
     mutable: bool | None
     default_value: str | None
-    scope: TemplateParameterScope | None
     value_configured: bool | None = None
-    values_configured: dict[str, bool] | None = None
     created_at: datetime
     updated_at: datetime
 

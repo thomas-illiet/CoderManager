@@ -92,9 +92,8 @@ class ArgoCdClient:
         """Create or overwrite an Application and request one synchronization."""
 
         deployment_config = self._deployment_config()
-        environment = helm_values.environment
-        project = self._config.project_for(environment)
-        name = application_name(self._config, slug, attached_name, environment)
+        project = self._config.project
+        name = application_name(self._config, slug, attached_name)
         desired = application_payload(
             deployment_config,
             name,
@@ -102,7 +101,7 @@ class ArgoCdClient:
             members,
             helm_values,
         )
-        existing = self._get_owned_application(name, environment, instance_id)
+        existing = self._get_owned_application(name, instance_id)
         if existing is not None and application_operation_is_active(existing):
             return ArgoCdReconcileResult(
                 status=ArgoCdMutationStatus.DEFERRED,
@@ -113,12 +112,12 @@ class ArgoCdClient:
         if existing is None:
             response = self._client.post(
                 "api/v1/applications",
-                headers=self._authorization_headers(environment),
+                headers=self._authorization_headers(),
                 params={"upsert": "false", "validate": "true"},
                 json=desired,
             )
             if response.status_code == httpx.codes.CONFLICT:
-                existing = self._get_owned_application(name, environment, instance_id)
+                existing = self._get_owned_application(name, instance_id)
                 if existing is None:
                     self._raise_for_response(response, "POST", "api/v1/applications")
                 if existing is not None and application_operation_is_active(existing):
@@ -134,7 +133,7 @@ class ArgoCdClient:
             path = f"api/v1/applications/{name}"
             response = self._client.put(
                 path,
-                headers=self._authorization_headers(environment),
+                headers=self._authorization_headers(),
                 params={"project": project, "validate": "true"},
                 json=application_update_payload(existing, desired),
             )
@@ -142,7 +141,7 @@ class ArgoCdClient:
 
         # Re-read immediately before sync because creation or update may start an
         # automated operation.
-        current = self._get_owned_application(name, environment, instance_id)
+        current = self._get_owned_application(name, instance_id)
         if current is not None and application_operation_is_active(current):
             return ArgoCdReconcileResult(
                 status=ArgoCdMutationStatus.DEFERRED,
@@ -153,7 +152,7 @@ class ArgoCdClient:
         sync_path = f"api/v1/applications/{name}/sync"
         response = self._client.post(
             sync_path,
-            headers=self._authorization_headers(environment),
+            headers=self._authorization_headers(),
             params={"project": project},
             json={},
         )
@@ -176,12 +175,11 @@ class ArgoCdClient:
         instance_id: UUID,
         slug: str,
         attached_name: str | None,
-        environment: str,
     ) -> ArgoCdApplicationStatus:
         """Return a sanitized snapshot of an Application's remote status."""
 
-        name = application_name(self._config, slug, attached_name, environment)
-        application = self._get_owned_application(name, environment, instance_id)
+        name = application_name(self._config, slug, attached_name)
+        application = self._get_owned_application(name, instance_id)
         if application is None:
             raise ArgoCdApplicationNotFoundError(name)
         return application_status(name, application)
@@ -191,25 +189,23 @@ class ArgoCdClient:
         instance_id: UUID,
         slug: str,
         attached_name: str | None,
-        environment: str,
     ) -> bool:
         """Return whether the strict instance Application exists."""
 
-        name = application_name(self._config, slug, attached_name, environment)
-        return self._get_owned_application(name, environment, instance_id) is not None
+        name = application_name(self._config, slug, attached_name)
+        return self._get_owned_application(name, instance_id) is not None
 
     def delete_application(
         self,
         instance_id: UUID,
         slug: str,
         attached_name: str | None,
-        environment: str,
     ) -> ArgoCdMutationStatus:
         """Delete an Application and its managed resources idempotently."""
 
-        name = application_name(self._config, slug, attached_name, environment)
-        project = self._config.project_for(environment)
-        existing = self._get_owned_application(name, environment, instance_id)
+        name = application_name(self._config, slug, attached_name)
+        project = self._config.project
+        existing = self._get_owned_application(name, instance_id)
         if existing is None:
             return ArgoCdMutationStatus.COMPLETED
         if application_operation_is_active(existing) or _application_deletion_is_pending(existing):
@@ -218,7 +214,7 @@ class ArgoCdClient:
         response = self._client.delete(
             path,
             headers={
-                **self._authorization_headers(environment),
+                **self._authorization_headers(),
                 "Content-Type": "application/json",
             },
             params={
@@ -230,7 +226,7 @@ class ArgoCdClient:
         if response.status_code == httpx.codes.NOT_FOUND:
             return ArgoCdMutationStatus.COMPLETED
         self._raise_for_response(response, "DELETE", path)
-        remaining = self._get_owned_application(name, environment, instance_id)
+        remaining = self._get_owned_application(name, instance_id)
         return (
             ArgoCdMutationStatus.COMPLETED if remaining is None else ArgoCdMutationStatus.DEFERRED
         )
@@ -238,40 +234,43 @@ class ArgoCdClient:
     def _get_owned_application(
         self,
         name: str,
-        environment: str,
         instance_id: UUID,
     ) -> dict[str, Any] | None:
         """Fetch an Application and require exact instance ownership when present."""
 
-        application = self._get_application(name, environment)
+        application = self._get_application(name)
         if application is None:
             return None
         metadata = application.get("metadata")
         labels = metadata.get("labels") if isinstance(metadata, dict) else None
         owner = labels.get("coder-manager/instance-id") if isinstance(labels, dict) else None
-        if owner != str(instance_id):
-            msg = f"Argo CD Application {name} is not owned by instance {instance_id}"
+        environment = labels.get("environment") if isinstance(labels, dict) else None
+        if owner != str(instance_id) or environment != self._config.environment.value:
+            msg = (
+                f"Argo CD Application {name} is not owned by instance {instance_id} "
+                f"in environment {self._config.environment.value}"
+            )
             raise ArgoCdApplicationOwnershipError(msg)
         return application
 
-    def _get_application(self, name: str, environment: str) -> dict[str, Any] | None:
+    def _get_application(self, name: str) -> dict[str, Any] | None:
         """Fetch one Application, returning none only for an explicit 404 response."""
 
         path = f"api/v1/applications/{name}"
         response = self._client.get(
             path,
-            headers=self._authorization_headers(environment),
-            params={"project": self._config.project_for(environment)},
+            headers=self._authorization_headers(),
+            params={"project": self._config.project},
         )
         if response.status_code == httpx.codes.NOT_FOUND:
             return None
         self._raise_for_response(response, "GET", path)
         return _json_object(response, path)
 
-    def _authorization_headers(self, environment: str) -> dict[str, str]:
-        """Build request-scoped authentication for one instance environment."""
+    def _authorization_headers(self) -> dict[str, str]:
+        """Build authentication for this deployment's Argo CD service account."""
 
-        return {"Authorization": f"Bearer {self._config.token_for(environment)}"}
+        return {"Authorization": f"Bearer {self._config.token}"}
 
     @staticmethod
     def _raise_for_response(response: httpx.Response, method: str, path: str) -> None:

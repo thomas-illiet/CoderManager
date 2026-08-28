@@ -61,14 +61,12 @@ def step_01_update_instance(job_id: str) -> dict[str, str]:
             members,
             slug,
             attached_name,
-            environment,
             public_url,
         ) = _claim_members(claim, session_factory, url_config)
         try:
             helm_values = instance_helm_values(
                 required_resource_id(claim),
                 slug,
-                environment,
                 public_url,
                 session_factory,
             )
@@ -131,7 +129,6 @@ def _claim_members(
     str,
     str | None,
     str,
-    str,
 ]:
     """Claim the currently pending or failed member changes."""
 
@@ -168,8 +165,7 @@ def _claim_members(
             active_members,
             instance.slug,
             instance.argocd_application_name,
-            instance.environment.value,
-            url_config.url_for(instance.slug, instance.environment),
+            url_config.url_for(instance.slug),
         )
 
 

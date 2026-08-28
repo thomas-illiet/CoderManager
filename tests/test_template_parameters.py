@@ -19,7 +19,6 @@ from coder_manager.crypto import (
 from coder_manager.main import app
 from coder_manager.models import (
     Template,
-    TemplateParameterScope,
     TemplateParameterSystemValue,
     TemplateParameterType,
     TemplateSyncStatus,
@@ -71,10 +70,10 @@ def template_model() -> Template:
 
 
 def test_parameter_definition_logic_without_database_io() -> None:
-    """Exercise user/system construction, immutable fields, and secret rotation."""
+    """Exercise user/system construction, immutable type, and secret rotation."""
 
     template = template_model()
-    user, user_values = TemplateParameterRepository._new_parameter(
+    user, user_value = TemplateParameterRepository._new_parameter(
         template,
         UserTemplateParameterCreate(
             type=TemplateParameterType.USER,
@@ -86,9 +85,8 @@ def test_parameter_definition_logic_without_database_io() -> None:
         ),
         None,
     )
-    assert user_values == ()
+    assert user_value is None
     assert user.default_value == "demo"
-    assert user.scope is None
     TemplateParameterRepository._apply_update(
         template,
         user,
@@ -106,29 +104,28 @@ def test_parameter_definition_logic_without_database_io() -> None:
     assert user.mutable is False
     assert user.default_value is None
 
-    global_create = SystemTemplateParameterCreate(
+    system_create = SystemTemplateParameterCreate(
         type=TemplateParameterType.SYSTEM,
         name="token",
         display_name="Token",
-        scope=TemplateParameterScope.GLOBAL,
         value="secret-v1",
     )
     with pytest.raises(RuntimeError, match="encryption is required"):
-        TemplateParameterRepository._new_parameter(template, global_create, None)
+        TemplateParameterRepository._new_parameter(template, system_create, None)
 
     cipher = TemplateParameterCipher(SecretStr(TEST_CRYPTO_KEY))
-    system, system_values = TemplateParameterRepository._new_parameter(
+    system, system_value = TemplateParameterRepository._new_parameter(
         template,
-        global_create,
+        system_create,
         cipher,
     )
-    system.system_values = list(system_values)
+    assert system_value is not None
+    assert system.system_value is system_value
     assert template.system_parameter_revision == 1
     assert (
         cipher.decrypt(
-            system.system_values[0].value_enc,
+            system.system_value.value_enc,
             system.id,
-            "global",
         )
         == "secret-v1"
     )
@@ -140,7 +137,6 @@ def test_parameter_definition_logic_without_database_io() -> None:
         SystemTemplateParameterUpdate(
             type=TemplateParameterType.SYSTEM,
             display_name="Token",
-            scope=TemplateParameterScope.GLOBAL,
         ),
         cipher,
     )
@@ -153,7 +149,6 @@ def test_parameter_definition_logic_without_database_io() -> None:
         SystemTemplateParameterUpdate(
             type=TemplateParameterType.SYSTEM,
             display_name="Rotated token",
-            scope=TemplateParameterScope.GLOBAL,
             value="secret-v2",
         ),
         cipher,
@@ -161,9 +156,8 @@ def test_parameter_definition_logic_without_database_io() -> None:
     assert template.system_parameter_revision == 2
     assert (
         cipher.decrypt(
-            system.system_values[0].value_enc,
+            system.system_value.value_enc,
             system.id,
-            "global",
         )
         == "secret-v2"
     )
@@ -173,35 +167,11 @@ def test_parameter_definition_logic_without_database_io() -> None:
         SystemTemplateParameterUpdate(
             type=TemplateParameterType.SYSTEM,
             display_name="Rotated token",
-            scope=TemplateParameterScope.GLOBAL,
             value="secret-v2",
         ),
         cipher,
     )
     assert template.system_parameter_revision == 2
-
-    environment, environment_values = TemplateParameterRepository._new_parameter(
-        template,
-        SystemTemplateParameterCreate(
-            type=TemplateParameterType.SYSTEM,
-            name="environment_token",
-            display_name="Environment token",
-            scope=TemplateParameterScope.ENVIRONMENT,
-            values={
-                "development": "dev",
-                "staging": "stg",
-                "production": "prd",
-            },
-        ),
-        cipher,
-    )
-    assert environment.scope is TemplateParameterScope.ENVIRONMENT
-    assert {value.target.value for value in environment_values} == {
-        "development",
-        "staging",
-        "production",
-    }
-    assert template.system_parameter_revision == 3
 
     with pytest.raises(RuntimeError, match="encryption is required"):
         TemplateParameterRepository._apply_update(
@@ -210,7 +180,6 @@ def test_parameter_definition_logic_without_database_io() -> None:
             SystemTemplateParameterUpdate(
                 type=TemplateParameterType.SYSTEM,
                 display_name="Token",
-                scope=TemplateParameterScope.GLOBAL,
                 value="secret-v3",
             ),
             None,
@@ -226,17 +195,6 @@ def test_parameter_definition_logic_without_database_io() -> None:
                 mutable=True,
             ),
             None,
-        )
-    with pytest.raises(TemplateParameterImmutableFieldError):
-        TemplateParameterRepository._apply_update(
-            template,
-            system,
-            SystemTemplateParameterUpdate(
-                type=TemplateParameterType.SYSTEM,
-                display_name="Token",
-                scope=TemplateParameterScope.ENVIRONMENT,
-            ),
-            cipher,
         )
 
 
@@ -265,43 +223,35 @@ async def test_parameter_crud_pagination_redaction_and_encryption(
     assert user.json()["required"] is True
     assert user.json()["value_configured"] is None
 
-    global_system = await client.post(
+    first_system = await client.post(
         f"/api/v1/templates/{template_id}/parameters",
         json={
             "type": "system",
-            "name": "global_token",
-            "display_name": "Global token",
-            "scope": "global",
-            "value": "global-secret",
+            "name": "registry_token",
+            "display_name": "Registry token",
+            "value": "registry-secret",
         },
     )
-    assert global_system.status_code == 201, global_system.text
-    assert global_system.headers["cache-control"] == "no-store"
-    assert global_system.json()["value_configured"] is True
-    assert "value" not in global_system.json()
-    assert "global-secret" not in global_system.text
+    assert first_system.status_code == 201, first_system.text
+    assert first_system.headers["cache-control"] == "no-store"
+    assert first_system.json()["value_configured"] is True
+    assert "value" not in first_system.json()
+    assert "scope" not in first_system.json()
+    assert "values_configured" not in first_system.json()
+    assert "registry-secret" not in first_system.text
 
-    environment_system = await client.post(
+    second_system = await client.post(
         f"/api/v1/templates/{template_id}/parameters",
         json={
             "type": "system",
-            "name": "environment_token",
-            "display_name": "Environment token",
-            "scope": "environment",
-            "values": {
-                "development": "dev-secret",
-                "staging": "staging-secret",
-                "production": "production-secret",
-            },
+            "name": "registry_url",
+            "display_name": "Registry URL",
+            "value": "registry.example.com",
         },
     )
-    assert environment_system.status_code == 201, environment_system.text
-    assert environment_system.json()["values_configured"] == {
-        "development": True,
-        "staging": True,
-        "production": True,
-    }
-    assert "secret" not in environment_system.text
+    assert second_system.status_code == 201, second_system.text
+    assert second_system.json()["value_configured"] is True
+    assert "registry.example.com" not in second_system.text
 
     first_page = await client.get(
         f"/api/v1/templates/{template_id}/parameters",
@@ -322,27 +272,19 @@ async def test_parameter_crud_pagination_redaction_and_encryption(
         values = list(
             await session.scalars(
                 select(TemplateParameterSystemValue).order_by(
-                    TemplateParameterSystemValue.parameter_id,
-                    TemplateParameterSystemValue.target,
+                    TemplateParameterSystemValue.parameter_id
                 )
             )
         )
-        assert len(values) == 4
+        assert len(values) == 2
         assert all(b"secret" not in value.value_enc for value in values)
-        plaintext = {
-            value.target.value: cipher.decrypt(
-                value.value_enc,
-                value.parameter_id,
-                value.target.value,
-            )
-            for value in values
-            if value.parameter_id == UUID(str(environment_system.json()["id"]))
-        }
-        assert plaintext == {
-            "development": "dev-secret",
-            "staging": "staging-secret",
-            "production": "production-secret",
-        }
+        second_value = next(
+            value for value in values if value.parameter_id == UUID(str(second_system.json()["id"]))
+        )
+        assert (
+            cipher.decrypt(second_value.value_enc, second_value.parameter_id)
+            == "registry.example.com"
+        )
 
 
 async def test_parameter_conflicts_immutability_and_effective_revision(
@@ -359,7 +301,6 @@ async def test_parameter_conflicts_immutability_and_effective_revision(
             "type": "system",
             "name": "registry_token",
             "display_name": "Registry token",
-            "scope": "global",
             "value": "secret-v1",
         },
     )
@@ -392,11 +333,11 @@ async def test_parameter_conflicts_immutability_and_effective_revision(
         json={
             "type": "system",
             "display_name": "Renamed token",
-            "scope": "global",
         },
     )
     assert unchanged.status_code == 200
     assert unchanged.json()["value_configured"] is True
+    assert "scope" not in unchanged.json()
     assert await revision() == 1
 
     same_secret = await client.put(
@@ -404,7 +345,6 @@ async def test_parameter_conflicts_immutability_and_effective_revision(
         json={
             "type": "system",
             "display_name": "Renamed token",
-            "scope": "global",
             "value": "secret-v1",
         },
     )
@@ -416,24 +356,18 @@ async def test_parameter_conflicts_immutability_and_effective_revision(
         json={
             "type": "system",
             "display_name": "Renamed token",
-            "scope": "global",
             "value": "secret-v2",
         },
     )
     assert rotated.status_code == 200
     assert await revision() == 2
 
-    changed_scope = await client.put(
+    legacy_scope = await client.put(
         f"/api/v1/templates/{template_id}/parameters/{parameter_id}",
         json={
             "type": "system",
             "display_name": "Renamed token",
-            "scope": "environment",
-            "values": {
-                "development": "a",
-                "staging": "b",
-                "production": "c",
-            },
+            "scope": "global",
         },
     )
     changed_type = await client.put(
@@ -445,7 +379,7 @@ async def test_parameter_conflicts_immutability_and_effective_revision(
             "mutable": True,
         },
     )
-    assert changed_scope.status_code == 409
+    assert legacy_scope.status_code == 422
     assert changed_type.status_code == 409
 
     deleted = await client.delete(f"/api/v1/templates/{template_id}/parameters/{parameter_id}")
@@ -453,10 +387,10 @@ async def test_parameter_conflicts_immutability_and_effective_revision(
     assert await revision() == 3
 
 
-async def test_parameter_schema_rejects_invalid_names_and_incomplete_environments(
+async def test_parameter_schema_rejects_invalid_names_and_legacy_value_shapes(
     client: AsyncClient,
 ) -> None:
-    """Reject non-lowercase names and environment maps without all targets."""
+    """Reject non-lowercase names, missing values, and removed scope fields."""
 
     template = await create_template(client)
     url = f"/api/v1/templates/{template['id']}/parameters"
@@ -470,18 +404,53 @@ async def test_parameter_schema_rejects_invalid_names_and_incomplete_environment
             "mutable": True,
         },
     )
-    incomplete = await client.post(
+    missing_value = await client.post(
         url,
         json={
             "type": "system",
             "name": "token",
             "display_name": "Token",
-            "scope": "environment",
-            "values": {"development": "a", "staging": "b"},
+        },
+    )
+    legacy_scope = await client.post(
+        url,
+        json={
+            "type": "system",
+            "name": "legacy_token",
+            "display_name": "Legacy token",
+            "scope": "global",
+            "value": "secret",
+        },
+    )
+    legacy_values = await client.post(
+        url,
+        json={
+            "type": "system",
+            "name": "legacy_values",
+            "display_name": "Legacy values",
+            "values": {"development": "top-secret"},
+        },
+    )
+    invalid_type = await client.post(
+        url,
+        json={
+            "type": "systemx",
+            "name": "invalid_type",
+            "display_name": "Invalid type",
+            "value": "discriminator-secret",
         },
     )
     assert uppercase.status_code == 422
-    assert incomplete.status_code == 422
+    assert missing_value.status_code == 422
+    assert legacy_scope.status_code == 422
+    assert legacy_values.status_code == 422
+    assert legacy_values.headers["cache-control"] == "no-store"
+    assert "top-secret" not in legacy_values.text
+    assert "[REDACTED]" in legacy_values.text
+    assert invalid_type.status_code == 422
+    assert invalid_type.headers["cache-control"] == "no-store"
+    assert "discriminator-secret" not in invalid_type.text
+    assert "[REDACTED]" in invalid_type.text
 
 
 async def test_user_parameter_get_update_delete_and_missing_resources(
@@ -639,7 +608,6 @@ async def test_system_parameter_requires_configured_encryption(
             "type": "system",
             "name": "token",
             "display_name": "Token",
-            "scope": "global",
             "value": "secret",
         },
     )
@@ -662,7 +630,6 @@ async def test_parameter_update_rejects_tampered_envelope_without_secret_leak(
             "type": "system",
             "name": "token",
             "display_name": "Token",
-            "scope": "global",
             "value": "never-return-this-secret",
         },
     )
@@ -683,7 +650,6 @@ async def test_parameter_update_rejects_tampered_envelope_without_secret_leak(
         json={
             "type": "system",
             "display_name": "Token",
-            "scope": "global",
             "value": "never-return-this-secret",
         },
     )
@@ -693,22 +659,21 @@ async def test_parameter_update_rejects_tampered_envelope_without_secret_leak(
     assert "never-return-this-secret" not in response.text
 
 
-def test_template_parameter_envelope_is_bound_to_parameter_and_target() -> None:
-    """Reject altered envelopes and associated-data substitutions."""
+def test_template_parameter_envelope_is_bound_to_parameter() -> None:
+    """Reject altered envelopes and parameter-identity substitutions."""
 
     cipher = TemplateParameterCipher(SecretStr(TEST_CRYPTO_KEY))
     first = UUID("00000000-0000-0000-0000-000000000001")
     second = UUID("00000000-0000-0000-0000-000000000002")
-    envelope = cipher.encrypt("secret", first, "development")
+    envelope = cipher.encrypt("secret", first)
     altered = envelope[:-1] + bytes((envelope[-1] ^ 1,))
 
-    for candidate_id, target, candidate in (
-        (first, "development", altered),
-        (second, "development", envelope),
-        (first, "staging", envelope),
+    for candidate_id, candidate in (
+        (first, altered),
+        (second, envelope),
     ):
         with pytest.raises(TemplateParameterDecryptionError):
-            cipher.decrypt(candidate, candidate_id, target)
+            cipher.decrypt(candidate, candidate_id)
 
 
 def test_template_parameter_cipher_rejects_missing_and_invalid_keys() -> None:

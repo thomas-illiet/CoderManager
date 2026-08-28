@@ -208,7 +208,7 @@ def test_celery_signal_handlers_route_worker_and_beat_events(
 def test_worker_init_requires_public_url_config_without_affecting_beat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fail worker startup on missing region while keeping Beat initialization independent."""
+    """Fail worker startup on a missing base domain while keeping Beat independent."""
 
     calls: list[tuple[object, ...]] = []
     fake_metrics = SimpleNamespace(
@@ -216,10 +216,10 @@ def test_worker_init_requires_public_url_config_without_affecting_beat(
         start_server=lambda *args: calls.append(("start", *args)),
     )
     monkeypatch.setattr(celery_app, "celery_metrics", fake_metrics)
-    monkeypatch.setattr(celery_app, "settings", Settings(argocd_region=None))
+    monkeypatch.setattr(celery_app, "settings", Settings(instance_base_domain=None))
 
     validation_step = celery_app.ValidateInstancePublicUrlConfig(None)
-    with pytest.raises(ValueError, match="CODER_MANAGER_ARGOCD_REGION is required"):
+    with pytest.raises(ValueError, match="CODER_MANAGER_INSTANCE_BASE_DOMAIN is required"):
         validation_step.start(None)
 
     celery_app.initialize_worker_metrics()

@@ -97,10 +97,7 @@ async def create_coder_instance(
 
     response = await client.post(
         "/api/v1/instances",
-        json={
-            "application": application,
-            "environment": "development",
-        },
+        json={"application": application},
     )
     assert response.status_code == 201, response.text
     return response.json()["resource"]
@@ -568,10 +565,7 @@ async def test_empty_statistics_and_no_capacity_are_atomic(
     await create_coder_instance(client, application_identifier("first"))
     rejected = await client.post(
         "/api/v1/instances",
-        json={
-            "application": application_identifier("second"),
-            "environment": "development",
-        },
+        json={"application": application_identifier("second")},
     )
     assert rejected.status_code == 409
     assert rejected.json() == {"detail": "No database capacity available"}

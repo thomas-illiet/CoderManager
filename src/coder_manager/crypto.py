@@ -194,7 +194,7 @@ class InstancePasswordCipher:
 
 
 class TemplateParameterCipher:
-    """Encrypt system template parameters with target-bound AES-GCM envelopes."""
+    """Encrypt system template parameters with parameter-bound AES-GCM envelopes."""
 
     def __init__(self, encoded_key: SecretStr | None) -> None:
         """Initialize the cipher from a validated base64-encoded AES-256 key."""
@@ -210,23 +210,23 @@ class TemplateParameterCipher:
         self._cipher = AESGCM(key)
 
     @staticmethod
-    def _associated_data(parameter_id: UUID, target: str) -> bytes:
-        """Bind an encrypted value to its parameter and concrete target."""
+    def _associated_data(parameter_id: UUID) -> bytes:
+        """Bind an encrypted value to its parameter identity."""
 
-        return b"coder-manager:template-parameter:" + parameter_id.bytes + b":" + target.encode()
+        return b"coder-manager:template-parameter:" + parameter_id.bytes
 
-    def encrypt(self, value: str, parameter_id: UUID, target: str) -> bytes:
+    def encrypt(self, value: str, parameter_id: UUID) -> bytes:
         """Return a versioned authenticated envelope for one system value."""
 
         nonce = urandom(NONCE_LENGTH)
         ciphertext = self._cipher.encrypt(
             nonce,
             value.encode(),
-            self._associated_data(parameter_id, target),
+            self._associated_data(parameter_id),
         )
         return bytes((ENVELOPE_VERSION,)) + nonce + ciphertext
 
-    def decrypt(self, envelope: bytes, parameter_id: UUID, target: str) -> str:
+    def decrypt(self, envelope: bytes, parameter_id: UUID) -> str:
         """Authenticate and decrypt one system value."""
 
         if len(envelope) <= 1 + NONCE_LENGTH or envelope[0] != ENVELOPE_VERSION:
@@ -237,7 +237,7 @@ class TemplateParameterCipher:
             plaintext = self._cipher.decrypt(
                 nonce,
                 ciphertext,
-                self._associated_data(parameter_id, target),
+                self._associated_data(parameter_id),
             )
         except (InvalidTag, ValueError) as error:
             raise TemplateParameterDecryptionError from error

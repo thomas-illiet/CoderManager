@@ -153,7 +153,9 @@ def test_template_sync_helpers_reject_missing_local_resources(
         resource_type="template_assignment",
         resource_id=missing_assignment,
     )
-    url_config = InstancePublicUrlConfig.from_settings(Settings(argocd_region="EMEA"))
+    url_config = InstancePublicUrlConfig.from_settings(
+        Settings(instance_base_domain="emea.code-studio.echonet")
+    )
     with pytest.raises(TemplateTargetSyncError, match="Template is missing"):
         sync_helpers.template_source_snapshot(missing_template, sync_session_maker)
     with pytest.raises(TemplateTargetSyncError, match="assignment is missing"):
@@ -929,12 +931,7 @@ async def test_target_sync_creates_first_remote_template(
             "type": "system",
             "name": "registry_url",
             "display_name": "Registry URL",
-            "scope": "environment",
-            "values": {
-                "development": "registry.dev.example.com",
-                "staging": "registry.stg.example.com",
-                "production": "registry.example.com",
-            },
+            "value": "registry.example.com",
         },
     )
     assert parameter.status_code == 201
@@ -1007,7 +1004,7 @@ async def test_target_sync_creates_first_remote_template(
             assert file_id == UUID("40000000-0000-0000-0000-000000000004")
             assert version_name == f"git-{'d' * 40}-p1"
             assert template_id is None
-            assert user_variable_values == (("registry_url", "registry.dev.example.com"),)
+            assert user_variable_values == (("registry_url", "registry.example.com"),)
             calls.append("create-version")
             return CoderTemplateVersion(expected_version_id, "pending", archived=False)
 

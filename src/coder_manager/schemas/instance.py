@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
 
-from coder_manager.models import Instance, InstanceEnvironment, InstanceState, InstanceStatus
+from coder_manager.models import Instance, InstanceState, InstanceStatus
 from coder_manager.schemas.application_identifier import ApplicationIdentifier
 from coder_manager.utils.instance_urls import InstancePublicUrlConfig
 
@@ -17,7 +17,6 @@ class InstanceCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     application: ApplicationIdentifier
-    environment: InstanceEnvironment
 
 
 class InstanceRead(BaseModel):
@@ -28,7 +27,6 @@ class InstanceRead(BaseModel):
     id: UUID
     application: str
     slug: str
-    environment: InstanceEnvironment
     action: str
     status: InstanceStatus
     state: InstanceState
@@ -53,11 +51,10 @@ class InstanceRead(BaseModel):
             id=instance.id,
             application=instance.application,
             slug=instance.slug,
-            environment=instance.environment,
             action=instance.action,
             status=instance.status,
             state=instance.state,
-            instance_url=public_url_config.url_for(instance.slug, instance.environment),
+            instance_url=public_url_config.url_for(instance.slug),
             argocd_application_name=instance.argocd_application_name,
             job_id=getattr(instance, "job_id", None),
             step=getattr(instance, "step", None),

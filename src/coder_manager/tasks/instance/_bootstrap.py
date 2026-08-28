@@ -30,4 +30,4 @@ def stored_admin_password(
             instance.password_enc,
             instance.id,
         )
-        return url_config.url_for(instance.slug, instance.environment), password
+        return url_config.url_for(instance.slug), password

@@ -56,8 +56,7 @@ def step_01_start_instance(job_id: str) -> dict[str, str]:
             instance_id = instance.id
             slug = instance.slug
             attached_name = instance.argocd_application_name
-            environment = instance.environment.value
-            public_url = url_config.url_for(instance.slug, instance.environment)
+            public_url = url_config.url_for(instance.slug)
 
         credentials = stored_admin_password(instance_id, session_factory, url_config)
         if credentials is None:
@@ -66,7 +65,6 @@ def step_01_start_instance(job_id: str) -> dict[str, str]:
         helm_values = instance_helm_values(
             instance_id,
             slug,
-            environment,
             public_url,
             session_factory,
         )

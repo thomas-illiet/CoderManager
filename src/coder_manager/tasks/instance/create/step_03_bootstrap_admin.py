@@ -62,7 +62,7 @@ def _prepare_bootstrap(
             else:
                 password = cipher.decrypt(resource.password_candidate_enc, resource.id)
         return _BootstrapPreparation(
-            instance_url=url_config.url_for(resource.slug, resource.environment),
+            instance_url=url_config.url_for(resource.slug),
             is_update=job.name == "instance.update",
             password=password,
         )

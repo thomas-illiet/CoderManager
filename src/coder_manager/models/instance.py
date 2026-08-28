@@ -18,6 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from coder_manager.constants import INSTANCE_SLUG_LENGTH
 from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
@@ -27,14 +28,6 @@ if TYPE_CHECKING:
     from coder_manager.models.member import Member
     from coder_manager.models.template_assignment import TemplateAssignment
     from coder_manager.models.workspace import Workspace
-
-
-class InstanceEnvironment(StrEnum):
-    """Deployment environments supported by Coder instances."""
-
-    DEVELOPMENT = "development"
-    STAGING = "staging"
-    PRODUCTION = "production"
 
 
 class InstanceStatus(StrEnum):
@@ -51,9 +44,6 @@ class InstanceState(StrEnum):
 
     STARTED = "started"
     STOPPED = "stopped"
-
-
-INSTANCE_SLUG_LENGTH = 12
 
 
 def enum_values(enum_type: type[StrEnum]) -> list[str]:
@@ -73,11 +63,7 @@ class Instance(Base):
             "application = upper(trim(application))",
             name="application_normalized",
         ),
-        UniqueConstraint(
-            "application",
-            "environment",
-            name="uq_instances_application_environment",
-        ),
+        UniqueConstraint("application", name="uq_instances_application"),
         UniqueConstraint("slug", name="uq_instances_slug"),
     )
 
@@ -89,14 +75,6 @@ class Instance(Base):
     )
     slug: Mapped[str] = mapped_column(
         String(INSTANCE_SLUG_LENGTH),
-        nullable=False,
-    )
-    environment: Mapped[InstanceEnvironment] = mapped_column(
-        Enum(
-            InstanceEnvironment,
-            name="instance_environment",
-            values_callable=enum_values,
-        ),
         nullable=False,
     )
     action: Mapped[str] = mapped_column(

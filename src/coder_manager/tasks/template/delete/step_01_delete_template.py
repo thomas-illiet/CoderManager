@@ -91,7 +91,7 @@ def _removal_snapshot(
             assignment_id=assignment.id,
             template_id=assignment.template_id,
             instance_id=instance.id,
-            instance_url=url_config.url_for(instance.slug, instance.environment),
+            instance_url=url_config.url_for(instance.slug),
             password=password,
             coder_template_id=coder_template_id,
         )

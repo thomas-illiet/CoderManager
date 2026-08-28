@@ -1,13 +1,30 @@
 """Application configuration."""
 
 import re
+from enum import StrEnum
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from coder_manager.constants import INSTANCE_SLUG_LENGTH
+
 _DNS_LABEL_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+_DNS_NAME_PATTERN = (
+    r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+)
+_MAX_DNS_NAME_LENGTH = 253
+_MAX_INSTANCE_BASE_DOMAIN_LENGTH = _MAX_DNS_NAME_LENGTH - INSTANCE_SLUG_LENGTH - 1
+
+
+class Environment(StrEnum):
+    """Infrastructure environment managed by this deployment."""
+
+    DEVELOPMENT = "development"
+    STAGING = "staging"
+    PRODUCTION = "production"
 
 
 class Settings(BaseSettings):
@@ -39,47 +56,29 @@ class Settings(BaseSettings):
     workspace_stop_timeout_seconds: int = Field(default=1800, ge=1)
     workspace_delete_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
     workspace_delete_timeout_seconds: int = Field(default=1800, ge=1)
-    instance_domain: str = Field(
-        default="code-studio",
-        pattern=_DNS_LABEL_PATTERN,
-    )
+    environment: Environment | None = None
+    instance_base_domain: str | None = None
     crypto_key: SecretStr | None = None
     argocd_url: str | None = None
-    argocd_development_token: SecretStr | None = None
-    argocd_staging_token: SecretStr | None = None
-    argocd_production_token: SecretStr | None = None
+    argocd_token: SecretStr | None = None
     argocd_skip_ssl_verify: bool = False
-    argocd_development_application_prefix: str | None = None
-    argocd_staging_application_prefix: str | None = None
-    argocd_production_application_prefix: str | None = None
+    argocd_application_prefix: str | None = None
     argocd_region: str | None = None
     argocd_repository_url: str | None = None
     argocd_repository_path: str | None = None
     argocd_target_revision: str | None = None
-    argocd_development_project_name: str | None = None
-    argocd_staging_project_name: str | None = None
-    argocd_production_project_name: str | None = None
-    argocd_development_destination_name: str | None = None
-    argocd_staging_destination_name: str | None = None
-    argocd_production_destination_name: str | None = None
+    argocd_project_name: str | None = None
+    argocd_destination_name: str | None = None
     allow_unauthenticated_api: bool = False
     oidc_issuer_url: str | None = None
     oidc_client_id: str | None = None
     oidc_authorization_url: str | None = None
     oidc_token_url: str | None = None
     oidc_scopes: str = "openid,profile"
-    cyberark_development_app_id: str | None = None
-    cyberark_development_cert_name: str | None = None
-    cyberark_development_key_name: str | None = None
-    cyberark_development_safe: str | None = None
-    cyberark_staging_app_id: str | None = None
-    cyberark_staging_cert_name: str | None = None
-    cyberark_staging_key_name: str | None = None
-    cyberark_staging_safe: str | None = None
-    cyberark_production_app_id: str | None = None
-    cyberark_production_cert_name: str | None = None
-    cyberark_production_key_name: str | None = None
-    cyberark_production_safe: str | None = None
+    cyberark_app_id: str | None = None
+    cyberark_cert_name: str | None = None
+    cyberark_key_name: str | None = None
+    cyberark_safe: str | None = None
     default_admins: str = ""
 
     def require_database_schema(self) -> str:
@@ -90,8 +89,8 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self.database_schema
 
-    def require_instance_region(self) -> str:
-        """Return the deployment region normalized as a public-hostname DNS label."""
+    def require_argocd_region(self) -> str:
+        """Return the deployment region normalized as an infrastructure DNS label."""
 
         if self.argocd_region is None or not self.argocd_region.strip():
             msg = "CODER_MANAGER_ARGOCD_REGION is required"
@@ -101,6 +100,32 @@ class Settings(BaseSettings):
             msg = "CODER_MANAGER_ARGOCD_REGION must be a valid DNS label"
             raise ValueError(msg)
         return region
+
+    def require_instance_base_domain(self) -> str:
+        """Return the normalized public base domain managed by this deployment."""
+
+        if self.instance_base_domain is None:
+            msg = "CODER_MANAGER_INSTANCE_BASE_DOMAIN is required"
+            raise ValueError(msg)
+        base_domain = self.instance_base_domain.strip().lower()
+        if not base_domain:
+            msg = "CODER_MANAGER_INSTANCE_BASE_DOMAIN is required"
+            raise ValueError(msg)
+        if (
+            len(base_domain) > _MAX_INSTANCE_BASE_DOMAIN_LENGTH
+            or re.fullmatch(_DNS_NAME_PATTERN, base_domain) is None
+        ):
+            msg = "CODER_MANAGER_INSTANCE_BASE_DOMAIN must be a valid DNS name"
+            raise ValueError(msg)
+        return base_domain
+
+    def require_environment(self) -> Environment:
+        """Return the infrastructure environment managed by this deployment."""
+
+        if self.environment is None:
+            msg = "CODER_MANAGER_ENVIRONMENT is required"
+            raise ValueError(msg)
+        return self.environment
 
     @field_validator("scheduler_timezone")
     @classmethod

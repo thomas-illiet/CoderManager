@@ -77,12 +77,7 @@ async def test_concurrent_reservations_never_exceed_instance_max(
 
         async with postgres_session_maker() as session:
             try:
-                await InstanceRepository(session).create(
-                    InstanceCreate(
-                        application=application,
-                        environment="development",
-                    )
-                )
+                await InstanceRepository(session).create(InstanceCreate(application=application))
             except InstanceDatabaseUnavailableError:
                 return "full"
             return "created"

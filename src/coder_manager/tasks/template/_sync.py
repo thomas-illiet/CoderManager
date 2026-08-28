@@ -23,7 +23,6 @@ from coder_manager.models import (
     TemplateAssignmentStatus,
     TemplateDeployment,
     TemplateDeploymentStatus,
-    TemplateParameterScope,
     TemplateParameterType,
     TemplateSyncStatus,
 )
@@ -185,7 +184,7 @@ def _prepare_deployment(  # noqa: PLR0913
         if instance.password_enc is None:
             msg = "Coder administrator password is not initialized"
             raise TemplateTargetSyncError(msg)
-        instance_url = url_config.url_for(instance.slug, instance.environment)
+        instance_url = url_config.url_for(instance.slug)
 
         deployment = target.deployment
         if deployment is None:
@@ -221,7 +220,6 @@ def _prepare_deployment(  # noqa: PLR0913
         )
         system_values = _system_parameter_values(
             template,
-            instance.environment.value,
             TemplateParameterCipher(settings.crypto_key),
         )
         preparation = TemplateDeploymentPreparation(
@@ -238,27 +236,22 @@ def _prepare_deployment(  # noqa: PLR0913
 
 def _system_parameter_values(
     template: Template,
-    environment: str,
     cipher: TemplateParameterCipher,
 ) -> tuple[tuple[str, str], ...]:
-    """Resolve and decrypt the concrete system values for one instance."""
+    """Resolve and decrypt system values for one template publication."""
 
     resolved: list[tuple[str, str]] = []
     for parameter in sorted(template.parameters, key=lambda item: item.name):
         if parameter.type is not TemplateParameterType.SYSTEM:
             continue
-        target = "global" if parameter.scope is TemplateParameterScope.GLOBAL else environment
-        value = next(
-            (item for item in parameter.system_values if item.target.value == target),
-            None,
-        )
+        value = parameter.system_value
         if value is None:
             msg = "Template system parameter value is missing"
             raise TemplateTargetSyncError(msg)
         resolved.append(
             (
                 parameter.name,
-                cipher.decrypt(value.value_enc, parameter.id, target),
+                cipher.decrypt(value.value_enc, parameter.id),
             )
         )
     return tuple(resolved)

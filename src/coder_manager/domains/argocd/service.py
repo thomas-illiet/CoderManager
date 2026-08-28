@@ -44,38 +44,35 @@ def delete_instance_application(
     instance_id: UUID,
     slug: str,
     attached_name: str | None,
-    environment: str,
 ) -> ArgoCdMutationStatus:
     """Delete one instance's Application using the process-wide configuration."""
 
     config = ArgoCdConfig.from_settings(get_settings())
     with ArgoCdClient(config) as client:
-        return client.delete_application(instance_id, slug, attached_name, environment)
+        return client.delete_application(instance_id, slug, attached_name)
 
 
 def instance_application_exists(
     instance_id: UUID,
     slug: str,
     attached_name: str | None,
-    environment: str,
     settings: Settings | None = None,
 ) -> bool:
     """Return whether one strict instance Application currently exists."""
 
     config = ArgoCdConfig.from_settings(settings or get_settings())
     with ArgoCdClient(config) as client:
-        return client.application_exists(instance_id, slug, attached_name, environment)
+        return client.application_exists(instance_id, slug, attached_name)
 
 
 def read_instance_application_status(
     instance_id: UUID,
     slug: str,
     attached_name: str | None,
-    environment: str,
     settings: Settings,
 ) -> ArgoCdApplicationStatus:
     """Read one instance's remote Argo CD status with explicit API settings."""
 
     config = ArgoCdClientConfig.from_settings(settings)
     with ArgoCdClient(config) as client:
-        return client.get_application_status(instance_id, slug, attached_name, environment)
+        return client.get_application_status(instance_id, slug, attached_name)

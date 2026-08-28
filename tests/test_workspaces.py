@@ -42,17 +42,12 @@ from coder_manager.schemas import (
 async def create_instance(
     client: AsyncClient,
     application: str,
-    *,
-    environment: str = "development",
 ) -> dict[str, object]:
     """Create an instance through the API."""
 
     response = await client.post(
         "/api/v1/instances",
-        json={
-            "application": application,
-            "environment": environment,
-        },
+        json={"application": application},
     )
     assert response.status_code == 201, response.text
     return response.json()["resource"]

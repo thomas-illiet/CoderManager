@@ -38,7 +38,7 @@ def remote_snapshot(
 def test_workspace_snapshot_preserves_operation_public_url() -> None:
     """Keep the URL calculated for this operation in its immutable remote snapshot."""
 
-    instance_url = "https://development.apac.worker-studio.dev.echonet"
+    instance_url = "https://analytics.emea.code-studio.echonet"
 
     assert remote_snapshot(instance_url=instance_url).instance_url == instance_url
 

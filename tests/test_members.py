@@ -33,10 +33,7 @@ async def create_instance(client: AsyncClient, application: str) -> dict[str, ob
 
     response = await client.post(
         "/api/v1/instances",
-        json={
-            "application": application,
-            "environment": "development",
-        },
+        json={"application": application},
     )
     assert response.status_code == 201
     return response.json()["resource"]

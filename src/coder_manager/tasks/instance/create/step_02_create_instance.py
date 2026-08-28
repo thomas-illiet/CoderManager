@@ -55,13 +55,11 @@ def step_02_create_instance(job_id: str) -> dict[str, str]:
             instance_id = instance.id
             slug = instance.slug
             attached_name = instance.argocd_application_name
-            environment = instance.environment.value
-            public_url = url_config.url_for(instance.slug, instance.environment)
+            public_url = url_config.url_for(instance.slug)
 
         helm_values = instance_helm_values(
             instance_id,
             slug,
-            environment,
             public_url,
             session_factory,
         )

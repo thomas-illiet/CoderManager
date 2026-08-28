@@ -118,4 +118,4 @@ def _stored_instance_credentials(
             instance.password_enc,
             instance.id,
         )
-        return url_config.url_for(instance.slug, instance.environment), password
+        return url_config.url_for(instance.slug), password

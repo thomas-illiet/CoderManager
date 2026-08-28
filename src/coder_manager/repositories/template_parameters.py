@@ -15,10 +15,8 @@ from coder_manager.models import (
     TemplateAssignment,
     TemplateAssignmentStatus,
     TemplateParameter,
-    TemplateParameterScope,
     TemplateParameterSystemValue,
     TemplateParameterType,
-    TemplateParameterValueTarget,
     TemplateSyncStatus,
 )
 from coder_manager.schemas import (
@@ -51,7 +49,7 @@ class TemplateParameterAlreadyExistsError(Exception):
 
 
 class TemplateParameterImmutableFieldError(Exception):
-    """Raised when type or system scope would change."""
+    """Raised when a parameter type would change."""
 
 
 class TemplateParameterSyncInProgressError(Exception):
@@ -83,7 +81,7 @@ class TemplateParameterRepository:
         )
         result = await self._session.scalars(
             select(TemplateParameter)
-            .options(selectinload(TemplateParameter.system_values))
+            .options(selectinload(TemplateParameter.system_value))
             .where(condition)
             .order_by(TemplateParameter.type, TemplateParameter.name, TemplateParameter.id)
             .offset((page - 1) * page_size)
@@ -96,7 +94,7 @@ class TemplateParameterRepository:
 
         return await self._session.scalar(
             select(TemplateParameter)
-            .options(selectinload(TemplateParameter.system_values))
+            .options(selectinload(TemplateParameter.system_value))
             .where(
                 TemplateParameter.id == parameter_id,
                 TemplateParameter.template_id == template_id,
@@ -112,14 +110,12 @@ class TemplateParameterRepository:
         """Create one parameter and atomically advance system configuration state."""
 
         template = await self._lock_template(template_id)
-        parameter, system_values = self._new_parameter(
+        parameter, _ = self._new_parameter(
             template,
             payload,
             cipher,
         )
         self._session.add(parameter)
-        if system_values:
-            self._session.add_all(system_values)
         try:
             await self._session.commit()
         except IntegrityError as error:
@@ -127,14 +123,13 @@ class TemplateParameterRepository:
             raise TemplateParameterAlreadyExistsError from error
         return await self._required_parameter(template_id, parameter.id)
 
-    @classmethod
+    @staticmethod
     def _new_parameter(
-        cls,
         template: Template,
         payload: TemplateParameterCreate,
         cipher: TemplateParameterCipher | None,
-    ) -> tuple[TemplateParameter, Sequence[TemplateParameterSystemValue]]:
-        """Build one definition and encrypted values without database I/O."""
+    ) -> tuple[TemplateParameter, TemplateParameterSystemValue | None]:
+        """Build one definition and its optional encrypted value without database I/O."""
 
         parameter = TemplateParameter(
             id=uuid4(),
@@ -152,11 +147,14 @@ class TemplateParameterRepository:
             if cipher is None:
                 msg = "Template parameter encryption is required"
                 raise RuntimeError(msg)
-            parameter.scope = payload.scope
-            values = cls._encrypted_values(parameter, payload, cipher)
+            system_value = TemplateParameterSystemValue(
+                parameter_id=parameter.id,
+                value_enc=cipher.encrypt(payload.value, parameter.id),
+            )
+            parameter.system_value = system_value
             template.system_parameter_revision += 1
-            return parameter, values
-        return parameter, ()
+            return parameter, system_value
+        return parameter, None
 
     async def update(
         self,
@@ -165,7 +163,7 @@ class TemplateParameterRepository:
         payload: TemplateParameterUpdate,
         cipher: TemplateParameterCipher | None,
     ) -> TemplateParameter:
-        """Replace mutable fields while preserving type, name, and system scope."""
+        """Replace mutable fields while preserving type and name."""
 
         template = await self._lock_template(template_id)
         parameter = await self._locked_parameter(template_id, parameter_id)
@@ -206,29 +204,20 @@ class TemplateParameterRepository:
             parameter.default_value = payload.default_value
             changed = changed or user_changed
         elif isinstance(payload, SystemTemplateParameterUpdate):
-            if parameter.scope is not payload.scope:
-                raise TemplateParameterImmutableFieldError
-            if payload.value is not None or payload.values is not None:
+            if payload.value is not None:
                 if cipher is None:
                     msg = "Template parameter encryption is required"
                     raise RuntimeError(msg)
-                incoming = TemplateParameterRepository._plaintext_values(payload)
-                current = {
-                    value.target.value: cipher.decrypt(
-                        value.value_enc,
-                        parameter.id,
-                        value.target.value,
+                stored_value = parameter.system_value
+                if stored_value is None:
+                    parameter.system_value = TemplateParameterSystemValue(
+                        parameter_id=parameter.id,
+                        value_enc=cipher.encrypt(payload.value, parameter.id),
                     )
-                    for value in parameter.system_values
-                }
-                if current != incoming:
-                    for value in parameter.system_values:
-                        plaintext = incoming[value.target.value]
-                        value.value_enc = cipher.encrypt(
-                            plaintext,
-                            parameter.id,
-                            value.target.value,
-                        )
+                    template.system_parameter_revision += 1
+                    system_changed = True
+                elif cipher.decrypt(stored_value.value_enc, parameter.id) != payload.value:
+                    stored_value.value_enc = cipher.encrypt(payload.value, parameter.id)
                     template.system_parameter_revision += 1
                     system_changed = True
             changed = changed or system_changed
@@ -290,7 +279,7 @@ class TemplateParameterRepository:
 
         parameter = await self._session.scalar(
             select(TemplateParameter)
-            .options(selectinload(TemplateParameter.system_values))
+            .options(selectinload(TemplateParameter.system_value))
             .where(
                 TemplateParameter.id == parameter_id,
                 TemplateParameter.template_id == template_id,
@@ -313,35 +302,3 @@ class TemplateParameterRepository:
         if parameter is None:  # pragma: no cover - committed invariant
             raise TemplateParameterNotFoundError
         return parameter
-
-    @staticmethod
-    def _plaintext_values(
-        payload: SystemTemplateParameterCreate | SystemTemplateParameterUpdate,
-    ) -> dict[str, str]:
-        """Normalize one validated system payload to concrete targets."""
-
-        scope = payload.scope
-        if scope is TemplateParameterScope.GLOBAL:
-            if payload.value is None:  # pragma: no cover - schema invariant
-                msg = "Global system parameter value is missing"
-                raise ValueError(msg)
-            return {TemplateParameterValueTarget.GLOBAL.value: payload.value}
-        return dict(payload.values or {})
-
-    @classmethod
-    def _encrypted_values(
-        cls,
-        parameter: TemplateParameter,
-        payload: SystemTemplateParameterCreate | SystemTemplateParameterUpdate,
-        cipher: TemplateParameterCipher,
-    ) -> Sequence[TemplateParameterSystemValue]:
-        """Encrypt every concrete value selected by a validated payload."""
-
-        return [
-            TemplateParameterSystemValue(
-                parameter_id=parameter.id,
-                target=TemplateParameterValueTarget(target),
-                value_enc=cipher.encrypt(value, parameter.id, target),
-            )
-            for target, value in sorted(cls._plaintext_values(payload).items())
-        ]

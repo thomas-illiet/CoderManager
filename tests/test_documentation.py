@@ -1,7 +1,12 @@
 """Regression checks for project-wide documentation coverage."""
 
 import ast
+import re
 from pathlib import Path
+
+import yaml
+
+from coder_manager.config import Settings
 
 
 def test_every_class_and_function_has_a_docstring() -> None:
@@ -42,3 +47,56 @@ def test_environment_example_has_exact_service_categories_and_unique_variables()
 
     assert categories == ["COMMUN", "API", "WORKER", "BEAT", "MIGRATE", "FLOWER"]
     assert len(variables) == len(set(variables))
+
+
+def test_environment_example_covers_settings_and_compose_consumers() -> None:
+    """Keep every runtime setting documented and injected into its exact consumers."""
+
+    project_root = Path(__file__).parents[1]
+    example_text = (project_root / ".env.example").read_text(encoding="utf-8")
+    compose_text = (project_root / "compose.yaml").read_text(encoding="utf-8")
+    example_variables = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", example_text, re.MULTILINE))
+    settings_variables = {
+        f"CODER_MANAGER_{field_name.upper()}" for field_name in Settings.model_fields
+    }
+    direct_runtime_variables = {"FLOWER_UNAUTHENTICATED_API", "PROMETHEUS_MULTIPROC_DIR"}
+    compose_inputs = set(re.findall(r"\$\{([A-Z][A-Z0-9_]*)", compose_text))
+
+    assert example_variables == settings_variables | direct_runtime_variables
+    assert compose_inputs <= example_variables
+
+    section_names = {"COMMUN", "API", "WORKER", "BEAT", "MIGRATE", "FLOWER"}
+    current_section: str | None = None
+    common_consumers: set[str] = set()
+    expected_consumers: dict[str, set[str]] = {}
+    for line in example_text.splitlines():
+        if line.startswith("# "):
+            comment = line.removeprefix("# ")
+            if comment in section_names:
+                current_section = comment
+            elif current_section == "COMMUN" and re.fullmatch(
+                r"(?:api|worker|beat|migrate|flower)(?:, (?:api|worker|beat|migrate|flower))*",
+                comment,
+            ):
+                common_consumers = set(comment.split(", "))
+            continue
+        if not line or "=" not in line:
+            continue
+        variable = line.partition("=")[0]
+        assert current_section is not None
+        if current_section == "COMMUN":
+            assert common_consumers
+            expected_consumers[variable] = common_consumers.copy()
+        else:
+            expected_consumers[variable] = {current_section.lower()}
+
+    compose = yaml.safe_load(compose_text)
+    actual_consumers = {
+        variable: {
+            service_name
+            for service_name, service in compose["services"].items()
+            if variable in (service.get("environment") or {})
+        }
+        for variable in example_variables
+    }
+    assert actual_consumers == expected_consumers

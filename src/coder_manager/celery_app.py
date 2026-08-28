@@ -53,6 +53,7 @@ class ValidateInstancePublicUrlConfig(bootsteps.StartStopStep):
         """Validate settings before the worker accepts any task."""
 
         del parent
+        settings.require_environment()
         InstancePublicUrlConfig.from_settings(settings)
 
 

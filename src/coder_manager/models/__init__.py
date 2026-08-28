@@ -1,9 +1,8 @@
 """ORM models."""
 
+from coder_manager.constants import INSTANCE_SLUG_LENGTH
 from coder_manager.models.instance import (
-    INSTANCE_SLUG_LENGTH,
     Instance,
-    InstanceEnvironment,
     InstanceState,
     InstanceStatus,
 )
@@ -20,10 +19,8 @@ from coder_manager.models.template_deployment import (
 from coder_manager.models.template_image import TemplateImage
 from coder_manager.models.template_parameter import (
     TemplateParameter,
-    TemplateParameterScope,
     TemplateParameterSystemValue,
     TemplateParameterType,
-    TemplateParameterValueTarget,
 )
 from coder_manager.models.workspace import Workspace, WorkspaceStatus
 
@@ -32,7 +29,6 @@ __all__ = [
     "Database",
     "DatabaseAllocation",
     "Instance",
-    "InstanceEnvironment",
     "InstanceKubernetes",
     "InstanceState",
     "InstanceStatus",
@@ -48,10 +44,8 @@ __all__ = [
     "TemplateDeploymentStatus",
     "TemplateImage",
     "TemplateParameter",
-    "TemplateParameterScope",
     "TemplateParameterSystemValue",
     "TemplateParameterType",
-    "TemplateParameterValueTarget",
     "TemplateSyncStatus",
     "Workspace",
     "WorkspaceStatus",

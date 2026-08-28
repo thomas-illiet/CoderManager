@@ -413,8 +413,7 @@ async def test_daily_workspace_stop_submits_directly_without_database_writes(
         "get_settings",
         lambda: Settings(
             crypto_key=TEST_CRYPTO_KEY,
-            argocd_region="APAC",
-            instance_domain="worker-studio",
+            instance_base_domain="apac.worker-studio.echonet",
         ),
     )
     captured: list[tuple[str, str]] = []
@@ -453,7 +452,7 @@ async def test_daily_workspace_stop_submits_directly_without_database_writes(
         "submitted": 2,
         "already_stopping": 1,
     }
-    worker_instance_url = f"https://{created['slug']}.apac.worker-studio.dev.echonet"
+    worker_instance_url = f"https://{created['slug']}.apac.worker-studio.echonet"
     assert worker_instance_url != created["instance_url"]
     assert captured == [(worker_instance_url, "stored-admin-password")]
 
@@ -559,24 +558,20 @@ async def test_start_and_stop_jobs_reconcile_workspaces_before_application_delet
         observed_instance_id: UUID,
         _slug: str,
         _name: str | None,
-        environment: str,
     ) -> bool:
-        """Verify stop existence checks use the instance environment."""
+        """Verify stop existence checks use the instance identity."""
 
         assert observed_instance_id == instance_id
-        assert environment == "development"
         return True
 
     def delete_application(
         deleted_instance_id: UUID,
         _slug: str,
         _name: str | None,
-        environment: str,
     ) -> argocd.ArgoCdMutationStatus:
-        """Verify stop deletion uses the instance environment."""
+        """Verify stop deletion uses the instance identity."""
 
         assert deleted_instance_id == instance_id
-        assert environment == "development"
         events.append("application")
         return argocd.ArgoCdMutationStatus.COMPLETED
 
@@ -1201,11 +1196,9 @@ async def test_hourly_state_audit_observes_idle_instances_and_isolates_errors(
         _instance_id: UUID,
         slug: str,
         _attached_name: str | None,
-        environment: str,
     ) -> bool:
         """Return two observations and fail one independently."""
 
-        assert environment == "development"
         if slug == records[2]["slug"]:
             raise RuntimeError("Argo unavailable")
         if slug == records[3]["slug"]:
@@ -1248,12 +1241,10 @@ async def test_hourly_state_audit_discards_concurrent_lifecycle_change(
         observed_instance_id: UUID,
         _slug: str,
         _attached_name: str | None,
-        environment: str,
     ) -> bool:
         """Change lifecycle state while the Argo observation is in flight."""
 
         assert observed_instance_id == instance_id
-        assert environment == "development"
         with sync_session_maker() as session:
             stored = session.get(Instance, instance_id)
             assert stored is not None
@@ -1286,8 +1277,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     job_id = UUID(str(instance["job_id"]))
     await encrypt_allocated_database(session_maker, instance_id)
     worker_settings = Settings(
-        argocd_region="APAC",
-        instance_domain="worker-studio",
+        instance_base_domain="apac.worker-studio.echonet",
         crypto_key=TEST_CRYPTO_KEY,
     )
     create_step_module = import_module(
@@ -1298,7 +1288,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     )
     monkeypatch.setattr(create_step_module, "get_settings", lambda: worker_settings)
     monkeypatch.setattr(bootstrap_step_module, "get_settings", lambda: worker_settings)
-    worker_instance_url = f"https://{instance['slug']}.apac.worker-studio.dev.echonet"
+    worker_instance_url = f"https://{instance['slug']}.apac.worker-studio.echonet"
     assert worker_instance_url != instance["instance_url"]
     created_targets: list[postgresql.SchemaTarget] = []
     reconciled_values: list[argocd.InstanceHelmValues] = []
@@ -1721,7 +1711,9 @@ async def test_retried_update_reclaims_members_from_the_expired_attempt(
     first_claim = claim_execution(job_id, INSTANCE_UPDATE_STEP_01_TASK, sync_session_maker)
     assert first_claim is not None
     update_module = import_module("coder_manager.tasks.instance.update.step_01_update_instance")
-    url_config = InstancePublicUrlConfig.from_settings(Settings(argocd_region="EMEA"))
+    url_config = InstancePublicUrlConfig.from_settings(
+        Settings(instance_base_domain="emea.code-studio.echonet")
+    )
     member_ids, *_ = update_module._claim_members(
         first_claim,
         sync_session_maker,
@@ -2187,7 +2179,7 @@ async def test_delete_steps_keep_local_state_until_step_04(
 
     deletion = await client.delete(f"/api/v1/instances/{instance_id}")
     job_id = UUID(deletion.json()["job"]["id"])
-    deleted_remote: list[tuple[UUID, str | None, str | None, str]] = []
+    deleted_remote: list[tuple[UUID, str | None, str | None]] = []
     dropped_targets: list[postgresql.SchemaTarget] = []
     deletion_results = iter(
         [
@@ -2198,9 +2190,8 @@ async def test_delete_steps_keep_local_state_until_step_04(
     monkeypatch.setattr(
         argocd,
         "delete_instance_application",
-        lambda deleted_instance_id, slug, name, environment: (
-            deleted_remote.append((deleted_instance_id, slug, name, environment))
-            or next(deletion_results)
+        lambda deleted_instance_id, slug, name: (
+            deleted_remote.append((deleted_instance_id, slug, name)) or next(deletion_results)
         ),
     )
     monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: True)
@@ -2217,8 +2208,8 @@ async def test_delete_steps_keep_local_state_until_step_04(
         assert deferred_job.status is JobStatus.PENDING
     assert tasks.step_02_remove_instance.run(str(job_id)) == {"status": "pending"}
     assert deleted_remote == [
-        (instance_id, str(deletion.json()["resource"]["slug"]), None, "development"),
-        (instance_id, str(deletion.json()["resource"]["slug"]), None, "development"),
+        (instance_id, str(deletion.json()["resource"]["slug"]), None),
+        (instance_id, str(deletion.json()["resource"]["slug"]), None),
     ]
     assert tasks.step_03_remove_schema.run(str(job_id)) == {"status": "pending"}
     assert dropped_targets[0].schema_name == f"coder_{instance_id.hex}"

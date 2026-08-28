@@ -11,7 +11,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coder_manager.models import (
     Instance,
-    InstanceEnvironment,
     InstanceState,
     InstanceStatus,
     JobExecution,
@@ -421,7 +420,6 @@ async def test_catalog_mutations_conflict_with_assignments(
         instance = Instance(
             application="TEMPLATE-LOCK",
             slug=uuid4().hex[:12],
-            environment=InstanceEnvironment.DEVELOPMENT,
             action="created",
             status=InstanceStatus.SUCCESS,
             state=InstanceState.STARTED,

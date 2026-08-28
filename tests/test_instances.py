@@ -24,7 +24,6 @@ from coder_manager.domains import argocd
 from coder_manager.main import app
 from coder_manager.models import (
     Instance,
-    InstanceEnvironment,
     InstanceState,
     InstanceStatus,
     JobExecution,
@@ -45,23 +44,18 @@ from tests.conftest import TEST_CRYPTO_KEY
 
 TEST_INSTANCE_SLUG = "k7m4p2x9q3ab"
 SECOND_INSTANCE_SLUG = "m8n5q3y0r4bc"
-TEST_INSTANCE_REGION = "emea"
+TEST_INSTANCE_BASE_DOMAIN = "emea.code-studio.dev.echonet"
 
 
 async def create_instance(
     client: AsyncClient,
     application: str,
-    *,
-    environment: str = "development",
 ) -> dict[str, str]:
     """Create and return one Coder instance through the API."""
 
     response = await client.post(
         "/api/v1/instances",
-        json={
-            "application": application,
-            "environment": environment,
-        },
+        json={"application": application},
     )
     assert response.status_code == 201
     return response.json()["resource"]
@@ -84,7 +78,6 @@ async def test_create_instance_get_and_missing(
         "id",
         "application",
         "slug",
-        "environment",
         "action",
         "status",
         "state",
@@ -103,9 +96,8 @@ async def test_create_instance_get_and_missing(
     assert created["status"] == "pending"
     assert created["state"] == "stopped"
     assert created["argocd_application_name"] is None
-    assert created["instance_url"] == (
-        f"https://{TEST_INSTANCE_SLUG}.{TEST_INSTANCE_REGION}.code-studio.dev.echonet"
-    )
+    assert created["instance_url"] == f"https://{TEST_INSTANCE_SLUG}.{TEST_INSTANCE_BASE_DOMAIN}"
+    assert "environment" not in Instance.__table__.columns
     assert "instance_url" not in Instance.__table__.columns
     assert UUID(created["database_id"])
     assert created["schema_name"] == f"coder_{UUID(created['id']).hex}"
@@ -231,42 +223,27 @@ async def test_removed_application_contract_is_rejected(client: AsyncClient) -> 
     endpoint = await client.get("/api/v1/applications")
     legacy_payload = await client.post(
         "/api/v1/instances",
-        json={
-            "application_id": str(uuid4()),
-            "environment": "development",
-        },
+        json={"application_id": str(uuid4())},
     )
 
     assert endpoint.status_code == 404
     assert legacy_payload.status_code == 422
 
 
-async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> None:
-    """Verify the environment url mapping and list filter scenario."""
+async def test_instance_url_and_list_filter(client: AsyncClient) -> None:
+    """Verify the configured base-domain URL and list filter scenario."""
 
     first_application = "FIRST APP"
     second_application = "OTHER APP"
-    expected_labels = {
-        "development": "dev",
-        "staging": "staging",
-        "production": "cib",
-    }
-    for environment, dns_label in expected_labels.items():
-        instance = await create_instance(
-            client,
-            first_application,
-            environment=environment,
-        )
-        assert re.fullmatch(r"[a-z0-9]{12}", instance["slug"])
-        assert instance["instance_url"].endswith(
-            f"{TEST_INSTANCE_REGION}.code-studio.{dns_label}.echonet"
-        )
+    instance = await create_instance(client, first_application)
+    assert re.fullmatch(r"[a-z0-9]{12}", instance["slug"])
+    assert instance["instance_url"].endswith(TEST_INSTANCE_BASE_DOMAIN)
     await create_instance(client, second_application)
 
     first_page = await client.get("/api/v1/instances", params={"page": 1, "page_size": 2})
     assert first_page.status_code == 200
-    assert first_page.json()["total"] == 4
-    assert first_page.json()["pages"] == 2
+    assert first_page.json()["total"] == 2
+    assert first_page.json()["pages"] == 1
     assert len(first_page.json()["items"]) == 2
 
     filtered = await client.get(
@@ -274,7 +251,7 @@ async def test_environment_url_mapping_and_list_filter(client: AsyncClient) -> N
         params={"application": " first app "},
     )
     assert filtered.status_code == 200
-    assert filtered.json()["total"] == 3
+    assert filtered.json()["total"] == 1
     assert all(item["application"] == first_application for item in filtered.json()["items"])
 
 
@@ -298,17 +275,14 @@ async def test_instance_url_follows_current_settings_without_updating_instance(
         updated_at_before = stored_before.updated_at
 
     app.dependency_overrides[get_settings] = lambda: Settings(
-        argocd_region="APAC",
-        instance_domain="coder-studio",
+        instance_base_domain="apac.coder-studio.echonet",
     )
     response = await client.get(f"/api/v1/instances/{instance_id}")
 
     assert response.status_code == 200
     recomputed = response.json()
     assert recomputed["id"] == instance["id"]
-    assert recomputed["instance_url"] == (
-        f"https://{TEST_INSTANCE_SLUG}.apac.coder-studio.dev.echonet"
-    )
+    assert recomputed["instance_url"] == (f"https://{TEST_INSTANCE_SLUG}.apac.coder-studio.echonet")
     assert recomputed["updated_at"] == instance["updated_at"]
 
     async with session_maker() as session:
@@ -322,16 +296,12 @@ async def test_create_rejects_legacy_application_id_and_extra_name(client: Async
 
     legacy = await client.post(
         "/api/v1/instances",
-        json={
-            "application_id": str(uuid4()),
-            "environment": "development",
-        },
+        json={"application_id": str(uuid4())},
     )
     with_name = await client.post(
         "/api/v1/instances",
         json={
             "application": "APP",
-            "environment": "development",
             "name": "Instances do not have names",
         },
     )
@@ -350,14 +320,13 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         json={
             "application": "APP",
             "region": "emea",
-            "environment": "development",
         },
     )
-    invalid_environment = await client.post(
+    removed_environment = await client.post(
         "/api/v1/instances",
         json={
             "application": "APP",
-            "environment": "testing",
+            "environment": "development",
         },
     )
     invalid_page = await client.get("/api/v1/instances", params={"page": 0, "page_size": 101})
@@ -365,14 +334,12 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "   ",
-            "environment": "development",
         },
     )
     oversized_application = await client.post(
         "/api/v1/instances",
         json={
             "application": "a" * 256,
-            "environment": "development",
         },
     )
 
@@ -380,19 +347,17 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
         "/api/v1/instances",
         json={
             "application": "!!!",
-            "environment": "development",
         },
     )
     long_application = await client.post(
         "/api/v1/instances",
         json={
             "application": "a" * 64,
-            "environment": "development",
         },
     )
 
     assert removed_region.status_code == 422
-    assert invalid_environment.status_code == 422
+    assert removed_environment.status_code == 422
     assert invalid_page.status_code == 422
     assert empty_application.status_code == 422
     assert oversized_application.status_code == 422
@@ -400,29 +365,26 @@ async def test_invalid_inputs_are_rejected_and_non_dns_applications_are_allowed(
     assert long_application.status_code == 201
 
 
-async def test_placement_conflicts_and_previous_slug_collisions_are_allowed(
+async def test_application_conflicts_and_previous_slug_collisions_are_allowed(
     client: AsyncClient,
 ) -> None:
-    """Keep placement uniqueness without deriving URL identity from applications."""
+    """Keep application uniqueness without deriving URL identity from applications."""
 
     first = await create_instance(client, "My App")
 
-    duplicate_placement = await client.post(
+    duplicate_application = await client.post(
         "/api/v1/instances",
-        json={
-            "application": "my app",
-            "environment": "development",
-        },
+        json={"application": "my app"},
     )
     distinct_application = await client.post(
         "/api/v1/instances",
-        json={
-            "application": "my-app",
-            "environment": "development",
-        },
+        json={"application": "my-app"},
     )
 
-    assert duplicate_placement.status_code == 409
+    assert duplicate_application.status_code == 409
+    assert duplicate_application.json() == {
+        "detail": "An instance already exists for this application or slug"
+    }
     assert distinct_application.status_code == 201
     second = distinct_application.json()["resource"]
     assert first["slug"] != second["slug"]
@@ -464,13 +426,13 @@ async def test_slug_collision_regenerates_and_null_slugs_are_rejected(
         await session.rollback()
 
 
-async def test_same_placement_is_allowed_for_different_applications(client: AsyncClient) -> None:
-    """Verify the same placement is allowed for different applications scenario."""
+async def test_different_applications_are_allowed(client: AsyncClient) -> None:
+    """Allow one globally unique instance per distinct application."""
 
     first = await create_instance(client, "First App")
     second = await create_instance(client, "Second App")
 
-    assert first["environment"] == second["environment"] == "development"
+    assert first["id"] != second["id"]
 
 
 async def test_start_and_stop_endpoints_create_strict_durable_jobs(
@@ -668,7 +630,6 @@ def instance_record() -> SimpleNamespace:
         id=uuid4(),
         application="APP",
         slug=TEST_INSTANCE_SLUG,
-        environment=InstanceEnvironment.DEVELOPMENT,
         action="creating",
         status=InstanceStatus.PENDING,
         state=InstanceState.STOPPED,
@@ -713,10 +674,7 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
             return record
 
     monkeypatch.setattr(instance_routes, "InstanceRepository", SuccessfulRepository)
-    payload = InstanceCreate(
-        application=record.application,
-        environment=InstanceEnvironment.DEVELOPMENT,
-    )
+    payload = InstanceCreate(application=record.application)
 
     page = await instance_routes.list_instances(None, Settings(), 1, 20, None)
     fetched = await instance_routes.get_instance(record.id, None, Settings())
@@ -727,7 +685,7 @@ async def test_instance_route_success_mapping(monkeypatch: pytest.MonkeyPatch) -
     assert fetched.id == record.id
     assert created.resource.id == record.id
     assert created.resource.instance_url == (
-        f"https://{TEST_INSTANCE_SLUG}.{TEST_INSTANCE_REGION}.code-studio.dev.echonet"
+        f"https://{TEST_INSTANCE_SLUG}.{TEST_INSTANCE_BASE_DOMAIN}"
     )
     assert deleted.resource.id == record.id
 
@@ -761,10 +719,7 @@ async def test_create_instance_route_error_mapping(
             raise repository_error
 
     monkeypatch.setattr(instance_routes, "InstanceRepository", FailingRepository)
-    payload = InstanceCreate(
-        application="APP",
-        environment=InstanceEnvironment.DEVELOPMENT,
-    )
+    payload = InstanceCreate(application="APP")
 
     with pytest.raises(HTTPException) as caught:
         await instance_routes.create_instance(payload, None, Settings())
@@ -807,7 +762,6 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
         observed_instance_id: UUID,
         slug: str,
         attached_name: str | None,
-        environment: str,
         _settings: Settings,
     ) -> argocd.ArgoCdApplicationStatus:
         """Simulate the remote status operation used by this scenario."""
@@ -815,7 +769,6 @@ async def test_instance_status_endpoint_returns_remote_argocd_state(
         assert observed_instance_id == instance_id
         assert slug == instance["slug"]
         assert attached_name is None
-        assert environment == "development"
         return argocd.ArgoCdApplicationStatus(
             application_name=f"coder-{instance['slug']}",
             sync_status="OutOfSync",
@@ -876,7 +829,6 @@ async def test_instance_status_route_error_mapping(
         _instance_id: UUID,
         _slug: str,
         _attached_name: str | None,
-        _environment: str,
         _settings: Settings,
     ) -> None:
         """Simulate the expected fail status behavior."""

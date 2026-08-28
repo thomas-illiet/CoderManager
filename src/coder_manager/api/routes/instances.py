@@ -311,7 +311,6 @@ async def get_instance_status(
             instance.id,
             instance.slug,
             instance.argocd_application_name,
-            instance.environment.value,
             settings,
         )
     except argocd.ArgoCdApplicationNotFoundError as error:
@@ -362,7 +361,7 @@ async def create_instance(
     except InstanceAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="An instance already exists for this placement or slug",
+            detail="An instance already exists for this application or slug",
         ) from error
     except InstanceDatabaseUnavailableError as error:
         raise HTTPException(

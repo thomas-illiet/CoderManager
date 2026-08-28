@@ -59,8 +59,7 @@ def step_01_remove_workspaces(job_id: str) -> dict[str, str]:
             instance_id = instance.id
             slug = instance.slug
             attached_name = instance.argocd_application_name
-            environment = instance.environment.value
-            public_url = url_config.url_for(instance.slug, instance.environment)
+            public_url = url_config.url_for(instance.slug)
 
         credentials = stored_admin_password(
             required_resource_id(claim),
@@ -77,12 +76,10 @@ def step_01_remove_workspaces(job_id: str) -> dict[str, str]:
             instance_id,
             slug,
             attached_name,
-            environment,
         ):
             helm_values = instance_helm_values(
                 instance_id,
                 slug,
-                environment,
                 public_url,
                 session_factory,
             )

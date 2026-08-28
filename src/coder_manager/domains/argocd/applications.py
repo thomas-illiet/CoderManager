@@ -26,11 +26,6 @@ TIER_LABEL = "tier"
 DOMAIN_LABEL_VALUE = "code-station"
 TIER_LABEL_VALUE = "standard"
 APPLICATION_NAMESPACE = "app-code-instance"
-ENVIRONMENT_VALUE_FILES = {
-    "development": "values-dev.yaml",
-    "staging": "values-stg.yaml",
-    "production": "values-prd.yaml",
-}
 ACTIVE_OPERATION_PHASES = frozenset({"Running", "Terminating"})
 
 
@@ -38,13 +33,12 @@ def application_name(
     config: ArgoCdClientConfig,
     slug: str,
     attached_name: str | None,
-    environment: str,
 ) -> str:
     """Return the attached or strict slug-based Application name."""
 
     if attached_name:
         return attached_name
-    return f"{config.application_prefix_for(environment)}-{slug}"
+    return f"{config.application_prefix}-{slug}"
 
 
 def application_payload(
@@ -62,10 +56,9 @@ def application_payload(
     """
 
     users, admins = _member_values(config.default_admins, members)
-    cyberark = config.cyberark_for(helm_values.environment)
+    cyberark = config.cyberark
     identifier = helm_values.slug
     helm_argument_lines = [
-        f"--values {ENVIRONMENT_VALUE_FILES[helm_values.environment]}",
         f"--namespace {APPLICATION_NAMESPACE}",
         _helm_scalar_argument(
             "policy.config.allowedUsernames",
@@ -110,14 +103,14 @@ def application_payload(
             "name": name,
             "labels": {
                 INSTANCE_ID_LABEL: str(instance_id),
-                ENVIRONMENT_LABEL: helm_values.environment,
+                ENVIRONMENT_LABEL: config.environment.value,
                 REGION_LABEL: config.region,
                 DOMAIN_LABEL: DOMAIN_LABEL_VALUE,
                 TIER_LABEL: TIER_LABEL_VALUE,
             },
         },
         "spec": {
-            "project": config.project_for(helm_values.environment),
+            "project": config.project,
             "source": {
                 "repoURL": config.repository_url,
                 "path": config.repository_path,
@@ -145,7 +138,7 @@ def application_payload(
                 },
             },
             "destination": {
-                "name": config.destination_for(helm_values.environment),
+                "name": config.destination_name,
                 "namespace": APPLICATION_NAMESPACE,
             },
             "syncPolicy": {
