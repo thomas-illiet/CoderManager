@@ -9,6 +9,7 @@ from coder_manager.schemas.instance import (
     InstanceRead,
 )
 from coder_manager.schemas.instance_kubernetes import InstanceKubernetesRead
+from coder_manager.schemas.instance_template import InstanceTemplatePage, InstanceTemplateRead
 from coder_manager.schemas.job_execution import JobRead, JobResourceResponse, JobResponse
 from coder_manager.schemas.managed_database import (
     DatabaseCreate,
@@ -23,7 +24,6 @@ from coder_manager.schemas.managed_database import (
 from coder_manager.schemas.member import MemberCreate, MemberPage, MemberRead, MemberRoleUpdate
 from coder_manager.schemas.template import (
     TemplateCreate,
-    TemplateDeploymentStatistics,
     TemplateListQuery,
     TemplatePage,
     TemplateRead,
@@ -68,6 +68,8 @@ __all__ = [
     "InstanceKubernetesRead",
     "InstancePage",
     "InstanceRead",
+    "InstanceTemplatePage",
+    "InstanceTemplateRead",
     "JobRead",
     "JobResourceResponse",
     "JobResponse",
@@ -78,7 +80,6 @@ __all__ = [
     "SystemTemplateParameterCreate",
     "SystemTemplateParameterUpdate",
     "TemplateCreate",
-    "TemplateDeploymentStatistics",
     "TemplateImageCreate",
     "TemplateImagePage",
     "TemplateImageRead",

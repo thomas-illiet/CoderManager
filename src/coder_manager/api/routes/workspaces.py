@@ -24,7 +24,6 @@ from coder_manager.repositories import (
     WorkspaceRepository,
     WorkspaceTemplateNotDeployedError,
     WorkspaceTemplateNotFoundError,
-    WorkspaceTemplateUnavailableError,
 )
 from coder_manager.schemas import (
     JobRead,
@@ -117,11 +116,7 @@ async def create_workspace(  # noqa: C901
             status_code=status.HTTP_409_CONFLICT,
             detail="Template is not deployed to this instance",
         ) from error
-    except (
-        WorkspaceTemplateUnavailableError,
-        WorkspaceImageUnavailableError,
-        WorkspaceConfigurationError,
-    ) as error:
+    except (WorkspaceImageUnavailableError, WorkspaceConfigurationError) as error:
         raise _invalid_configuration() from error
     except WorkspaceAlreadyExistsError as error:
         raise _name_conflict() from error
@@ -154,6 +149,11 @@ async def update_workspace(  # noqa: C901
         raise _instance_busy() from error
     except WorkspaceBusyError as error:
         raise _workspace_busy() from error
+    except WorkspaceTemplateNotDeployedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Template is not deployed to this instance",
+        ) from error
     except (WorkspaceImageUnavailableError, WorkspaceConfigurationError) as error:
         raise _invalid_configuration() from error
     except WorkspaceParameterImmutableError as error:
@@ -195,6 +195,11 @@ async def delete_workspace(
         raise _instance_busy() from error
     except WorkspaceBusyError as error:
         raise _workspace_busy() from error
+    except WorkspaceTemplateNotDeployedError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Template is not deployed to this instance",
+        ) from error
     job = await _job_read(session, workspace.job_id)
     if job is not None:
         dispatch_registered_step(step_01_delete_workspace.name, job.id)

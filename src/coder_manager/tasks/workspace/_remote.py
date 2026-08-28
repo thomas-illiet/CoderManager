@@ -19,6 +19,7 @@ from coder_manager.domains.coder import (
 from coder_manager.models import (
     Instance,
     Member,
+    TemplateAssignment,
     TemplateDeployment,
     TemplateParameter,
     TemplateParameterType,
@@ -76,9 +77,14 @@ def workspace_remote_snapshot(
         instance = session.get(Instance, workspace.instance_id)
         member = session.get(Member, workspace.member_id)
         deployment = session.scalar(
-            select(TemplateDeployment).where(
-                TemplateDeployment.template_id == workspace.template_id,
-                TemplateDeployment.instance_id == workspace.instance_id,
+            select(TemplateDeployment)
+            .join(
+                TemplateAssignment,
+                TemplateAssignment.id == TemplateDeployment.assignment_id,
+            )
+            .where(
+                TemplateAssignment.template_id == workspace.template_id,
+                TemplateAssignment.instance_id == workspace.instance_id,
             )
         )
         if (

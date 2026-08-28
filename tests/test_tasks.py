@@ -45,7 +45,6 @@ from coder_manager.models import (
     WorkspaceStatus,
 )
 from coder_manager.tasks.common.execution import (
-    advance_execution,
     claim_execution,
     complete_execution,
     prepare_execution_retry,
@@ -56,8 +55,6 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_02_TASK,
     INSTANCE_CREATE_STEP_03,
     INSTANCE_CREATE_STEP_03_TASK,
-    INSTANCE_CREATE_STEP_04,
-    INSTANCE_CREATE_STEP_04_TASK,
     INSTANCE_DELETE_STEP_01,
     INSTANCE_DELETE_STEP_01_TASK,
     INSTANCE_DELETE_STEP_02,
@@ -73,6 +70,8 @@ from coder_manager.tasks.common.registry import (
     INSTANCE_UPDATE_STEP_02,
     INSTANCE_UPDATE_STEP_02_TASK,
     REGISTERED_STEP_NAMES,
+    TEMPLATE_ASSIGNMENT_CREATE_STEP_01_TASK,
+    TEMPLATE_ASSIGNMENT_DELETE_STEP_01_TASK,
     dispatch_registered_step,
 )
 from coder_manager.tasks.instance import _bootstrap as bootstrap_helpers
@@ -218,7 +217,6 @@ def test_registered_step_names_and_beat_schedule() -> None:
             tasks.step_01_create_schema,
             tasks.step_02_create_instance,
             tasks.step_03_bootstrap_admin,
-            tasks.step_04_sync_templates,
             tasks.step_01_update_instance,
             tasks.step_02_cleanup_users,
             tasks.step_01_start_instance,
@@ -233,8 +231,22 @@ def test_registered_step_names_and_beat_schedule() -> None:
             tasks.step_01_delete_workspace,
             tasks.step_01_sync_database,
             tasks.step_01_sync_template,
+            tasks.step_01_create_template,
+            tasks.step_01_delete_template,
         )
     } == REGISTERED_STEP_NAMES
+    assert TEMPLATE_ASSIGNMENT_CREATE_STEP_01_TASK == (
+        "coder_manager.template.create.step_01_create_template"
+    )
+    assert TEMPLATE_ASSIGNMENT_DELETE_STEP_01_TASK == (
+        "coder_manager.template.delete.step_01_delete_template"
+    )
+    assert "coder_manager.template_assignment.create.step_01_create_template" not in (
+        celery_app.tasks
+    )
+    assert "coder_manager.template_assignment.delete.step_01_delete_template" not in (
+        celery_app.tasks
+    )
     assert not hasattr(tasks, "upsert_instance")
     assert celery_app.conf.task_ignore_result is True
     assert {
@@ -1002,6 +1014,11 @@ async def test_instance_deletion_defers_when_restoration_is_busy(
     await encrypt_allocated_database(session_maker, instance_id)
     await store_admin_password(session_maker, instance_id)
     await set_instance_status(session_maker, instance_id)
+    async with session_maker() as session:
+        stored = await session.get(Instance, instance_id)
+        assert stored is not None
+        stored.state = InstanceState.STOPPED
+        await session.commit()
     monkeypatch.setattr(argocd, "instance_application_exists", lambda *_args: False)
     monkeypatch.setattr(argocd, "reconcile_instance_application", deferred_reconcile)
     monkeypatch.setattr(
@@ -1314,7 +1331,6 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     )
     tasks.step_02_create_instance.delay.reset_mock()
     tasks.step_03_bootstrap_admin.delay.reset_mock()
-    tasks.step_04_sync_templates.delay.reset_mock()
 
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "pending"}
     assert len(created_targets) == 1
@@ -1359,23 +1375,10 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert stored.status is InstanceStatus.PENDING
         assert stored.argocd_application_name == f"coder-{instance['slug']}"
 
-    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
     assert len(bootstrapped) == 1
     assert bootstrapped[0][0] == worker_instance_url
     assert len(bootstrapped[0][1].get_secret_value()) == 43
-    tasks.step_04_sync_templates.delay.assert_called_once_with(str(job_id))
-    async with session_maker() as session:
-        job = await session.get(JobExecution, job_id)
-        stored = await session.get(Instance, instance_id)
-        assert job is not None
-        assert stored is not None
-        assert job.task_name == INSTANCE_CREATE_STEP_04_TASK
-        assert job.step == INSTANCE_CREATE_STEP_04
-        assert job.status is JobStatus.PENDING
-        assert stored.step == INSTANCE_CREATE_STEP_04
-        assert stored.status is InstanceStatus.PENDING
-
-    assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
     assert tasks.step_01_create_schema.run(str(job_id)) == {"status": "noop"}
     async with session_maker() as session:
         job = await session.get(JobExecution, job_id)
@@ -1383,7 +1386,7 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
         assert job is not None
         assert stored is not None
         assert job.status is JobStatus.SUCCESS
-        assert job.attempt == 4
+        assert job.attempt == 3
         assert stored.status is InstanceStatus.SUCCESS
         assert stored.step is None
         assert stored.argocd_application_name == f"coder-{instance['slug']}"
@@ -1400,6 +1403,10 @@ async def test_create_steps_advance_after_commit_and_finish_instance(
     assert response.status_code == 200
     assert response.json()["status"] == "success"
     assert (await client.get(f"/api/v1/jobs/{uuid4()}")).status_code == 404
+    assignments = await client.get(f"/api/v1/instances/{instance_id}/templates")
+    assert assignments.status_code == 200
+    assert assignments.json()["items"] == []
+    assert assignments.json()["total"] == 0
 
 
 async def test_create_failure_is_exactly_retryable_and_dispatch_loss_stays_pending(
@@ -1499,7 +1506,7 @@ async def test_bootstrap_stores_password_only_after_success_and_never_reprocesse
         )
         assert prepared_password == observed_passwords[0]
 
-    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
     assert len(observed_passwords) == 2
     assert observed_passwords[0] == observed_passwords[1]
     async with session_maker() as session:
@@ -1513,8 +1520,6 @@ async def test_bootstrap_stores_password_only_after_success_and_never_reprocesse
             .get_secret_value()
             == observed_passwords[0]
         )
-    assert tasks.step_04_sync_templates.run(str(job_id)) == {"status": "success"}
-
     redundant_job_id = uuid4()
     with sync_session_maker() as session:
         stored = session.get(Instance, instance_id)
@@ -1541,8 +1546,7 @@ async def test_bootstrap_stores_password_only_after_success_and_never_reprocesse
         "bootstrap_admin_account",
         lambda _url, _password: pytest.fail("remote bootstrap must not be called"),
     )
-    assert tasks.step_03_bootstrap_admin.run(str(redundant_job_id)) == {"status": "pending"}
-    assert tasks.step_04_sync_templates.run(str(redundant_job_id)) == {"status": "success"}
+    assert tasks.step_03_bootstrap_admin.run(str(redundant_job_id)) == {"status": "success"}
 
 
 async def test_bootstrap_recovers_remote_success_after_local_crash(
@@ -1607,16 +1611,14 @@ async def test_bootstrap_recovers_remote_success_after_local_crash(
         == INSTANCE_CREATE_STEP_03_TASK
     )
     assert (
-        advance_execution(
+        complete_execution(
             first_claim,
-            next_task_name=INSTANCE_CREATE_STEP_04_TASK,
-            next_step=INSTANCE_CREATE_STEP_04,
-            session_factory=sync_session_maker,
+            sync_session_maker,
             mutate=bootstrap_step_module._promote_password,
         )
         is False
     )
-    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "pending"}
+    assert tasks.step_03_bootstrap_admin.run(str(job_id)) == {"status": "success"}
     assert observed_passwords == [accepted_password, accepted_password]
     async with session_maker() as session:
         recovered = await session.get(Instance, instance_id)

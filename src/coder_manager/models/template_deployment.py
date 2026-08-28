@@ -11,7 +11,6 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     String,
-    UniqueConstraint,
     Uuid,
     func,
 )
@@ -20,8 +19,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
-    from coder_manager.models.instance import Instance
-    from coder_manager.models.template import Template
+    from coder_manager.models.template_assignment import TemplateAssignment
 
 
 class TemplateDeploymentStatus(StrEnum):
@@ -40,15 +38,10 @@ def enum_values(enum_type: type[StrEnum]) -> list[str]:
 
 
 class TemplateDeployment(Base):
-    """Store only the latest desired and applied state for one target."""
+    """Store the latest desired and applied state for one assignment."""
 
     __tablename__ = "template_deployments"
     __table_args__ = (
-        UniqueConstraint(
-            "template_id",
-            "instance_id",
-            name="uq_template_deployments_template_instance",
-        ),
         CheckConstraint(
             "target_commit IS NULL OR length(target_commit) = 40",
             name="target_commit_sha",
@@ -68,15 +61,11 @@ class TemplateDeployment(Base):
     )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    template_id: Mapped[UUID] = mapped_column(
-        ForeignKey("templates.id", ondelete="CASCADE"),
+    assignment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("template_assignments.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
-    )
-    instance_id: Mapped[UUID] = mapped_column(
-        ForeignKey("instances.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+        unique=True,
     )
     coder_organization_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
     coder_template_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
@@ -107,5 +96,4 @@ class TemplateDeployment(Base):
         onupdate=func.now(),
     )
 
-    template: Mapped["Template"] = relationship(back_populates="deployments")
-    instance: Mapped["Instance"] = relationship()
+    assignment: Mapped["TemplateAssignment"] = relationship(back_populates="deployment")

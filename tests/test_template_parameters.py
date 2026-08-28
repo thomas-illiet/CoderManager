@@ -22,7 +22,6 @@ from coder_manager.models import (
     TemplateParameterScope,
     TemplateParameterSystemValue,
     TemplateParameterType,
-    TemplateScope,
     TemplateSyncStatus,
 )
 from coder_manager.repositories import (
@@ -46,8 +45,6 @@ async def create_template(client: AsyncClient, name: str = "python") -> dict[str
         json={
             "display_name": name.title(),
             "name": name,
-            "scope": "global",
-            "application": None,
             "git_url": "https://git.example.com/template.git",
             "source_path": ".",
             "branch": "main",
@@ -65,8 +62,6 @@ def template_model() -> Template:
         id=uuid4(),
         display_name="Python",
         name="python",
-        scope=TemplateScope.GLOBAL,
-        application=None,
         git_url="https://git.example.com/template.git",
         source_path=".",
         branch="main",

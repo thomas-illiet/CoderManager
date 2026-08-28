@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from coder_manager.api.routes import (
     databases,
+    instance_templates,
     instances,
     jobs,
     members,
@@ -16,6 +17,7 @@ from coder_manager.api.routes import (
 api_router = APIRouter()
 api_router.include_router(databases.router)
 api_router.include_router(instances.router)
+api_router.include_router(instance_templates.router)
 api_router.include_router(jobs.router)
 api_router.include_router(members.router)
 api_router.include_router(templates.router)

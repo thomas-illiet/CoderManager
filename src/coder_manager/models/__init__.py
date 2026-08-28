@@ -11,7 +11,8 @@ from coder_manager.models.instance_kubernetes import InstanceKubernetes
 from coder_manager.models.job_execution import JobExecution, JobStatus
 from coder_manager.models.managed_database import Database, DatabaseAllocation
 from coder_manager.models.member import Member, MemberRole, MemberStatus
-from coder_manager.models.template import Template, TemplateScope, TemplateSyncStatus
+from coder_manager.models.template import Template, TemplateSyncStatus
+from coder_manager.models.template_assignment import TemplateAssignment, TemplateAssignmentStatus
 from coder_manager.models.template_deployment import (
     TemplateDeployment,
     TemplateDeploymentStatus,
@@ -41,6 +42,8 @@ __all__ = [
     "MemberRole",
     "MemberStatus",
     "Template",
+    "TemplateAssignment",
+    "TemplateAssignmentStatus",
     "TemplateDeployment",
     "TemplateDeploymentStatus",
     "TemplateImage",
@@ -49,7 +52,6 @@ __all__ = [
     "TemplateParameterSystemValue",
     "TemplateParameterType",
     "TemplateParameterValueTarget",
-    "TemplateScope",
     "TemplateSyncStatus",
     "Workspace",
     "WorkspaceStatus",

@@ -15,13 +15,12 @@ from coder_manager.models import Instance
 from coder_manager.tasks.common.execution import (
     ExecutionClaim,
     advance_execution,
+    complete_execution,
     owned_execution,
     run_claimed_step,
 )
 from coder_manager.tasks.common.registry import (
     INSTANCE_CREATE_STEP_03_TASK,
-    INSTANCE_CREATE_STEP_04,
-    INSTANCE_CREATE_STEP_04_TASK,
     INSTANCE_UPDATE_STEP_02,
     INSTANCE_UPDATE_STEP_02_TASK,
 )
@@ -100,20 +99,21 @@ def step_03_bootstrap_admin(job_id: str) -> dict[str, str]:
         if preparation.password is not None:
             coder.bootstrap_admin_account(preparation.instance_url, preparation.password)
 
-        advanced = advance_execution(
+        if preparation.is_update:
+            advanced = advance_execution(
+                claim,
+                next_task_name=INSTANCE_UPDATE_STEP_02_TASK,
+                next_step=INSTANCE_UPDATE_STEP_02,
+                session_factory=session_factory,
+                mutate=_promote_password,
+            )
+            return {"status": "pending" if advanced else "noop"}
+        completed = complete_execution(
             claim,
-            next_task_name=(
-                INSTANCE_UPDATE_STEP_02_TASK
-                if preparation.is_update
-                else INSTANCE_CREATE_STEP_04_TASK
-            ),
-            next_step=(
-                INSTANCE_UPDATE_STEP_02 if preparation.is_update else INSTANCE_CREATE_STEP_04
-            ),
-            session_factory=session_factory,
+            session_factory,
             mutate=_promote_password,
         )
-        return {"status": "pending" if advanced else "noop"}
+        return {"status": "success" if completed else "noop"}
 
     return run_claimed_step(
         job_id,

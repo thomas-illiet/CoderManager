@@ -10,13 +10,15 @@ from coder_manager.api.routes import templates as template_routes
 from coder_manager.api.routes import workspaces as workspace_routes
 from coder_manager.repositories import (
     TemplateAlreadyExistsError,
-    TemplateHasWorkspacesError,
+    TemplateAssignmentsInProgressError,
+    TemplateHasAssignmentsError,
     TemplateImageAlreadyExistsError,
     TemplateImageInUseError,
     TemplateImageNotFoundError,
     TemplateImageTemplateNotFoundError,
     TemplateNotFoundError,
     TemplateWorkspaceCompatibilityError,
+    TemplateWorkspacesInProgressError,
     WorkspaceAlreadyExistsError,
     WorkspaceBusyError,
     WorkspaceConfigurationError,
@@ -27,8 +29,8 @@ from coder_manager.repositories import (
     WorkspaceMemberNotFoundError,
     WorkspaceMemberUnavailableError,
     WorkspaceNotFoundError,
+    WorkspaceTemplateNotDeployedError,
     WorkspaceTemplateNotFoundError,
-    WorkspaceTemplateUnavailableError,
 )
 from coder_manager.schemas import (
     TemplateCreate,
@@ -45,8 +47,6 @@ def template_create_payload() -> TemplateCreate:
     return TemplateCreate(
         display_name="Python",
         name="python",
-        scope="global",
-        application=None,
         git_url="https://git.example.com/template.git",
         source_path=".",
         branch="main",
@@ -58,9 +58,7 @@ def template_update_payload() -> TemplateUpdate:
     """Build a valid template update schema."""
 
     create = template_create_payload()
-    return TemplateUpdate.model_validate(
-        create.model_dump(exclude={"scope", "application", "name"})
-    )
+    return TemplateUpdate.model_validate(create.model_dump(exclude={"name"}))
 
 
 def workspace_create_payload() -> WorkspaceCreate:
@@ -96,8 +94,8 @@ def workspace_update_payload() -> WorkspaceUpdate:
         (WorkspaceMemberNotFoundError, 404),
         (WorkspaceImageNotFoundError, 404),
         (WorkspaceInstanceBusyError, 409),
+        (WorkspaceTemplateNotDeployedError, 409),
         (WorkspaceMemberUnavailableError, 409),
-        (WorkspaceTemplateUnavailableError, 422),
         (WorkspaceImageUnavailableError, 422),
         (WorkspaceConfigurationError, 422),
         (WorkspaceAlreadyExistsError, 409),
@@ -136,6 +134,7 @@ async def test_create_workspace_error_mapping(
         (WorkspaceImageNotFoundError, 404),
         (WorkspaceInstanceBusyError, 409),
         (WorkspaceBusyError, 409),
+        (WorkspaceTemplateNotDeployedError, 409),
         (WorkspaceImageUnavailableError, 422),
         (WorkspaceConfigurationError, 422),
         (WorkspaceAlreadyExistsError, 409),
@@ -174,6 +173,7 @@ async def test_update_workspace_error_mapping(
         (WorkspaceInstanceNotFoundError, 404),
         (WorkspaceInstanceBusyError, 409),
         (WorkspaceBusyError, 409),
+        (WorkspaceTemplateNotDeployedError, 409),
     ],
 )
 async def test_delete_workspace_error_mapping(
@@ -263,10 +263,11 @@ async def test_template_image_error_mapping(
     [
         ("create", TemplateAlreadyExistsError, 409),
         ("update", TemplateNotFoundError, 404),
-        ("update", TemplateAlreadyExistsError, 409),
+        ("update", TemplateAssignmentsInProgressError, 409),
+        ("update", TemplateWorkspacesInProgressError, 409),
         ("update", TemplateWorkspaceCompatibilityError, 409),
         ("delete", TemplateNotFoundError, 404),
-        ("delete", TemplateHasWorkspacesError, 409),
+        ("delete", TemplateHasAssignmentsError, 409),
     ],
 )
 async def test_template_error_mapping(

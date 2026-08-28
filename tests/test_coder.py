@@ -15,13 +15,16 @@ from coder_manager.domains.coder import (
     CoderClient,
     CoderFirstUserConflictError,
     CoderRequestError,
+    CoderTemplate,
     CoderWorkspace,
     CoderWorkspaceBuild,
     CoderWorkspacePage,
     WorkspaceStopSubmissions,
     cleanup_user_accounts,
     delete_all_workspaces,
+    delete_template_workspaces,
     delete_user_accounts,
+    list_template_workspaces,
     stop_active_workspaces,
     submit_active_workspace_stops,
 )
@@ -61,6 +64,7 @@ def test_workspace_stop_http_contract_and_strict_response_validation() -> None:
     """List active workspaces, submit a stop build, and observe its result."""
 
     workspace_id = uuid4()
+    template_id = uuid4()
     build_id = uuid4()
     requests: list[httpx.Request] = []
 
@@ -75,6 +79,8 @@ def test_workspace_stop_http_contract_and_strict_response_validation() -> None:
                     "workspaces": [
                         {
                             "id": str(workspace_id),
+                            "name": "alice-development",
+                            "template_id": str(template_id),
                             "latest_build": {
                                 "id": str(build_id),
                                 "status": "running",
@@ -109,6 +115,9 @@ def test_workspace_stop_http_contract_and_strict_response_validation() -> None:
                 id=workspace_id,
                 status="running",
                 latest_build_id=build_id,
+                latest_build_transition="start",
+                name="alice-development",
+                template_id=template_id,
             ),
         ),
         count=1,
@@ -1976,6 +1985,157 @@ def test_template_creation_http_contract() -> None:
     assert json.loads(create_version.content)["user_variable_values"] == [
         {"name": "registry_url", "value": "registry.dev.example.com"}
     ]
+
+
+def test_template_lookup_exposes_active_version_and_delete_is_idempotent() -> None:
+    """Recover templates by ID or name and treat a DELETE 404 as convergence."""
+
+    organization_id = uuid4()
+    template_id = uuid4()
+    version_id = uuid4()
+    missing_id = uuid4()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return one managed template and verified absence for the other operations."""
+
+        requests.append(request)
+        if request.method == "DELETE":
+            return httpx.Response(httpx.codes.NOT_FOUND)
+        if request.url.path.endswith(
+            (f"/templates/{missing_id}", f"/templateversions/{missing_id}")
+        ):
+            return httpx.Response(httpx.codes.NOT_FOUND)
+        return httpx.Response(
+            httpx.codes.OK,
+            json={
+                "id": str(template_id),
+                "active_version_id": str(version_id),
+            },
+        )
+
+    with CoderClient(
+        "https://coder.example.test",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        expected = CoderTemplate(template_id, version_id)
+        assert client.template_by_name(organization_id, "python") == expected
+        assert client.template(template_id) == expected
+        assert client.template(missing_id) is None
+        assert client.template_version_for_recovery(missing_id) is None
+        client.delete_template(template_id)
+
+    assert [request.method for request in requests] == [
+        "GET",
+        "GET",
+        "GET",
+        "GET",
+        "DELETE",
+    ]
+
+
+def test_template_workspace_services_filter_and_delete_only_the_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enumerate all pages but delete only workspaces tied to the selected template ID."""
+
+    template_id = uuid4()
+    other_template_id = uuid4()
+    selected_id = uuid4()
+    other_id = uuid4()
+    submitted: list[UUID] = []
+    scans = 0
+
+    class StubClient:
+        """Expose a stable mixed-template inventory followed by target convergence."""
+
+        def __init__(self, instance_url: str) -> None:
+            """Validate the target Coder endpoint."""
+
+            assert instance_url == "https://coder.example.test"
+
+        def __enter__(self) -> Self:
+            """Return the fake context-managed client."""
+
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            """Close the fake context-managed client."""
+
+            self.close()
+
+        def authenticate_prepared_admin(self, password: SecretStr) -> None:
+            """Accept only the prepared test administrator password."""
+
+            assert password is PASSWORD
+
+        def close(self) -> None:
+            """Close the no-op fake client."""
+
+        def workspaces(
+            self,
+            *,
+            status: str | None,
+            offset: int,
+            limit: int,
+        ) -> CoderWorkspacePage:
+            """Return both templates before deletion and only the unrelated one after it."""
+
+            nonlocal scans
+            assert status is None
+            assert offset == 0
+            assert limit == 100
+            scans += 1
+            selected = CoderWorkspace(
+                id=selected_id,
+                status="stopped",
+                latest_build_id=uuid4(),
+                latest_build_transition="stop",
+                template_id=template_id,
+            )
+            other = CoderWorkspace(
+                id=other_id,
+                status="stopped",
+                latest_build_id=uuid4(),
+                latest_build_transition="stop",
+                template_id=other_template_id,
+            )
+            if submitted:
+                return CoderWorkspacePage(items=(other,), count=1)
+            return CoderWorkspacePage(items=(selected, other), count=2)
+
+        def create_workspace_delete_build(self, workspace_id: UUID) -> CoderWorkspaceBuild:
+            """Complete the selected workspace deletion immediately."""
+
+            submitted.append(workspace_id)
+            return CoderWorkspaceBuild(
+                id=uuid4(),
+                status="deleted",
+                transition="delete",
+            )
+
+        def workspace_build(self, _build_id: UUID) -> CoderWorkspaceBuild:
+            """Reject polling because submitted builds complete immediately."""
+
+            pytest.fail("completed delete build must not be polled")
+
+    monkeypatch.setattr(coder_service, "CoderClient", StubClient)
+    listed = list_template_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        template_id,
+    )
+    assert tuple(workspace.id for workspace in listed) == (selected_id,)
+    deleted = delete_template_workspaces(
+        "https://coder.example.test",
+        PASSWORD,
+        template_id,
+        timeout_seconds=5,
+        poll_interval_seconds=0.001,
+    )
+    assert deleted == (str(selected_id),)
+    assert submitted == [selected_id]
+    assert scans == 3
 
 
 def test_existing_archived_template_version_can_be_reactivated() -> None:

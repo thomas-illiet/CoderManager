@@ -3,7 +3,7 @@
 import re
 from datetime import datetime
 from pathlib import PurePosixPath
-from typing import Annotated, Self
+from typing import Annotated
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -13,11 +13,7 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
-    model_validator,
 )
-
-from coder_manager.models import TemplateScope
-from coder_manager.schemas.application_identifier import ApplicationIdentifier
 
 NonEmptyString = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=255)
@@ -133,8 +129,6 @@ class TemplateCreate(TemplateMutableFields):
 
     modules: ModuleList = Field(default_factory=list)
     name: TemplateName
-    scope: TemplateScope
-    application: ApplicationIdentifier | None = None
 
     @field_validator("name")
     @classmethod
@@ -146,18 +140,6 @@ class TemplateCreate(TemplateMutableFields):
             msg = "name must be a lowercase Coder slug"
             raise ValueError(msg)
         return normalized
-
-    @model_validator(mode="after")
-    def validate_scope(self) -> Self:
-        """Ensure the application reference agrees with the selected scope."""
-
-        if self.scope is TemplateScope.GLOBAL and self.application is not None:
-            msg = "application must be null for a global template"
-            raise ValueError(msg)
-        if self.scope is TemplateScope.APPLICATION and self.application is None:
-            msg = "application is required for an application template"
-            raise ValueError(msg)
-        return self
 
 
 class TemplateUpdate(TemplateMutableFields):
@@ -172,8 +154,6 @@ class TemplateRead(BaseModel):
     id: UUID
     display_name: str
     name: str
-    scope: TemplateScope
-    application: str | None
     git_url: str
     source_path: str
     branch: str
@@ -183,17 +163,6 @@ class TemplateRead(BaseModel):
     updated_at: datetime
 
 
-class TemplateDeploymentStatistics(BaseModel):
-    """Current deployment counts for one Coder template."""
-
-    template_id: UUID
-    name: str
-    display_name: str
-    updated: int
-    outdated: int
-    missing: int
-
-
 class TemplateListQuery(BaseModel):
     """Validated filters and pagination for the template list."""
 
@@ -201,8 +170,6 @@ class TemplateListQuery(BaseModel):
 
     page: Annotated[int, Field(ge=1)] = 1
     page_size: Annotated[int, Field(ge=1, le=100)] = 20
-    scope: TemplateScope | None = None
-    application: ApplicationIdentifier | None = None
     display_name: Annotated[
         str | None,
         StringConstraints(strip_whitespace=True, min_length=1, max_length=255),

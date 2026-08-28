@@ -15,11 +15,13 @@ from coder_manager.models import (
     Member,
     MemberStatus,
     Template,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
     TemplateDeployment,
     TemplateImage,
     TemplateParameter,
     TemplateParameterType,
-    TemplateScope,
+    TemplateSyncStatus,
     Workspace,
     WorkspaceStatus,
 )
@@ -61,10 +63,6 @@ class WorkspaceInstanceBusyError(Exception):
 
 class WorkspaceTemplateNotFoundError(Exception):
     """Raised when a workspace references an unknown template."""
-
-
-class WorkspaceTemplateUnavailableError(Exception):
-    """Raised when a template is unavailable to the workspace instance."""
 
 
 class WorkspaceMemberNotFoundError(Exception):
@@ -160,7 +158,7 @@ class WorkspaceRepository:
         # Lock and validate every referenced record before constructing the workspace.
         instance = await self._lock_available_instance(payload.instance_id)
         template = await self._lock_template(payload.template_id)
-        await self._validate_template_scope(template, instance)
+        await self._require_remote_template(template.id, instance.id)
         await self._validate_owner(payload.member_id, instance.id)
         await self._validate_image(payload.image_id, template.id)
         await self._validate_modules(template, payload.modules)
@@ -169,7 +167,6 @@ class WorkspaceRepository:
             payload.parameters,
             previous=None,
         )
-        await self._require_remote_template(template.id, instance.id)
 
         # Persist the validated configuration as one pending lifecycle operation.
         workspace_id = uuid4()
@@ -212,6 +209,7 @@ class WorkspaceRepository:
         await self._ensure_workspace_available(workspace)
         await self._lock_available_instance(workspace.instance_id)
         template = await self._lock_template(workspace.template_id)
+        await self._require_remote_template(template.id, workspace.instance_id)
         await self._validate_image(payload.image_id, template.id)
         await self._validate_modules(template, payload.modules)
         parameters = await self._resolve_parameters(
@@ -265,6 +263,8 @@ class WorkspaceRepository:
         workspace = await self._lock_workspace(workspace_id)
         await self._ensure_workspace_available(workspace)
         await self._lock_available_instance(workspace.instance_id)
+        await self._lock_template(workspace.template_id)
+        await self._require_remote_template(workspace.template_id, workspace.instance_id)
         workspace.action = "deleting"
         workspace.status = WorkspaceStatus.PENDING
         job = add_job_execution(
@@ -380,16 +380,6 @@ class WorkspaceRepository:
             await self._session.rollback()
             raise WorkspaceBusyError
 
-    async def _validate_template_scope(self, template: Template, instance: Instance) -> None:
-        """Ensure an application-scoped template belongs to the instance application."""
-
-        if (
-            template.scope is TemplateScope.APPLICATION
-            and template.application != instance.application
-        ):
-            await self._session.rollback()
-            raise WorkspaceTemplateUnavailableError
-
     async def _validate_modules(
         self,
         template: Template,
@@ -458,9 +448,18 @@ class WorkspaceRepository:
         """Require any known remote template, even when its version is outdated."""
 
         remote_template_id = await self._session.scalar(
-            select(TemplateDeployment.coder_template_id).where(
-                TemplateDeployment.template_id == template_id,
-                TemplateDeployment.instance_id == instance_id,
+            select(TemplateDeployment.coder_template_id)
+            .join(
+                TemplateAssignment,
+                TemplateAssignment.id == TemplateDeployment.assignment_id,
+            )
+            .join(Template, Template.id == TemplateAssignment.template_id)
+            .where(
+                TemplateAssignment.template_id == template_id,
+                TemplateAssignment.instance_id == instance_id,
+                TemplateAssignment.action == "created",
+                TemplateAssignment.status == TemplateAssignmentStatus.SUCCESS,
+                Template.sync_status == TemplateSyncStatus.SUCCESS,
                 TemplateDeployment.coder_template_id.is_not(None),
             )
         )

@@ -12,6 +12,8 @@ from sqlalchemy.orm import selectinload
 
 from coder_manager.models import (
     Template,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
     TemplateParameter,
     TemplateParameterScope,
     TemplateParameterSystemValue,
@@ -253,7 +255,28 @@ class TemplateParameterRepository:
         if template is None:
             await self._session.rollback()
             raise TemplateParameterTemplateNotFoundError
-        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+        if template.sync_status in {
+            TemplateSyncStatus.PENDING,
+            TemplateSyncStatus.RUNNING,
+            TemplateSyncStatus.ERROR,
+        }:
+            await self._session.rollback()
+            raise TemplateParameterSyncInProgressError
+        assignment_id = await self._session.scalar(
+            select(TemplateAssignment.id)
+            .where(
+                TemplateAssignment.template_id == template_id,
+                TemplateAssignment.status.in_(
+                    {
+                        TemplateAssignmentStatus.PENDING,
+                        TemplateAssignmentStatus.RUNNING,
+                        TemplateAssignmentStatus.ERROR,
+                    }
+                ),
+            )
+            .limit(1)
+        )
+        if assignment_id is not None:
             await self._session.rollback()
             raise TemplateParameterSyncInProgressError
         return template

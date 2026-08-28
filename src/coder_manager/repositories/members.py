@@ -3,11 +3,21 @@
 from collections.abc import Collection
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from coder_manager.models import Instance, InstanceStatus, Member, MemberStatus, Workspace
+from coder_manager.models import (
+    Instance,
+    InstanceStatus,
+    Member,
+    MemberStatus,
+    Template,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
+    TemplateSyncStatus,
+    Workspace,
+)
 from coder_manager.repositories.job_executions import add_job_execution
 from coder_manager.schemas import MemberCreate, MemberRoleUpdate
 from coder_manager.tasks.common.registry import (
@@ -212,6 +222,33 @@ class MemberRepository:
         if instance is None:
             await self._session.rollback()
             raise MemberInstanceNotFoundError
+        assignment_id = await self._session.scalar(
+            select(TemplateAssignment.id)
+            .join(Template, Template.id == TemplateAssignment.template_id)
+            .where(
+                TemplateAssignment.instance_id == instance_id,
+                or_(
+                    TemplateAssignment.status.in_(
+                        {
+                            TemplateAssignmentStatus.PENDING,
+                            TemplateAssignmentStatus.RUNNING,
+                            TemplateAssignmentStatus.ERROR,
+                        }
+                    ),
+                    Template.sync_status.in_(
+                        {
+                            TemplateSyncStatus.PENDING,
+                            TemplateSyncStatus.RUNNING,
+                            TemplateSyncStatus.ERROR,
+                        }
+                    ),
+                ),
+            )
+            .limit(1)
+        )
+        if assignment_id is not None:
+            await self._session.rollback()
+            raise MemberInstanceBusyError
         update_in_progress = (
             instance.action == "updating"
             and instance.step == INSTANCE_UPDATE_STEP_01

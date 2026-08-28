@@ -37,6 +37,16 @@ from coder_manager.repositories.members import (
     MemberProtectedAdministratorError,
     MemberRepository,
 )
+from coder_manager.repositories.template_assignments import (
+    TemplateAssignmentActionConflictError,
+    TemplateAssignmentInstanceNotFoundError,
+    TemplateAssignmentInstanceUnavailableError,
+    TemplateAssignmentJobConflictError,
+    TemplateAssignmentRepository,
+    TemplateAssignmentSyncInProgressError,
+    TemplateAssignmentTemplateNotFoundError,
+    TemplateAssignmentWorkspacesBusyError,
+)
 from coder_manager.repositories.template_images import (
     TemplateImageAlreadyExistsError,
     TemplateImageInUseError,
@@ -54,11 +64,13 @@ from coder_manager.repositories.template_parameters import (
 )
 from coder_manager.repositories.templates import (
     TemplateAlreadyExistsError,
-    TemplateHasWorkspacesError,
+    TemplateAssignmentsInProgressError,
+    TemplateHasAssignmentsError,
     TemplateNotFoundError,
     TemplateRepository,
     TemplateSyncInProgressError,
     TemplateWorkspaceCompatibilityError,
+    TemplateWorkspacesInProgressError,
 )
 from coder_manager.repositories.workspaces import (
     InvalidWorkspaceActionError,
@@ -77,7 +89,6 @@ from coder_manager.repositories.workspaces import (
     WorkspaceRepository,
     WorkspaceTemplateNotDeployedError,
     WorkspaceTemplateNotFoundError,
-    WorkspaceTemplateUnavailableError,
 )
 
 __all__ = [
@@ -109,7 +120,16 @@ __all__ = [
     "MemberProtectedAdministratorError",
     "MemberRepository",
     "TemplateAlreadyExistsError",
-    "TemplateHasWorkspacesError",
+    "TemplateAssignmentActionConflictError",
+    "TemplateAssignmentInstanceNotFoundError",
+    "TemplateAssignmentInstanceUnavailableError",
+    "TemplateAssignmentJobConflictError",
+    "TemplateAssignmentRepository",
+    "TemplateAssignmentSyncInProgressError",
+    "TemplateAssignmentTemplateNotFoundError",
+    "TemplateAssignmentWorkspacesBusyError",
+    "TemplateAssignmentsInProgressError",
+    "TemplateHasAssignmentsError",
     "TemplateImageAlreadyExistsError",
     "TemplateImageInUseError",
     "TemplateImageNotFoundError",
@@ -125,6 +145,7 @@ __all__ = [
     "TemplateRepository",
     "TemplateSyncInProgressError",
     "TemplateWorkspaceCompatibilityError",
+    "TemplateWorkspacesInProgressError",
     "WorkspaceActionConflictError",
     "WorkspaceAlreadyExistsError",
     "WorkspaceBusyError",
@@ -140,6 +161,5 @@ __all__ = [
     "WorkspaceRepository",
     "WorkspaceTemplateNotDeployedError",
     "WorkspaceTemplateNotFoundError",
-    "WorkspaceTemplateUnavailableError",
     "add_job_execution",
 ]

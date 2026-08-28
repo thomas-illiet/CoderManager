@@ -246,6 +246,8 @@ class CoderClient:
                     status=build_status,
                     latest_build_id=self._uuid_field(latest_build, "id", path),
                     latest_build_transition=transition,
+                    name=item.get("name") if isinstance(item.get("name"), str) else "",
+                    template_id=self._optional_uuid_field(item, "template_id", path),
                 )
             )
         expected_items = min(limit, max(count - offset, 0))
@@ -389,15 +391,33 @@ class CoderClient:
         return self._uuid_field(defaults[0], "id", path)
 
     def template_by_name(self, organization_id: UUID, name: str) -> CoderTemplate | None:
-        """Find an adopted template by its stable technical name."""
+        """Find a remote template by its stable technical name."""
 
         path = f"api/v2/organizations/{organization_id}/templates/{name}"
         response = self._client.get(path)
         if response.status_code == httpx.codes.NOT_FOUND:
             return None
         self._raise_for_response(response, "GET", path, httpx.codes.OK)
-        payload = self._json_object(response, path)
-        return CoderTemplate(id=self._uuid_field(payload, "id", path))
+        return self._template(response, path)
+
+    def template(self, template_id: UUID) -> CoderTemplate | None:
+        """Find a remote template by persisted ID for retry recovery."""
+
+        path = f"api/v2/templates/{template_id}"
+        response = self._client.get(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        return self._template(response, path)
+
+    def delete_template(self, template_id: UUID) -> None:
+        """Delete one template, treating an absent remote template as converged."""
+
+        path = f"api/v2/templates/{template_id}"
+        response = self._client.delete(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return
+        self._raise_for_response(response, "DELETE", path, httpx.codes.OK)
 
     def template_version_by_name(
         self,
@@ -422,6 +442,19 @@ class CoderClient:
 
         path = f"api/v2/templateversions/{version_id}"
         response = self._client.get(path)
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        return self._template_version(response, path)
+
+    def template_version_for_recovery(
+        self,
+        version_id: UUID,
+    ) -> CoderTemplateVersion | None:
+        """Read a persisted retry version, treating external deletion as absence."""
+
+        path = f"api/v2/templateversions/{version_id}"
+        response = self._client.get(path)
+        if response.status_code == httpx.codes.NOT_FOUND:
+            return None
         self._raise_for_response(response, "GET", path, httpx.codes.OK)
         return self._template_version(response, path)
 
@@ -488,8 +521,7 @@ class CoderClient:
             },
         )
         self._raise_for_response(response, "POST", path, httpx.codes.OK)
-        payload = self._json_object(response, path)
-        return CoderTemplate(id=self._uuid_field(payload, "id", path))
+        return self._template(response, path)
 
     def activate_template_version(self, template_id: UUID, version_id: UUID) -> None:
         """Make one successful version active on an adopted template."""
@@ -582,6 +614,22 @@ class CoderClient:
             msg = f"Coder {path} returned an invalid {field}"
             raise CoderRequestError(msg) from error
 
+    @staticmethod
+    def _optional_uuid_field(
+        payload: dict[str, Any],
+        field: str,
+        path: str,
+    ) -> UUID | None:
+        """Decode one optional UUID while rejecting malformed present values."""
+
+        if field not in payload or payload[field] is None:
+            return None
+        try:
+            return UUID(str(payload[field]))
+        except (TypeError, ValueError) as error:
+            msg = f"Coder {path} returned an invalid {field}"
+            raise CoderRequestError(msg) from error
+
     @classmethod
     def _template_version(
         cls,
@@ -599,6 +647,20 @@ class CoderClient:
             id=cls._uuid_field(payload, "id", path),
             status=job["status"],
             archived=payload.get("archived") is True,
+        )
+
+    @classmethod
+    def _template(
+        cls,
+        response: httpx.Response,
+        path: str,
+    ) -> CoderTemplate:
+        """Decode the stable and active identities required for safe recovery."""
+
+        payload = cls._json_object(response, path)
+        return CoderTemplate(
+            id=cls._uuid_field(payload, "id", path),
+            active_version_id=cls._optional_uuid_field(payload, "active_version_id", path),
         )
 
     @classmethod

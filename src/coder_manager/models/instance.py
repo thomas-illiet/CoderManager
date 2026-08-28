@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from coder_manager.models.job_execution import JobExecution
     from coder_manager.models.managed_database import DatabaseAllocation
     from coder_manager.models.member import Member
+    from coder_manager.models.template_assignment import TemplateAssignment
     from coder_manager.models.workspace import Workspace
 
 
@@ -152,6 +153,10 @@ class Instance(Base):
         passive_deletes=True,
     )
     workspaces: Mapped[list["Workspace"]] = relationship(
+        back_populates="instance",
+        passive_deletes=True,
+    )
+    template_assignments: Mapped[list["TemplateAssignment"]] = relationship(
         back_populates="instance",
         passive_deletes=True,
     )

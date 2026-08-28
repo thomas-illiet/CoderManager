@@ -9,6 +9,7 @@ class CoderTemplate:
     """Remote Coder template identity."""
 
     id: UUID
+    active_version_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)

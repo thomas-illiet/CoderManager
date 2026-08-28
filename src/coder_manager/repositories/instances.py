@@ -4,7 +4,7 @@ import secrets
 import string
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -18,6 +18,10 @@ from coder_manager.models import (
     InstanceStatus,
     Member,
     MemberStatus,
+    Template,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
+    TemplateSyncStatus,
 )
 from coder_manager.repositories.job_executions import add_job_execution
 from coder_manager.schemas import InstanceCreate
@@ -226,6 +230,9 @@ class InstanceRepository:
         if instance is None:
             await self._session.rollback()
             raise InstanceNotFoundError
+        if await self._has_active_template_assignment(instance.id):
+            await self._session.rollback()
+            raise InstanceActionConflictError
         failed_creation = instance.action == "creating" and instance.status is InstanceStatus.ERROR
         successfully_reconciled = (
             instance.action
@@ -286,6 +293,7 @@ class InstanceRepository:
             _creation_is_incomplete(instance)
             or instance.action == "deleting"
             or instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}
+            or await self._has_active_template_assignment(instance.id)
         ):
             await self._session.rollback()
             raise InstanceActionConflictError
@@ -369,6 +377,7 @@ class InstanceRepository:
             _creation_is_incomplete(instance)
             or instance.action == "deleting"
             or instance.status in {InstanceStatus.PENDING, InstanceStatus.RUNNING}
+            or await self._has_active_template_assignment(instance.id)
         ):
             await self._session.rollback()
             raise InstanceActionConflictError
@@ -394,6 +403,35 @@ class InstanceRepository:
         if stored_instance is None:  # pragma: no cover - protected by the successful commit
             raise InstanceNotFoundError
         return stored_instance
+
+    async def _has_active_template_assignment(self, instance_id: UUID) -> bool:
+        """Return whether template convergence currently owns the instance."""
+
+        assignment_id = await self._session.scalar(
+            select(TemplateAssignment.id)
+            .join(Template, Template.id == TemplateAssignment.template_id)
+            .where(
+                TemplateAssignment.instance_id == instance_id,
+                or_(
+                    TemplateAssignment.status.in_(
+                        {
+                            TemplateAssignmentStatus.PENDING,
+                            TemplateAssignmentStatus.RUNNING,
+                            TemplateAssignmentStatus.ERROR,
+                        }
+                    ),
+                    Template.sync_status.in_(
+                        {
+                            TemplateSyncStatus.PENDING,
+                            TemplateSyncStatus.RUNNING,
+                            TemplateSyncStatus.ERROR,
+                        }
+                    ),
+                ),
+            )
+            .limit(1)
+        )
+        return assignment_id is not None
 
     async def update_action(
         self,

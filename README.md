@@ -1,8 +1,9 @@
 # Coder Manager
 
 FastAPI and Celery foundation for managing Coder infrastructure. Business applications are owned
-by an external system and represented here only by normalized identifiers on instances and scoped
-templates. Argo CD Applications remain managed as part of the instance lifecycle.
+by an external system and represented here only by normalized identifiers on instances. Templates
+form one global catalog and are assigned explicitly to individual instances; no template is
+assigned by default. Argo CD Applications remain managed as part of the instance lifecycle.
 
 ## Stack
 
@@ -31,10 +32,11 @@ expose `/metrics` or `/health` on its application port `8000`. The migration con
 pending migrations before the API, worker, and Beat scheduler start.
 
 The migration chain starts with the fresh-install baseline `a868aa80dbea`, removes the persisted
-`instances.instance_url` column, and adds private durable storage for an administrator bootstrap
-candidate. A database already on the baseline can upgrade normally. Databases created from
-migration histories older than `a868aa80dbea` remain incompatible: recreate PostgreSQL rather than
-using `alembic stamp`.
+`instances.instance_url` column, adds private durable storage for an administrator bootstrap
+candidate, and replaces legacy template placement with explicit instance assignments. The last
+change deliberately creates no assignment or deployment backfill and therefore requires
+`template_deployments` to be empty before upgrade. Databases created from migration histories older
+than `a868aa80dbea` remain incompatible: recreate PostgreSQL rather than using `alembic stamp`.
 
 To run Python tooling directly on the host:
 
@@ -165,8 +167,10 @@ All endpoints are under `/api/v1`:
 | `POST` | `/instances/{id}/members` | Request member creation |
 | `PUT` | `/instances/{id}/members/{member_id}` | Request a member role change |
 | `DELETE` | `/instances/{id}/members/{member_id}` | Request member deletion |
-| `GET` | `/templates?page=1&page_size=20&scope=global` | Paginated template list |
-| `GET` | `/templates/statistics` | Per-template deployment statistics |
+| `GET` | `/instances/{id}/templates?page=1&page_size=20` | List templates explicitly assigned to an instance |
+| `PUT` | `/instances/{id}/templates/{template_id}` | Assign one template to an instance |
+| `DELETE` | `/instances/{id}/templates/{template_id}` | Remove one template from an instance |
+| `GET` | `/templates?page=1&page_size=20&display_name=Python` | Paginated template catalog |
 | `GET` | `/templates/{id}` | Get one template |
 | `GET` | `/templates/{id}/modules` | Get a template's module names |
 | `POST` | `/templates` | Create a template |
@@ -449,8 +453,9 @@ member and job retryable. The bootstrap `admin` account and usernames configured
 
 ## Templates API
 
-Templates are either global or attached to one externally managed application identifier. Template
-names are case-insensitively unique among global templates and separately within each application.
+Templates form a catalog independent from applications and instances. Their technical `name` is
+globally unique case-insensitively; `display_name` is a mutable human-readable label and does not
+participate in uniqueness.
 
 Creation payload:
 
@@ -458,8 +463,6 @@ Creation payload:
 {
   "display_name": "Python Development",
   "name": "python-development",
-  "scope": "application",
-  "application": "MY-BUSINESS-APPLICATION",
   "git_url": "git@git.example.com:coder/python-template.git",
   "source_path": "templates/python",
   "branch": "main",
@@ -474,24 +477,55 @@ returns an empty list:
 {
   "display_name": "Managed Desktop",
   "name": "managed-desktop",
-  "scope": "global",
-  "application": null,
   "git_url": "https://git.example.com/coder/managed-desktop.git",
   "source_path": ".",
   "branch": "main"
 }
 ```
 
-Set `scope` to `global` and `application` to `null` for a global template. Application identifiers
-are normalized like instance identifiers and are not checked against an internal catalog.
 `display_name` is the mutable human-readable label. `name` is the immutable lowercase slug used
 inside Coder. Git URLs accept HTTPS, `ssh://`, or
 SCP-style SSH syntax. `source_path` is repository-relative and defaults to `.`, while `branch`
 targets one exact `refs/heads/...` branch. On creation, modules default to an empty list; when
 present, they must be ordered without duplicates. PUT replaces `display_name`, `git_url`,
-`source_path`, `branch`, and `modules`; scope, application, and `name` remain immutable. Only module
-compatibility is checked against existing workspaces. The removed CPU, RAM, and disk fields are
-rejected with HTTP 422. `GET /templates/{id}/modules` returns the module array directly.
+`source_path`, `branch`, and `modules`; `name` remains immutable. Only module compatibility is
+checked against existing workspaces. The removed CPU, RAM, and disk fields are rejected with HTTP
+422. `GET /templates/{id}/modules` returns the module array directly. The list
+supports only pagination and an optional case-insensitive literal `display_name` substring filter.
+
+Template updates and synchronizations return HTTP 409 while an explicit assignment is `pending`,
+`running`, or `error`, or while a workspace mutation using the template is retryable. Catalog
+deletion is also rejected while the template is synchronizing or while any instance assignment
+still references it; remove every assignment through the instance route first.
+
+### Explicit instance assignments
+
+Creating an instance or a catalog template does not deploy or select any template. Assignment is
+always explicit and addresses exactly one instance/template pair:
+
+- `GET /instances/{instance_id}/templates?page=1&page_size=20` returns an
+  `InstanceTemplatePage`. Reads remain available when the instance is stopped or busy; an unknown
+  instance returns HTTP 404.
+- `PUT /instances/{instance_id}/templates/{template_id}` takes no request body. It returns HTTP 202
+  with `JobResourceResponse<InstanceTemplateRead>` for a new or retryable asynchronous creation,
+  and HTTP 200 when the pair is already `created/success`.
+- `DELETE /instances/{instance_id}/templates/{template_id}` returns HTTP 202 with the same wrapper
+  for a new or retryable removal. It returns an empty HTTP 204 when the pair is already absent,
+  after still validating that both the instance and catalog template exist.
+
+`InstanceTemplateRead` contains the assignment UUID, instance UUID, nested catalog template,
+`action`, `status`, `job_id`, `step`, deployment status, target/applied commits, target/applied
+system-parameter revisions, and timestamps. Assignment actions are `creating`, `created`, and
+`deleting`; statuses are `pending`, `running`, `success`, and `error`. Repeated accepted requests
+retain the same durable job so Beat can retry failures safely.
+
+PUT and an existing-assignment DELETE require the instance to be strictly `started/success` and the
+catalog synchronization status to be `success`; a `pending`, `running`, or `error` synchronization,
+a conflicting assignment action, or an inconsistent durable job returns HTTP 409.
+Deletion is additionally rejected while a workspace for that pair is `pending`, `running`, or
+`error`. Successful workspaces do not block removal: the worker deletes every remote workspace built
+from the assigned Coder template, deletes the remote template, then removes the local workspaces,
+deployment, and assignment. A failed remote operation keeps the assignment and job retryable.
 
 ### Template parameters
 
@@ -546,23 +580,18 @@ System values are encrypted with AES-256-GCM using the parameter UUID and concre
 associated data. Reads expose only `value_configured` or the three `values_configured` flags.
 Omitting `value` or `values` on PUT retains the existing encrypted values; changing only display
 metadata does not advance the system parameter revision. `type`, `name`, and system `scope` cannot
-be changed. Parameter mutations are rejected while that template is synchronizing.
+be changed. Parameter mutations are rejected while that template is synchronizing or an assignment
+transition for it remains retryable.
 
 `POST /templates/{id}/sync` returns an empty HTTP 202 response after committing a durable
-fire-and-forget job. The worker fetches the current branch HEAD once and synchronizes it to every
-ready compatible instance. Global templates target all ready instances; application templates
-target only matching normalized application identifiers. System parameters are resolved for each
-instance environment and sent to Coder as `user_variable_values`. The version name is
-`git-<commit>-p<system_parameter_revision>`. A system value change immediately makes existing
-deployments outdated, but synchronization remains manual. CoderManager stores only the current
-per-instance deployment state and exposes no local template-version history.
-
-`GET /templates/statistics` returns one object per template with `updated`, `outdated`, and
-`missing` ready-server counts. `updated` means the durable deployment state is successful and both
-its applied commit and applied system parameter revision match their targets and the current
-template revision. Any other existing deployment is `outdated`, while a compatible ready instance
-without a deployment is `missing`. The endpoint reads only the local database and does not contact
-Git or Coder.
+fire-and-forget job. The worker fetches the current branch HEAD once and synchronizes only explicit
+`created/success` assignments whose instances are currently `started/success`; it never creates a
+missing assignment and there is no automatic instance-bootstrap synchronization. System parameters
+are resolved for each target environment and sent to Coder as `user_variable_values`. The version
+name is `git-<commit>-p<system_parameter_revision>`. A system value change immediately makes an
+existing deployment outdated, but synchronization remains manual. CoderManager stores only the
+current deployment state for each assignment and exposes it through the instance-template list; it
+keeps no local template-version history.
 
 The worker image contains Git and OpenSSH. Mount the SSH identity read-only for `appuser`. SSH uses
 batch mode, disables host-key verification and `known_hosts`, uses identity-only authentication,
@@ -571,10 +600,6 @@ import polling
 (2 seconds by default), and `CODER_MANAGER_TEMPLATE_SYNC_TIMEOUT_SECONDS` bounds an individual
 import (1800 seconds by default). Template archives use USTAR, exclude Terraform state and tfvars,
 and must not exceed 1 MiB.
-
-Filtering by `application` returns the global templates plus those attached to that application.
-The optional `scope` filter narrows that result, and `display_name` performs a case-insensitive
-literal substring search.
 
 ## Template Docker images API
 
@@ -594,8 +619,9 @@ create a new entry for a new version. Images referenced by workspaces cannot be 
 
 ## Workspaces API
 
-Workspace creation requires a ready owner from the selected instance, an available global or
-application-scoped template, and an image allowed by that template:
+Workspace creation requires a ready owner from the selected instance, a `created/success` explicit
+assignment for the selected template and instance with a known remote Coder template identifier,
+and an image allowed by that template:
 
 ```json
 {
@@ -644,7 +670,8 @@ Every business operation is represented by a `job_executions` row and an explici
 step. No Celery chain is used. A step locks and claims its job, increments its attempt, performs its
 operation, persists the next step as `pending`, commits, and only then sends the next task. The
 registry contains the exact allowlisted task names for instance create/update/start/stop/delete,
-workspace create/update/delete, and database synchronization.
+template synchronization, template-assignment creation/deletion, workspace create/update/delete,
+and database synchronization.
 
 The API creates a resource and its job in the same transaction. It attempts the first delivery only
 after commit; a broker failure therefore leaves a recoverable `pending` job. Step completion is
@@ -692,12 +719,16 @@ taken before the remote request. This scanner performs no remote mutation and cr
 The Alembic chain starts with baseline `a868aa80dbea`, whose `down_revision = None` and whose
 downgrade removes the complete baseline schema. Incremental migrations then remove the obsolete
 `instances.instance_url` column so URLs are always calculated from configuration and add the
-private `instances.password_candidate_enc` bootstrap field. Databases already at `a868aa80dbea`
-can apply them normally. Migration histories older than the baseline remain incompatible and must
-be recreated; `alembic stamp` is not a supported deployment procedure. Because removed URL
-snapshots cannot be reconstructed faithfully, downgrading the URL migration is allowed only while
-`instances` is empty. Downgrading the bootstrap-candidate migration is refused while any candidate
-is present, because it may be the only credential able to recover a remotely accepted account.
+private `instances.password_candidate_enc` bootstrap field. The next migration removes the legacy
+template-placement columns, creates explicit assignments, and makes each deployment one-to-one
+with an assignment. It intentionally performs no assignment or deployment backfill, so
+`template_deployments` must be empty before upgrading it. Its downgrade reconstructs legacy
+template/instance placement from assignments. Migration histories older than the baseline remain
+incompatible and must be recreated; `alembic stamp` is not a supported deployment procedure.
+Because removed URL snapshots cannot be reconstructed faithfully, downgrading the URL migration is
+allowed only while `instances` is empty. Downgrading the bootstrap-candidate migration is refused
+while any candidate is present, because it may be the only credential able to recover a remotely
+accepted account.
 Deploy migrations with the same image as the API, worker, and Beat so every process uses the
 matching task registry and database contract.
 

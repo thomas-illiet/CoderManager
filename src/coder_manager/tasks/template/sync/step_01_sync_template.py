@@ -13,8 +13,9 @@ from coder_manager.tasks.common.execution import (
 )
 from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01_TASK
 from coder_manager.tasks.template._sync import (
+    TemplateTargetClaimLostError,
     fetch_template_archive,
-    ready_instance_ids,
+    stable_assignment_ids,
     sync_template_target,
     template_source_snapshot,
 )
@@ -32,6 +33,10 @@ def step_01_sync_template(job_id: str) -> dict[str, str]:
         """Synchronize all current targets while preserving partial successes."""
 
         template_id = required_resource_id(claim)
+        assignment_ids = stable_assignment_ids(template_id, session_factory)
+        if not assignment_ids:
+            completed = complete_execution(claim, session_factory)
+            return {"status": "success" if completed else "noop"}
         snapshot = template_source_snapshot(template_id, session_factory)
         archive = fetch_template_archive(snapshot)
         failures = 0
@@ -39,24 +44,29 @@ def step_01_sync_template(job_id: str) -> dict[str, str]:
         def heartbeat() -> None:
             """Keep the durable claim alive while Coder imports Terraform."""
 
-            heartbeat_execution(claim, session_factory)
+            if not heartbeat_execution(claim, session_factory):
+                message = "Template synchronization claim is no longer current"
+                raise TemplateTargetClaimLostError(message)
 
-        for instance_id in ready_instance_ids(template_id, session_factory):
+        for assignment_id in assignment_ids:
             heartbeat()
             try:
                 sync_template_target(
                     snapshot,
                     archive,
-                    instance_id,
+                    assignment_id,
                     session_factory,
+                    claim=claim,
                     heartbeat=heartbeat,
                 )
+            except TemplateTargetClaimLostError:
+                raise
             except Exception:
                 failures += 1
                 logger.exception(
-                    "Template %s synchronization failed for instance %s",
+                    "Template %s synchronization failed for assignment %s",
                     template_id,
-                    instance_id,
+                    assignment_id,
                 )
         if failures:
             msg = f"Template synchronization failed for {failures} target(s)"

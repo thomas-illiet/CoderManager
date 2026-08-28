@@ -16,6 +16,8 @@ from coder_manager.models import (
     JobExecution,
     JobStatus,
     Template,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
     TemplateSyncStatus,
     Workspace,
     WorkspaceStatus,
@@ -36,6 +38,8 @@ RESOURCE_ACTIONS = {
     "instance.stop": "stopping",
     "instance.delete": "deleting",
     "template.sync": "syncing",
+    "template_assignment.create": "creating",
+    "template_assignment.delete": "deleting",
     "workspace.create": "creating",
     "workspace.update": "updating",
     "workspace.delete": "deleting",
@@ -59,7 +63,7 @@ def _resource_for_job(
     job: JobExecution,
     *,
     lock: bool,
-) -> Instance | Template | Workspace | None:
+) -> Instance | Template | TemplateAssignment | Workspace | None:
     """Load the resource attached to a job, optionally locking it."""
 
     if job.resource_type is None or job.resource_id is None:
@@ -67,6 +71,7 @@ def _resource_for_job(
     model = {
         "instance": Instance,
         "template": Template,
+        "template_assignment": TemplateAssignment,
         "workspace": Workspace,
     }.get(job.resource_type)
     if model is None:
@@ -79,7 +84,7 @@ def _resource_for_job(
 
 def _resource_matches(
     job: JobExecution,
-    resource: Instance | Template | Workspace | None,
+    resource: Instance | Template | TemplateAssignment | Workspace | None,
 ) -> bool:
     """Check that the current resource still owns this exact job step."""
 
@@ -124,6 +129,8 @@ def claim_execution(
             resource.status = InstanceStatus.RUNNING
         elif isinstance(resource, Template):
             resource.sync_status = TemplateSyncStatus.RUNNING
+        elif isinstance(resource, TemplateAssignment):
+            resource.status = TemplateAssignmentStatus.RUNNING
         elif isinstance(resource, Workspace):
             resource.status = WorkspaceStatus.RUNNING
         claim = ExecutionClaim(
@@ -141,7 +148,7 @@ def claim_execution(
 def owned_execution(
     session: Session,
     claim: ExecutionClaim,
-) -> tuple[JobExecution, Instance | Template | Workspace | None] | None:
+) -> tuple[JobExecution, Instance | Template | TemplateAssignment | Workspace | None] | None:
     """Lock and return a job/resource pair only while the claim still owns it."""
 
     job = session.scalar(
@@ -167,7 +174,8 @@ def advance_execution(
     next_task_name: str,
     next_step: str,
     session_factory: sessionmaker[Session],
-    mutate: Callable[[Session, Instance | Template | Workspace | None], None] | None = None,
+    mutate: Callable[[Session, Instance | Template | TemplateAssignment | Workspace | None], None]
+    | None = None,
 ) -> bool:
     """Persist a next pending step, then ask Celery to execute it."""
 
@@ -189,6 +197,9 @@ def advance_execution(
         elif isinstance(resource, Template):
             resource.step = next_step
             resource.sync_status = TemplateSyncStatus.PENDING
+        elif isinstance(resource, TemplateAssignment):
+            resource.step = next_step
+            resource.status = TemplateAssignmentStatus.PENDING
         elif isinstance(resource, Workspace):
             resource.step = next_step
             resource.status = WorkspaceStatus.PENDING
@@ -201,7 +212,8 @@ def complete_execution(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
     *,
-    mutate: Callable[[Session, Instance | Template | Workspace | None], None] | None = None,
+    mutate: Callable[[Session, Instance | Template | TemplateAssignment | Workspace | None], None]
+    | None = None,
     delete_resource: bool = False,
 ) -> bool:
     """Complete an owned execution and optionally mutate or delete its resource."""
@@ -225,6 +237,9 @@ def complete_execution(
             elif isinstance(resource, Template):
                 resource.sync_status = TemplateSyncStatus.SUCCESS
                 resource.step = None
+            elif isinstance(resource, TemplateAssignment):
+                resource.status = TemplateAssignmentStatus.SUCCESS
+                resource.step = None
             elif isinstance(resource, Workspace):
                 resource.status = WorkspaceStatus.SUCCESS
                 resource.step = None
@@ -236,7 +251,8 @@ def defer_execution(
     claim: ExecutionClaim,
     session_factory: sessionmaker[Session],
     *,
-    mutate: Callable[[Session, Instance | Template | Workspace | None], None] | None = None,
+    mutate: Callable[[Session, Instance | Template | TemplateAssignment | Workspace | None], None]
+    | None = None,
 ) -> bool:
     """Return an owned execution to pending without changing its current step."""
 
@@ -254,6 +270,8 @@ def defer_execution(
             resource.status = InstanceStatus.PENDING
         elif isinstance(resource, Template):
             resource.sync_status = TemplateSyncStatus.PENDING
+        elif isinstance(resource, TemplateAssignment):
+            resource.status = TemplateAssignmentStatus.PENDING
         elif isinstance(resource, Workspace):
             resource.status = WorkspaceStatus.PENDING
         session.commit()
@@ -282,6 +300,8 @@ def fail_execution(
             resource.status = InstanceStatus.ERROR
         elif isinstance(resource, Template):
             resource.sync_status = TemplateSyncStatus.ERROR
+        elif isinstance(resource, TemplateAssignment):
+            resource.status = TemplateAssignmentStatus.ERROR
         elif isinstance(resource, Workspace):
             resource.status = WorkspaceStatus.ERROR
         session.commit()
@@ -334,6 +354,8 @@ def prepare_execution_retry(
                 resource.status = InstanceStatus.PENDING
             elif isinstance(resource, Template):
                 resource.sync_status = TemplateSyncStatus.PENDING
+            elif isinstance(resource, TemplateAssignment):
+                resource.status = TemplateAssignmentStatus.PENDING
             elif isinstance(resource, Workspace):
                 resource.status = WorkspaceStatus.PENDING
             session.commit()

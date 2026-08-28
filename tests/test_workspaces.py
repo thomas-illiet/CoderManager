@@ -9,10 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from coder_manager.models import (
     Instance,
+    InstanceState,
     InstanceStatus,
     MemberStatus,
+    Template,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
     TemplateDeployment,
     TemplateDeploymentStatus,
+    TemplateSyncStatus,
     Workspace,
     WorkspaceStatus,
 )
@@ -59,6 +64,7 @@ async def set_instance_status(
     *,
     status: InstanceStatus = InstanceStatus.SUCCESS,
     action: str = "creating",
+    state: InstanceState | None = None,
 ) -> None:
     """Move an instance to a worker-controlled state."""
 
@@ -67,6 +73,8 @@ async def set_instance_status(
         assert instance is not None
         instance.action = action
         instance.status = status
+        if state is not None:
+            instance.state = state
         await session.commit()
 
 
@@ -107,8 +115,6 @@ async def create_template(
     client: AsyncClient,
     *,
     display_name: str = "Python",
-    scope: str = "global",
-    application: str | None = None,
     modules: list[str] | None = None,
 ) -> dict[str, object]:
     """Create a resource-bounded template."""
@@ -118,8 +124,6 @@ async def create_template(
         json={
             "display_name": display_name,
             "name": display_name.lower().replace(" ", "-"),
-            "scope": scope,
-            "application": application,
             "git_url": "https://git.example.com/template.git",
             "source_path": ".",
             "branch": "main",
@@ -154,15 +158,26 @@ async def create_ready_context(
     """Create a ready instance, owner, template, and image."""
 
     instance = await create_instance(client, "APPLICATION 1")
-    await set_instance_status(session_maker, instance["id"])
+    await set_instance_status(
+        session_maker,
+        instance["id"],
+        state=InstanceState.STARTED,
+    )
     member = await create_member(client, session_maker, instance["id"])
     template = await create_template(client)
     image = await create_image(client, template["id"])
     async with session_maker() as session:
+        assignment = TemplateAssignment(
+            template_id=UUID(str(template["id"])),
+            instance_id=UUID(str(instance["id"])),
+            action="created",
+            status=TemplateAssignmentStatus.SUCCESS,
+        )
+        session.add(assignment)
+        await session.flush()
         session.add(
             TemplateDeployment(
-                template_id=UUID(str(template["id"])),
-                instance_id=UUID(str(instance["id"])),
+                assignment_id=assignment.id,
                 coder_template_id=uuid4(),
                 target_commit="a" * 40,
                 applied_commit="a" * 40,
@@ -314,7 +329,6 @@ async def test_workspace_crud_filters_and_image_change(
     assert fetched.json() == created
     assert filtered.status_code == 200
     assert filtered.json()["total"] == 1
-
     blocked = await client.put(
         f"/api/v1/workspaces/{created['id']}",
         json={
@@ -381,6 +395,79 @@ async def test_workspace_crud_filters_and_image_change(
     deleted = await client.delete(f"/api/v1/workspaces/{created['id']}")
     assert deleted.status_code == 202
     assert deleted.json()["resource"]["action"] == "deleting"
+
+
+async def test_template_sync_and_workspace_mutations_are_serialized(
+    client: AsyncClient,
+    session_maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Fence both directions between retryable workspace work and template sync."""
+
+    instance, member, template, image = await create_ready_context(client, session_maker)
+    created_response = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(instance, member, template, image),
+    )
+    assert created_response.status_code == 201
+    workspace = created_response.json()["resource"]
+    await set_workspace_status(session_maker, workspace["id"])
+
+    async with session_maker() as session:
+        stored_template = await session.get(Template, UUID(str(template["id"])))
+        assert stored_template is not None
+        stored_template.sync_status = TemplateSyncStatus.RUNNING
+        await session.commit()
+
+    create_during_sync = await client.post(
+        "/api/v1/workspaces",
+        json=workspace_payload(
+            instance,
+            member,
+            template,
+            image,
+            name="second-workspace",
+        ),
+    )
+    update_during_sync = await client.put(
+        f"/api/v1/workspaces/{workspace['id']}",
+        json={
+            "name": workspace["name"],
+            "image_id": image["id"],
+            "modules": workspace["modules"],
+            "parameters": workspace["parameters"],
+        },
+    )
+    delete_during_sync = await client.delete(f"/api/v1/workspaces/{workspace['id']}")
+    assert all(
+        response.status_code == 409
+        for response in (create_during_sync, update_during_sync, delete_during_sync)
+    )
+
+    async with session_maker() as session:
+        stored_template = await session.get(Template, UUID(str(template["id"])))
+        stored_workspace = await session.get(Workspace, UUID(str(workspace["id"])))
+        assert stored_template is not None
+        assert stored_workspace is not None
+        stored_template.sync_status = TemplateSyncStatus.SUCCESS
+        stored_workspace.status = WorkspaceStatus.ERROR
+        await session.commit()
+
+    sync_during_workspace_retry = await client.post(f"/api/v1/templates/{template['id']}/sync")
+    update_during_workspace_retry = await client.put(
+        f"/api/v1/templates/{template['id']}",
+        json={
+            "display_name": template["display_name"],
+            "git_url": template["git_url"],
+            "source_path": template["source_path"],
+            "branch": template["branch"],
+            "modules": template["modules"],
+        },
+    )
+    assert sync_during_workspace_retry.status_code == 409
+    assert update_during_workspace_retry.status_code == 409
+    assert sync_during_workspace_retry.json() == {
+        "detail": "Template workspace operation is already in progress"
+    }
 
 
 async def test_failed_parent_instance_blocks_workspace_creation(
@@ -792,11 +879,11 @@ async def test_template_image_member_deletion_and_template_changes_are_protected
     assert compatible.status_code == 200
 
 
-async def test_workspace_missing_resources_and_cross_scope_template(
+async def test_workspace_missing_resources_and_unassigned_template(
     client: AsyncClient,
     session_maker: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Verify the workspace missing resources and cross scope template scenario."""
+    """Reject missing resources and templates not assigned to the instance."""
 
     instance, member, template, image = await create_ready_context(client, session_maker)
     fields = (
@@ -811,18 +898,13 @@ async def test_workspace_missing_resources_and_cross_scope_template(
         response = await client.post("/api/v1/workspaces", json=payload)
         assert response.status_code == 404
 
-    scoped = await create_template(
-        client,
-        display_name="Scoped",
-        scope="application",
-        application="APPLICATION 2",
-    )
-    scoped_image = await create_image(client, scoped["id"])
+    unassigned = await create_template(client, display_name="Unassigned")
+    unassigned_image = await create_image(client, unassigned["id"])
     unavailable = await client.post(
         "/api/v1/workspaces",
-        json=workspace_payload(instance, member, scoped, scoped_image),
+        json=workspace_payload(instance, member, unassigned, unassigned_image),
     )
-    assert unavailable.status_code == 422
+    assert unavailable.status_code == 409
     assert (await client.get(f"/api/v1/workspaces/{uuid4()}")).status_code == 404
     assert (await client.delete(f"/api/v1/workspaces/{uuid4()}")).status_code == 404
 
@@ -930,8 +1012,6 @@ async def test_repositories_exercise_direct_successful_lifecycle(
         templates, total = await template_repository.list(
             page=1,
             page_size=20,
-            application=None,
-            scope=None,
             display_name="Python",
         )
         assert total == 1

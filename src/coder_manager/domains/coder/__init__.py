@@ -22,7 +22,9 @@ from coder_manager.domains.coder.service import (
     bootstrap_admin_account,
     cleanup_user_accounts,
     delete_all_workspaces,
+    delete_template_workspaces,
     delete_user_accounts,
+    list_template_workspaces,
     stop_active_workspaces,
     submit_active_workspace_stops,
 )
@@ -43,7 +45,9 @@ __all__ = [
     "bootstrap_admin_account",
     "cleanup_user_accounts",
     "delete_all_workspaces",
+    "delete_template_workspaces",
     "delete_user_accounts",
+    "list_template_workspaces",
     "stop_active_workspaces",
     "submit_active_workspace_stops",
 ]

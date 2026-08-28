@@ -22,17 +22,10 @@ from coder_manager.models.base import Base
 
 if TYPE_CHECKING:
     from coder_manager.models.job_execution import JobExecution
-    from coder_manager.models.template_deployment import TemplateDeployment
+    from coder_manager.models.template_assignment import TemplateAssignment
     from coder_manager.models.template_image import TemplateImage
     from coder_manager.models.template_parameter import TemplateParameter
     from coder_manager.models.workspace import Workspace
-
-
-class TemplateScope(StrEnum):
-    """Scopes in which a Coder template can be used."""
-
-    GLOBAL = "global"
-    APPLICATION = "application"
 
 
 class TemplateSyncStatus(StrEnum):
@@ -51,22 +44,13 @@ def enum_values(enum_type: type[StrEnum]) -> list[str]:
 
 
 class Template(Base):
-    """A branch-backed Coder template available globally or to one application."""
+    """A branch-backed Coder template available for explicit assignment."""
 
     __tablename__ = "templates"
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
-    scope: Mapped[TemplateScope] = mapped_column(
-        Enum(TemplateScope, name="template_scope", values_callable=enum_values),
-        nullable=False,
-    )
-    application: Mapped[str | None] = mapped_column(
-        String(255),
-        nullable=True,
-        index=True,
-    )
     git_url: Mapped[str] = mapped_column(String(2048), nullable=False)
     source_path: Mapped[str] = mapped_column(String(1024), nullable=False, default=".")
     branch: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -118,9 +102,8 @@ class Template(Base):
         back_populates="template",
         passive_deletes=True,
     )
-    deployments: Mapped[list["TemplateDeployment"]] = relationship(
+    assignments: Mapped[list["TemplateAssignment"]] = relationship(
         back_populates="template",
-        cascade="all, delete-orphan",
         passive_deletes=True,
     )
     parameters: Mapped[list["TemplateParameter"]] = relationship(
@@ -142,44 +125,5 @@ class Template(Base):
             "system_parameter_revision >= 0",
             name="system_parameter_revision_non_negative",
         ),
-        CheckConstraint(
-            "(scope = 'global' AND application IS NULL) OR "
-            "(scope = 'application' AND application IS NOT NULL)",
-            name="scope_application_consistent",
-        ),
-        CheckConstraint(
-            "application IS NULL OR (length(trim(application)) > 0 "
-            "AND application = upper(trim(application)))",
-            name="application_normalized",
-        ),
-        Index(
-            "uq_templates_global_display_name_ci",
-            func.lower(display_name),
-            unique=True,
-            postgresql_where=scope == TemplateScope.GLOBAL,
-            sqlite_where=scope == TemplateScope.GLOBAL,
-        ),
-        Index(
-            "uq_templates_application_display_name_ci",
-            application,
-            func.lower(display_name),
-            unique=True,
-            postgresql_where=scope == TemplateScope.APPLICATION,
-            sqlite_where=scope == TemplateScope.APPLICATION,
-        ),
-        Index(
-            "uq_templates_global_name_ci",
-            func.lower(name),
-            unique=True,
-            postgresql_where=scope == TemplateScope.GLOBAL,
-            sqlite_where=scope == TemplateScope.GLOBAL,
-        ),
-        Index(
-            "uq_templates_application_name_ci",
-            application,
-            func.lower(name),
-            unique=True,
-            postgresql_where=scope == TemplateScope.APPLICATION,
-            sqlite_where=scope == TemplateScope.APPLICATION,
-        ),
+        Index("uq_templates_name_ci", func.lower(name), unique=True),
     )

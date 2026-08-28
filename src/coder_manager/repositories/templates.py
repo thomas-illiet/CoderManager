@@ -1,24 +1,20 @@
 """Persistence operations for Coder templates."""
 
-from collections.abc import Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from coder_manager.models import (
-    Instance,
-    InstanceStatus,
     JobExecution,
     Template,
-    TemplateDeployment,
-    TemplateDeploymentStatus,
-    TemplateScope,
+    TemplateAssignment,
+    TemplateAssignmentStatus,
     TemplateSyncStatus,
     Workspace,
+    WorkspaceStatus,
 )
 from coder_manager.repositories.job_executions import add_job_execution
 from coder_manager.schemas import TemplateCreate, TemplateUpdate
@@ -26,15 +22,15 @@ from coder_manager.tasks.common.registry import TEMPLATE_SYNC_STEP_01, TEMPLATE_
 
 
 class TemplateAlreadyExistsError(Exception):
-    """Raised when a template name or display name exists in the target scope."""
+    """Raised when a template name already exists globally."""
 
 
 class TemplateNotFoundError(Exception):
     """Raised when a requested template does not exist."""
 
 
-class TemplateHasWorkspacesError(Exception):
-    """Raised when a referenced template cannot be deleted."""
+class TemplateHasAssignmentsError(Exception):
+    """Raised when an assigned template cannot be deleted from the catalog."""
 
 
 class TemplateWorkspaceCompatibilityError(Exception):
@@ -45,16 +41,12 @@ class TemplateSyncInProgressError(Exception):
     """Raised when a mutation conflicts with an active template synchronization."""
 
 
-@dataclass(frozen=True, slots=True)
-class TemplateDeploymentStatisticsRow:
-    """Aggregated deployment counts for one template."""
+class TemplateAssignmentsInProgressError(Exception):
+    """Raised when template work conflicts with an active assignment transition."""
 
-    template_id: UUID
-    name: str
-    display_name: str
-    updated: int
-    outdated: int
-    missing: int
+
+class TemplateWorkspacesInProgressError(Exception):
+    """Raised when template work conflicts with a retryable workspace transition."""
 
 
 class TemplateRepository:
@@ -70,8 +62,6 @@ class TemplateRepository:
         *,
         page: int,
         page_size: int,
-        scope: TemplateScope | None = None,
-        application: str | None = None,
         display_name: str | None = None,
     ) -> tuple[list[Template], int]:
         """Return one deterministic filtered page and its matching total."""
@@ -79,20 +69,6 @@ class TemplateRepository:
         count_statement = select(func.count()).select_from(Template)
         list_statement = select(Template)
 
-        if application is not None:
-            available_to_application = or_(
-                Template.scope == TemplateScope.GLOBAL,
-                and_(
-                    Template.scope == TemplateScope.APPLICATION,
-                    Template.application == application,
-                ),
-            )
-            count_statement = count_statement.where(available_to_application)
-            list_statement = list_statement.where(available_to_application)
-        if scope is not None:
-            scope_condition = Template.scope == scope
-            count_statement = count_statement.where(scope_condition)
-            list_statement = list_statement.where(scope_condition)
         if display_name is not None:
             display_name_condition = Template.display_name.icontains(
                 display_name,
@@ -106,96 +82,13 @@ class TemplateRepository:
             list_statement.order_by(
                 func.lower(Template.display_name),
                 Template.display_name,
-                Template.scope,
-                Template.application,
+                Template.name,
                 Template.id,
             )
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
         return list(result), total or 0
-
-    async def list_deployment_statistics(
-        self,
-    ) -> Sequence[TemplateDeploymentStatisticsRow]:
-        """Return current deployment counts for every template in one query."""
-
-        compatible_instance = and_(
-            Instance.status == InstanceStatus.SUCCESS,
-            Instance.action != "deleting",
-            or_(
-                Template.scope == TemplateScope.GLOBAL,
-                and_(
-                    Template.scope == TemplateScope.APPLICATION,
-                    Template.application == Instance.application,
-                ),
-            ),
-        )
-        matching_deployment = and_(
-            TemplateDeployment.template_id == Template.id,
-            TemplateDeployment.instance_id == Instance.id,
-        )
-        updated_deployment = and_(
-            Instance.id.is_not(None),
-            TemplateDeployment.id.is_not(None),
-            TemplateDeployment.status == TemplateDeploymentStatus.SUCCESS,
-            TemplateDeployment.applied_commit.is_not(None),
-            TemplateDeployment.target_commit == TemplateDeployment.applied_commit,
-            TemplateDeployment.target_system_parameter_revision
-            == TemplateDeployment.applied_system_parameter_revision,
-            TemplateDeployment.applied_system_parameter_revision
-            == Template.system_parameter_revision,
-        )
-        outdated_deployment = and_(
-            Instance.id.is_not(None),
-            TemplateDeployment.id.is_not(None),
-            or_(
-                TemplateDeployment.status != TemplateDeploymentStatus.SUCCESS,
-                TemplateDeployment.target_commit.is_(None),
-                TemplateDeployment.applied_commit.is_(None),
-                TemplateDeployment.target_commit != TemplateDeployment.applied_commit,
-                TemplateDeployment.target_system_parameter_revision.is_(None),
-                TemplateDeployment.applied_system_parameter_revision.is_(None),
-                TemplateDeployment.target_system_parameter_revision
-                != TemplateDeployment.applied_system_parameter_revision,
-                TemplateDeployment.applied_system_parameter_revision
-                != Template.system_parameter_revision,
-            ),
-        )
-        missing_deployment = and_(
-            Instance.id.is_not(None),
-            TemplateDeployment.id.is_(None),
-        )
-        rows = await self._session.execute(
-            select(
-                Template.id,
-                Template.name,
-                Template.display_name,
-                func.sum(case((updated_deployment, 1), else_=0)),
-                func.sum(case((outdated_deployment, 1), else_=0)),
-                func.sum(case((missing_deployment, 1), else_=0)),
-            )
-            .select_from(Template)
-            .outerjoin(Instance, compatible_instance)
-            .outerjoin(TemplateDeployment, matching_deployment)
-            .group_by(Template.id, Template.name, Template.display_name)
-            .order_by(
-                func.lower(Template.display_name),
-                Template.display_name,
-                Template.id,
-            )
-        )
-        return [
-            TemplateDeploymentStatisticsRow(
-                template_id=template_id,
-                name=name,
-                display_name=display_name,
-                updated=updated,
-                outdated=outdated,
-                missing=missing,
-            )
-            for template_id, name, display_name, updated, outdated, missing in rows
-        ]
 
     async def get(self, template_id: UUID) -> Template | None:
         """Find a template by its identifier."""
@@ -214,13 +107,11 @@ class TemplateRepository:
             await self._session.delete(job)
 
     async def create(self, payload: TemplateCreate) -> Template:
-        """Create a validated global or application-scoped template."""
+        """Create a validated template with one globally unique technical name."""
 
         template = Template(
             display_name=payload.display_name,
             name=payload.name,
-            scope=payload.scope,
-            application=payload.application,
             git_url=payload.git_url,
             source_path=payload.source_path,
             branch=payload.branch,
@@ -245,9 +136,15 @@ class TemplateRepository:
         if template is None:
             await self._session.rollback()
             raise TemplateNotFoundError
-        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+        if template.sync_status in {
+            TemplateSyncStatus.PENDING,
+            TemplateSyncStatus.RUNNING,
+            TemplateSyncStatus.ERROR,
+        }:
             await self._session.rollback()
             raise TemplateSyncInProgressError
+        await self._ensure_no_active_assignments(template.id)
+        await self._ensure_no_active_workspaces(template.id)
 
         # Preserve an unchanged template without touching its update timestamp.
         changed = (
@@ -282,11 +179,7 @@ class TemplateRepository:
         template.sync_status = TemplateSyncStatus.SUCCESS
         template.step = None
         template.updated_at = datetime.now(UTC)
-        try:
-            await self._session.commit()
-        except IntegrityError as error:
-            await self._session.rollback()
-            raise TemplateAlreadyExistsError from error
+        await self._session.commit()
         await self._session.refresh(template)
         return template
 
@@ -299,15 +192,21 @@ class TemplateRepository:
         if template is None:
             await self._session.rollback()
             raise TemplateNotFoundError
-        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+        if template.sync_status in {
+            TemplateSyncStatus.PENDING,
+            TemplateSyncStatus.RUNNING,
+            TemplateSyncStatus.ERROR,
+        }:
             await self._session.rollback()
             raise TemplateSyncInProgressError
-        workspace_id = await self._session.scalar(
-            select(Workspace.id).where(Workspace.template_id == template_id).limit(1)
+        assignment_id = await self._session.scalar(
+            select(TemplateAssignment.id)
+            .where(TemplateAssignment.template_id == template_id)
+            .limit(1)
         )
-        if workspace_id is not None:
+        if assignment_id is not None:
             await self._session.rollback()
-            raise TemplateHasWorkspacesError
+            raise TemplateHasAssignmentsError
         await self._discard_current_job(template)
         await self._session.delete(template)
         await self._session.commit()
@@ -321,9 +220,15 @@ class TemplateRepository:
         if template is None:
             await self._session.rollback()
             raise TemplateNotFoundError
-        if template.sync_status in {TemplateSyncStatus.PENDING, TemplateSyncStatus.RUNNING}:
+        if template.sync_status in {
+            TemplateSyncStatus.PENDING,
+            TemplateSyncStatus.RUNNING,
+            TemplateSyncStatus.ERROR,
+        }:
             await self._session.rollback()
             raise TemplateSyncInProgressError
+        await self._ensure_no_active_assignments(template.id)
+        await self._ensure_no_active_workspaces(template.id)
 
         await self._discard_current_job(template)
         job = add_job_execution(
@@ -340,3 +245,41 @@ class TemplateRepository:
         template.step = TEMPLATE_SYNC_STEP_01
         await self._session.commit()
         return job.id
+
+    async def _ensure_no_active_assignments(self, template_id: UUID) -> None:
+        """Reject template work while an assignment transition remains retryable."""
+
+        assignment_id = await self._session.scalar(
+            select(TemplateAssignment.id)
+            .where(
+                TemplateAssignment.template_id == template_id,
+                TemplateAssignment.status.in_(
+                    [
+                        TemplateAssignmentStatus.PENDING,
+                        TemplateAssignmentStatus.RUNNING,
+                        TemplateAssignmentStatus.ERROR,
+                    ]
+                ),
+            )
+            .limit(1)
+        )
+        if assignment_id is not None:
+            await self._session.rollback()
+            raise TemplateAssignmentsInProgressError
+
+    async def _ensure_no_active_workspaces(self, template_id: UUID) -> None:
+        """Reject synchronization while a retryable workspace mutation owns the template."""
+
+        workspace_id = await self._session.scalar(
+            select(Workspace.id)
+            .where(
+                Workspace.template_id == template_id,
+                Workspace.status.in_(
+                    [WorkspaceStatus.PENDING, WorkspaceStatus.RUNNING, WorkspaceStatus.ERROR]
+                ),
+            )
+            .limit(1)
+        )
+        if workspace_id is not None:
+            await self._session.rollback()
+            raise TemplateWorkspacesInProgressError

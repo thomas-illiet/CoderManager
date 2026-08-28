@@ -10,15 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from coder_manager.database import get_session
 from coder_manager.repositories import (
     TemplateAlreadyExistsError,
-    TemplateHasWorkspacesError,
+    TemplateAssignmentsInProgressError,
+    TemplateHasAssignmentsError,
     TemplateNotFoundError,
     TemplateRepository,
     TemplateSyncInProgressError,
     TemplateWorkspaceCompatibilityError,
+    TemplateWorkspacesInProgressError,
 )
 from coder_manager.schemas import (
     TemplateCreate,
-    TemplateDeploymentStatistics,
     TemplateListQuery,
     TemplatePage,
     TemplateRead,
@@ -31,12 +32,10 @@ router = APIRouter(prefix="/templates", tags=["templates"])
 SessionDependency = Annotated[AsyncSession, Depends(get_session)]
 TEMPLATE_CREATE_EXAMPLES: dict[str, Example] = {
     "with_modules": {
-        "summary": "Editable application template with modules",
+        "summary": "Template with editable modules",
         "value": {
             "display_name": "Python Development",
             "name": "python-development",
-            "scope": "application",
-            "application": "MY-BUSINESS-APPLICATION",
             "git_url": "git@git.example.com:coder/python-template.git",
             "source_path": "templates/python",
             "branch": "main",
@@ -44,13 +43,11 @@ TEMPLATE_CREATE_EXAMPLES: dict[str, Example] = {
         },
     },
     "without_modules": {
-        "summary": "Global template without editable modules",
+        "summary": "Template without editable modules",
         "description": "Omitting modules stores an empty module list.",
         "value": {
             "display_name": "Managed Desktop",
             "name": "managed-desktop",
-            "scope": "global",
-            "application": None,
             "git_url": "https://git.example.com/coder/managed-desktop.git",
             "source_path": ".",
             "branch": "main",
@@ -69,8 +66,6 @@ async def list_templates(
     templates, total = await TemplateRepository(session).list(
         page=query.page,
         page_size=query.page_size,
-        scope=query.scope,
-        application=query.application,
         display_name=query.display_name,
     )
     pages = (total + query.page_size - 1) // query.page_size
@@ -81,26 +76,6 @@ async def list_templates(
         total=total,
         pages=pages,
     )
-
-
-@router.get("/statistics", summary="Get template deployment statistics")
-async def get_template_statistics(
-    session: SessionDependency,
-) -> list[TemplateDeploymentStatistics]:
-    """Return current ready-server deployment counts for every template."""
-
-    statistics = await TemplateRepository(session).list_deployment_statistics()
-    return [
-        TemplateDeploymentStatistics(
-            template_id=item.template_id,
-            name=item.name,
-            display_name=item.display_name,
-            updated=item.updated,
-            outdated=item.outdated,
-            missing=item.missing,
-        )
-        for item in statistics
-    ]
 
 
 @router.get("/{template_id}/modules", summary="List a template's modules")
@@ -133,6 +108,10 @@ async def sync_template(template_id: UUID, session: SessionDependency) -> Respon
             status_code=status.HTTP_409_CONFLICT,
             detail="Template synchronization is already in progress",
         ) from error
+    except TemplateAssignmentsInProgressError as error:
+        raise _assignment_conflict() from error
+    except TemplateWorkspacesInProgressError as error:
+        raise _workspace_conflict() from error
     dispatch_registered_step(step_01_sync_template.name, job_id)
     return Response(status_code=status.HTTP_202_ACCEPTED)
 
@@ -156,14 +135,14 @@ async def create_template(
     payload: Annotated[TemplateCreate, Body(openapi_examples=TEMPLATE_CREATE_EXAMPLES)],
     session: SessionDependency,
 ) -> TemplateRead:
-    """Create a template while enforcing scoped name uniqueness."""
+    """Create a template while enforcing globally unique technical names."""
 
     try:
         template = await TemplateRepository(session).create(payload)
     except TemplateAlreadyExistsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="A template with this name or display_name already exists in this scope",
+            detail="A template with this name already exists",
         ) from error
     return TemplateRead.model_validate(template)
 
@@ -174,7 +153,7 @@ async def update_template(
     payload: TemplateUpdate,
     session: SessionDependency,
 ) -> TemplateRead:
-    """Replace mutable fields without allowing the template scope to change."""
+    """Replace the mutable source, presentation, and module fields."""
 
     try:
         template = await TemplateRepository(session).update(template_id, payload)
@@ -183,16 +162,15 @@ async def update_template(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Template not found",
         ) from error
-    except TemplateAlreadyExistsError as error:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="A template with this name or display_name already exists in this scope",
-        ) from error
     except TemplateSyncInProgressError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Template synchronization is already in progress",
         ) from error
+    except TemplateAssignmentsInProgressError as error:
+        raise _assignment_conflict() from error
+    except TemplateWorkspacesInProgressError as error:
+        raise _workspace_conflict() from error
     except TemplateWorkspaceCompatibilityError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -216,10 +194,10 @@ async def delete_template(template_id: UUID, session: SessionDependency) -> Resp
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Template not found",
         ) from error
-    except TemplateHasWorkspacesError as error:
+    except TemplateHasAssignmentsError as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Template still has workspaces",
+            detail="Template is still assigned to instances",
         ) from error
     except TemplateSyncInProgressError as error:
         raise HTTPException(
@@ -227,3 +205,21 @@ async def delete_template(template_id: UUID, session: SessionDependency) -> Resp
             detail="Template synchronization is already in progress",
         ) from error
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _assignment_conflict() -> HTTPException:
+    """Build the response for active per-instance template assignment work."""
+
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Template assignment operation is already in progress",
+    )
+
+
+def _workspace_conflict() -> HTTPException:
+    """Build the response for retryable workspace work using this template."""
+
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="Template workspace operation is already in progress",
+    )
