@@ -8,7 +8,7 @@ templates. Argo CD Applications remain managed as part of the instance lifecycle
 
 - FastAPI HTTP API
 - PostgreSQL with SQLAlchemy 2 and Alembic
-- Celery workers with Redis as broker and result backend
+- Celery workers with Redis as broker and a result backend reserved for the worker healthcheck
 - uv, Ruff, ty, and pytest for local development
 
 ## Run locally
@@ -650,6 +650,12 @@ The API creates a resource and its job in the same transaction. It attempts the 
 after commit; a broker failure therefore leaves a recoverable `pending` job. Step completion is
 fenced by `job_id`, step, and attempt, so a worker returning after a retry cannot overwrite the
 newer attempt. Duplicate or stale deliveries are safe no-ops.
+
+Business and system tasks ignore Celery results: their durable state lives in PostgreSQL, while
+worker events continue to feed Flower and Prometheus metrics. This also prevents API publishers from
+opening an unnecessary result-backend subscription before sending a task to the broker. Only
+`coder_manager.healthcheck` retains a Celery result so it can verify worker and result-backend wiring;
+`CODER_MANAGER_CELERY_RESULT_BACKEND` therefore remains worker-only.
 
 The dedicated `beat` service schedules `coder_manager.retry_job_executions` every 60 seconds by
 default. Configure the scan interval with `CODER_MANAGER_JOB_RETRY_INTERVAL_SECONDS` and the stale

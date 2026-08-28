@@ -236,6 +236,12 @@ def test_registered_step_names_and_beat_schedule() -> None:
         )
     } == REGISTERED_STEP_NAMES
     assert not hasattr(tasks, "upsert_instance")
+    assert celery_app.conf.task_ignore_result is True
+    assert {
+        task.name
+        for task in celery_app.tasks.values()
+        if task.name.startswith("coder_manager.") and not task.ignore_result
+    } == {tasks.healthcheck.name}
     schedule = celery_app.conf.beat_schedule["retry-job-executions"]
     assert schedule["task"] == "coder_manager.retry_job_executions"
     assert schedule["schedule"] == timedelta(seconds=get_settings().job_retry_interval_seconds)
@@ -254,6 +260,31 @@ def test_registered_step_names_and_beat_schedule() -> None:
         Settings(scheduler_timezone="invalid/timezone")
     task_source = Path(tasks.__file__).parent
     assert all("chain(" not in path.read_text() for path in task_source.rglob("*.py"))
+
+
+def test_business_task_publication_does_not_contact_result_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skip result subscriptions for durable jobs while retaining the healthcheck result."""
+
+    backend_call = MagicMock(side_effect=RuntimeError("result backend unavailable"))
+    monkeypatch.setattr(celery_app.backend, "on_task_call", backend_call)
+
+    with (
+        celery_app.connection_for_write("memory://") as connection,
+        connection.Producer() as producer,
+    ):
+        business_result = tasks.step_01_create_schema.apply_async(
+            args=(str(uuid4()),),
+            producer=producer,
+        )
+        backend_call.assert_not_called()
+        assert business_result.ignored is True
+
+        with pytest.raises(RuntimeError, match="result backend unavailable"):
+            tasks.healthcheck.apply_async(producer=producer)
+        backend_call.assert_called_once()
+        assert tasks.healthcheck.ignore_result is False
 
 
 async def test_daily_workspace_stop_dispatches_every_instance_without_writes(

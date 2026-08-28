@@ -5,7 +5,7 @@ from typing import Any
 from coder_manager.celery_app import celery_app
 
 
-@celery_app.task(name="coder_manager.healthcheck")
+@celery_app.task(name="coder_manager.healthcheck", ignore_result=False)
 def healthcheck() -> dict[str, Any]:
     """Verify worker and result-backend wiring."""
 
