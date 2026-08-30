@@ -100,3 +100,23 @@ def test_environment_example_covers_settings_and_compose_consumers() -> None:
         for variable in example_variables
     }
     assert actual_consumers == expected_consumers
+
+
+def test_removed_environment_configuration_is_not_documented() -> None:
+    """Keep the removed deployment environment out of runtime documentation."""
+
+    project_root = Path(__file__).parents[1]
+    documented_files = (
+        project_root / ".env.example",
+        project_root / "compose.yaml",
+        project_root / "README.md",
+    )
+
+    for path in documented_files:
+        text = path.read_text(encoding="utf-8")
+        assert "CODER_MANAGER_ENVIRONMENT" not in text
+
+    readme = (project_root / "README.md").read_text(encoding="utf-8")
+    assert "removes the obsolete `environment` label" in readme
+    assert "environment ownership" not in readme
+    assert "environment owner" not in readme

@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from coder_manager.config import Environment
 from coder_manager.constants import INSTANCE_SLUG_LENGTH
 from coder_manager.domains.argocd.errors import ArgoCdConfigurationError
 
@@ -39,16 +38,12 @@ class ArgoCdClientConfig:
     skip_ssl_verify: bool
     project: str
     application_prefix: str
-    environment: Environment
 
     @classmethod
     def from_settings(cls, settings: Settings) -> ArgoCdClientConfig:
         """Validate the settings shared by read and mutation operations."""
 
         required: dict[str, str | None] = {
-            "CODER_MANAGER_ENVIRONMENT": (
-                settings.environment.value if settings.environment is not None else None
-            ),
             "CODER_MANAGER_ARGOCD_URL": settings.argocd_url,
             "CODER_MANAGER_ARGOCD_TOKEN": (
                 settings.argocd_token.get_secret_value()
@@ -73,7 +68,6 @@ class ArgoCdClientConfig:
                 _required_value(required, "CODER_MANAGER_ARGOCD_APPLICATION_PREFIX"),
                 "CODER_MANAGER_ARGOCD_APPLICATION_PREFIX",
             ),
-            environment=Environment(_required_value(required, "CODER_MANAGER_ENVIRONMENT")),
         )
 
 
@@ -121,7 +115,6 @@ class ArgoCdConfig(ArgoCdClientConfig):
             skip_ssl_verify=client.skip_ssl_verify,
             project=client.project,
             application_prefix=client.application_prefix,
-            environment=client.environment,
             region=region,
             repository_url=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_URL"),
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),

@@ -237,10 +237,8 @@ Creation payload:
 }
 ```
 
-The deployment itself has one required `CODER_MANAGER_ENVIRONMENT`: `development`, `staging`, or
-`production`. This infrastructure value is not accepted by the Instance API and is not stored on
-instance rows. A new instance starts with `state` set to `stopped`, `action` set to `creating`, and
-`status` set to `pending`. `state` is an
+A new instance starts with `state` set to `stopped`, `action` set to `creating`, and `status` set to
+`pending`. `state` is an
 observed value stored only by Coder Manager: `started` means that the Argo CD Application exists,
 while `stopped` means that it is absent. It does not describe Argo health or pod readiness. Actions
 include `starting` and `stopping`; statuses are limited to `pending`, `running`, `success`, and
@@ -255,14 +253,14 @@ connection to the allocated database and executes `CREATE SCHEMA IF NOT EXISTS` 
 name passed as a quoted identifier. The second creates or attaches an Argo CD Application whose
 `metadata.name` is `<CODER_MANAGER_ARGOCD_APPLICATION_PREFIX>-<instance slug>`. The
 slug is required; there is no UUID fallback. Existing Applications are accepted only when their
-`coder-manager/instance-id` and `environment` labels already match the local instance UUID and
-`CODER_MANAGER_ENVIRONMENT`; an absent or different owner is a conflict and is never adopted,
-overwritten, observed, or deleted. Attached Application names are retained after their first
-successful reconciliation. Application metadata contains the managed labels
-`coder-manager/instance-id=<instance UUID>`, `environment=<CODER_MANAGER_ENVIRONMENT>`,
+`coder-manager/instance-id` label already matches the local instance UUID; an absent or different
+owner is a conflict and is never adopted, overwritten, observed, or deleted. Attached Application
+names are retained after their first successful reconciliation. Application metadata contains the
+managed labels `coder-manager/instance-id=<instance UUID>`,
 `region=<normalized CODER_MANAGER_ARGOCD_REGION>`, `domain=code-station`, and `tier=standard`.
-Reconciliation refreshes these managed labels while preserving labels owned by other actors. The
-Application uses a Helm chart from the configured Git repository through the
+Reconciliation removes the obsolete `environment` label, refreshes these managed labels, and
+preserves labels owned by other actors. The Application uses a Helm chart from the configured Git
+repository through the
 `argocd-cyberark-plugin-helm` plugin. The third creates or recovers Coder's first administrator
 account before the instance reaches success.
 The plugin receives comma-separated `users` and `admins` values through `HELM_ARGS`, plus a
@@ -298,10 +296,8 @@ Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`,
 `CODER_MANAGER_ARGOCD_PROJECT_NAME`, and `CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure the
 single CyberArk plugin map with `CODER_MANAGER_CYBERARK_APP_ID`,
 `CODER_MANAGER_CYBERARK_CERT_NAME`, `CODER_MANAGER_CYBERARK_KEY_NAME`, and
-`CODER_MANAGER_CYBERARK_SAFE`. `CODER_MANAGER_ENVIRONMENT` is required by the API and worker and
-selects no credentials, project, destination, file, or URL; it is used only for the managed Argo CD
-label and ownership check. `.env.example` lists the complete configuration. TLS
-certificate verification is enabled by default; set
+`CODER_MANAGER_CYBERARK_SAFE`. `.env.example` lists the complete configuration. TLS certificate
+verification is enabled by default; set
 `CODER_MANAGER_ARGOCD_SKIP_SSL_VERIFY=true` only for an explicitly trusted test environment. The
 worker requests synchronization but does not wait for Argo CD health convergence.
 

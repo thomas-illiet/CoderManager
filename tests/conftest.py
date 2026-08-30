@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import Session, sessionmaker
 
 os.environ.setdefault("CODER_MANAGER_DATABASE_SCHEMA", "public")
-os.environ.setdefault("CODER_MANAGER_ENVIRONMENT", "development")
 os.environ.setdefault("CODER_MANAGER_INSTANCE_BASE_DOMAIN", "emea.code-studio.dev.echonet")
 os.environ["CODER_MANAGER_ARGOCD_REGION"] = "EMEA"
 os.environ["CODER_MANAGER_ALLOW_UNAUTHENTICATED_API"] = "true"

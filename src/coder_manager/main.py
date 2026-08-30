@@ -84,7 +84,6 @@ def create_app(
     """Build the HTTP application."""
 
     settings = settings or get_settings()
-    settings.require_environment()
     settings.require_instance_base_domain()
     metrics = ApiMetrics()
     oidc_config = OidcConfig.from_settings(settings)

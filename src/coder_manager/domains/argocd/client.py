@@ -244,12 +244,8 @@ class ArgoCdClient:
         metadata = application.get("metadata")
         labels = metadata.get("labels") if isinstance(metadata, dict) else None
         owner = labels.get("coder-manager/instance-id") if isinstance(labels, dict) else None
-        environment = labels.get("environment") if isinstance(labels, dict) else None
-        if owner != str(instance_id) or environment != self._config.environment.value:
-            msg = (
-                f"Argo CD Application {name} is not owned by instance {instance_id} "
-                f"in environment {self._config.environment.value}"
-            )
+        if owner != str(instance_id):
+            msg = f"Argo CD Application {name} is not owned by instance {instance_id}"
             raise ArgoCdApplicationOwnershipError(msg)
         return application
 

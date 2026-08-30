@@ -6,9 +6,9 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
-from pydantic import SecretBytes, SecretStr, ValidationError
+from pydantic import SecretBytes, SecretStr
 
-from coder_manager.config import Environment, Settings
+from coder_manager.config import Settings
 from coder_manager.domains.argocd import (
     ArgoCdApplicationNotFoundError,
     ArgoCdApplicationOwnershipError,
@@ -44,7 +44,6 @@ def configured_settings(**overrides: object) -> Settings:
     """Build complete Argo CD settings with optional test overrides."""
 
     values: dict[str, object] = {
-        "environment": "development",
         "instance_base_domain": "emea.code-studio.dev.echonet",
         "argocd_url": "https://argocd.test/root/",
         "argocd_token": TEST_ARGOCD_TOKEN,
@@ -69,7 +68,6 @@ def client_settings(**overrides: object) -> Settings:
     """Build only the settings required for Argo CD read operations."""
 
     values: dict[str, object] = {
-        "environment": "development",
         "instance_base_domain": "emea.code-studio.dev.echonet",
         "argocd_url": "https://argocd.test/root/",
         "argocd_token": TEST_ARGOCD_TOKEN,
@@ -100,34 +98,7 @@ def instance_helm_values(**overrides: object) -> InstanceHelmValues:
 def owned_labels(instance_id: UUID = TEST_INSTANCE_ID) -> dict[str, str]:
     """Return the strict ownership labels for this deployment."""
 
-    return {
-        "coder-manager/instance-id": str(instance_id),
-        "environment": "development",
-    }
-
-
-@pytest.mark.parametrize(
-    ("raw_environment", "expected"),
-    [
-        ("development", Environment.DEVELOPMENT),
-        ("staging", Environment.STAGING),
-        ("production", Environment.PRODUCTION),
-    ],
-)
-def test_environment_setting_is_a_strict_infrastructure_enum(
-    raw_environment: str,
-    expected: Environment,
-) -> None:
-    """Accept only the three deployment environments exposed by configuration."""
-
-    assert Settings(environment=raw_environment).environment is expected  # type: ignore[arg-type]
-
-
-def test_environment_setting_rejects_unknown_values() -> None:
-    """Reject an infrastructure environment outside the public enum."""
-
-    with pytest.raises(ValidationError, match="development"):
-        Settings(environment="testing")  # type: ignore[arg-type]
+    return {"coder-manager/instance-id": str(instance_id)}
 
 
 def test_create_application_and_sync_contract() -> None:
@@ -177,7 +148,6 @@ def test_create_application_and_sync_contract() -> None:
         "name": result.application_name,
         "labels": {
             "coder-manager/instance-id": str(instance_id),
-            "environment": "development",
             "region": "EMEA",
             "domain": "code-station",
             "tier": "standard",
@@ -233,8 +203,8 @@ def test_create_application_and_sync_contract() -> None:
     }
 
 
-def test_helm_payload_uses_global_project_and_no_values_file() -> None:
-    """Use the deployment project without selecting an environment values file."""
+def test_helm_payload_uses_global_project_without_values_file_or_environment_label() -> None:
+    """Use the deployment project without a values file or obsolete environment label."""
 
     config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
     payload = application_payload(
@@ -248,7 +218,7 @@ def test_helm_payload_uses_global_project_and_no_values_file() -> None:
     helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
     assert "--values " not in helm_arguments
     assert payload["spec"]["project"] == "coder-project"
-    assert payload["metadata"]["labels"]["environment"] == "development"
+    assert "environment" not in payload["metadata"]["labels"]
 
 
 def test_database_secret_references_use_managed_database_name() -> None:
@@ -397,11 +367,11 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     assert update["metadata"]["labels"] == {
         "existing": "kept",
         "coder-manager/instance-id": str(instance_id),
-        "environment": "development",
         "region": "EMEA",
         "domain": "code-station",
         "tier": "standard",
     }
+    assert "environment" not in update["metadata"]["labels"]
     assert update["spec"]["project"] == "coder-project"
     assert [dict(request.url.params) for request in requests] == [
         {"project": "coder-project"},
@@ -441,14 +411,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
     "labels",
     [
         {},
-        {
-            "coder-manager/instance-id": str(uuid4()),
-            "environment": "development",
-        },
-        {
-            "coder-manager/instance-id": str(TEST_INSTANCE_ID),
-            "environment": "staging",
-        },
+        {"coder-manager/instance-id": str(uuid4())},
     ],
 )
 def test_reconciliation_rejects_unowned_application(labels: dict[str, str]) -> None:
@@ -1193,11 +1156,11 @@ def test_application_name_prefers_attachment_then_strict_slug() -> None:
 
 
 def test_client_configuration_uses_scalar_infrastructure_settings() -> None:
-    """Expose one immutable deployment identity while redacting its token."""
+    """Expose scalar deployment authorization while redacting its token."""
 
     config = ArgoCdClientConfig.from_settings(client_settings())
 
-    assert config.environment is Environment.DEVELOPMENT
+    assert not hasattr(config, "environment")
     assert config.token == TEST_ARGOCD_TOKEN
     assert config.project == "coder-project"
     assert config.application_prefix == TEST_APPLICATION_PREFIX
@@ -1293,10 +1256,6 @@ def test_client_configuration_cannot_reconcile_application() -> None:
             client_settings(argocd_project_name=" "),
             "CODER_MANAGER_ARGOCD_PROJECT_NAME",
         ),
-        (
-            client_settings(environment=None),
-            "CODER_MANAGER_ENVIRONMENT",
-        ),
     ],
 )
 def test_invalid_client_configuration_is_rejected(
@@ -1347,7 +1306,6 @@ def test_legacy_environment_specific_settings_are_not_supported() -> None:
 
     settings = Settings.model_validate(
         {
-            "environment": "development",
             "instance_base_domain": "emea.code-studio.dev.echonet",
             "argocd_url": "https://argocd.test",
             "argocd_development_token": "legacy-token",

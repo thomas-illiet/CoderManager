@@ -232,6 +232,20 @@ def test_worker_init_requires_public_url_config_without_affecting_beat(
     ]
 
 
+def test_worker_init_accepts_public_url_config_without_a_deployment_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Start the worker URL validation without the removed deployment selector."""
+
+    monkeypatch.setattr(
+        celery_app,
+        "settings",
+        Settings(instance_base_domain="emea.code-studio.echonet"),
+    )
+
+    celery_app.ValidateInstancePublicUrlConfig(None).start(None)
+
+
 def test_prepare_multiprocess_directory_removes_only_metric_databases(tmp_path: Path) -> None:
     """Clear stale metric files while retaining unrelated temporary content."""
 

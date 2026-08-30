@@ -91,16 +91,10 @@ def test_api_startup_rejects_an_invalid_instance_base_domain(
         create_app(settings=Settings(instance_base_domain=configured_domain))
 
 
-def test_api_startup_requires_a_deployment_environment() -> None:
-    """Reject an API process that has no infrastructure environment."""
+def test_settings_no_longer_exposes_a_deployment_environment() -> None:
+    """Keep the removed deployment selector out of the runtime settings contract."""
 
-    with pytest.raises(ValueError, match="CODER_MANAGER_ENVIRONMENT is required"):
-        create_app(
-            settings=Settings(
-                environment=None,
-                instance_base_domain="emea.code-studio.echonet",
-            )
-        )
+    assert "environment" not in Settings.model_fields
 
 
 def test_create_app_injects_the_settings_it_validated() -> None:

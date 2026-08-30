@@ -1,7 +1,6 @@
 """Application configuration."""
 
 import re
-from enum import StrEnum
 from functools import lru_cache
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,14 +16,6 @@ _DNS_NAME_PATTERN = (
 )
 _MAX_DNS_NAME_LENGTH = 253
 _MAX_INSTANCE_BASE_DOMAIN_LENGTH = _MAX_DNS_NAME_LENGTH - INSTANCE_SLUG_LENGTH - 1
-
-
-class Environment(StrEnum):
-    """Infrastructure environment managed by this deployment."""
-
-    DEVELOPMENT = "development"
-    STAGING = "staging"
-    PRODUCTION = "production"
 
 
 class Settings(BaseSettings):
@@ -56,7 +47,6 @@ class Settings(BaseSettings):
     workspace_stop_timeout_seconds: int = Field(default=1800, ge=1)
     workspace_delete_poll_interval_seconds: float = Field(default=2.0, ge=0.1)
     workspace_delete_timeout_seconds: int = Field(default=1800, ge=1)
-    environment: Environment | None = None
     instance_base_domain: str | None = None
     crypto_key: SecretStr | None = None
     argocd_url: str | None = None
@@ -118,14 +108,6 @@ class Settings(BaseSettings):
             msg = "CODER_MANAGER_INSTANCE_BASE_DOMAIN must be a valid DNS name"
             raise ValueError(msg)
         return base_domain
-
-    def require_environment(self) -> Environment:
-        """Return the infrastructure environment managed by this deployment."""
-
-        if self.environment is None:
-            msg = "CODER_MANAGER_ENVIRONMENT is required"
-            raise ValueError(msg)
-        return self.environment
 
     @field_validator("scheduler_timezone")
     @classmethod
