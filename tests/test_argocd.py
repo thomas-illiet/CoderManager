@@ -29,6 +29,7 @@ TEST_INSTANCE_ID = UUID("12345678-1234-5678-1234-567812345678")
 TEST_APPLICATION_NAME = f"managed-{TEST_INSTANCE_SLUG}"
 TEST_ARGOCD_TOKEN = "super-secret-token"  # noqa: S105
 TEST_APPLICATION_PREFIX = "managed"
+TEST_ARGOCD_ADDITIONAL_VALUES = "values-dev.yaml"
 EXPECTED_INSTANCE_HELM_ARGS = (
     f"--set global.baseDomain={TEST_INSTANCE_SLUG}.emea.code-studio.dev.echonet\n"
     f"--set global.identifier={TEST_INSTANCE_SLUG}\n"
@@ -54,6 +55,7 @@ def configured_settings(**overrides: object) -> Settings:
         "argocd_repository_path": "charts/coder",
         "argocd_target_revision": "v1.2.3",
         "argocd_destination_name": "coder-cluster",
+        "argocd_additional_values": TEST_ARGOCD_ADDITIONAL_VALUES,
         "cyberark_app_id": "coder-app",
         "cyberark_cert_name": "coder-cert",
         "cyberark_key_name": "coder-key",
@@ -163,6 +165,7 @@ def test_create_application_and_sync_contract() -> None:
                 {
                     "name": "HELM_ARGS",
                     "value": (
+                        f"--values {TEST_ARGOCD_ADDITIONAL_VALUES}\n"
                         "--namespace app-code-instance\n"
                         "--set policy.config.allowedUsernames="
                         "admin\\,alice\\,root.admin\\,zoe\n"
@@ -203,10 +206,21 @@ def test_create_application_and_sync_contract() -> None:
     }
 
 
-def test_helm_payload_uses_global_project_without_values_file_or_environment_label() -> None:
-    """Use the deployment project without a values file or obsolete environment label."""
+@pytest.mark.parametrize(
+    "additional_values",
+    ["values-dev.yaml", "values-stg.yaml", "values-prd.yaml", "custom values.yaml"],
+)
+def test_helm_payload_prepends_configured_additional_values(
+    additional_values: str,
+) -> None:
+    """Prepend one freely configured single-line values argument."""
 
-    config = ArgoCdConfig.from_settings(configured_settings(default_admins=""))
+    config = ArgoCdConfig.from_settings(
+        configured_settings(
+            default_admins="",
+            argocd_additional_values=f"  {additional_values}  ",
+        )
+    )
     payload = application_payload(
         config,
         TEST_APPLICATION_NAME,
@@ -216,9 +230,46 @@ def test_helm_payload_uses_global_project_without_values_file_or_environment_lab
     )
 
     helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
-    assert "--values " not in helm_arguments
+    assert helm_arguments.startswith(f"--values {additional_values}\n--namespace ")
+    assert helm_arguments.count("--values ") == 1
     assert payload["spec"]["project"] == "coder-project"
     assert "environment" not in payload["metadata"]["labels"]
+
+
+@pytest.mark.parametrize("additional_values", [None, "", " \t "])
+def test_helm_payload_omits_empty_additional_values(
+    additional_values: str | None,
+) -> None:
+    """Keep the values argument optional for unset or blank configuration."""
+
+    config = ArgoCdConfig.from_settings(
+        configured_settings(
+            default_admins="",
+            argocd_additional_values=additional_values,
+        )
+    )
+    payload = application_payload(
+        config,
+        TEST_APPLICATION_NAME,
+        uuid4(),
+        (),
+        instance_helm_values(),
+    )
+
+    helm_arguments = payload["spec"]["source"]["plugin"]["env"][0]["value"]
+    assert helm_arguments.startswith("--namespace app-code-instance\n")
+    assert "--values " not in helm_arguments
+
+
+@pytest.mark.parametrize("additional_values", ["values-dev.yaml\n--set evil=true", "a\rb"])
+def test_additional_values_reject_line_breaks(additional_values: str) -> None:
+    """Reject configuration that could append another HELM_ARGS line."""
+
+    with pytest.raises(
+        ArgoCdConfigurationError,
+        match="CODER_MANAGER_ARGOCD_ADDITIONAL_VALUES cannot contain line breaks",
+    ):
+        ArgoCdConfig.from_settings(configured_settings(argocd_additional_values=additional_values))
 
 
 def test_database_secret_references_use_managed_database_name() -> None:
@@ -386,6 +437,7 @@ def test_existing_application_is_attached_and_overwritten() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
+                f"--values {TEST_ARGOCD_ADDITIONAL_VALUES}\n"
                 "--namespace app-code-instance\n"
                 "--set policy.config.allowedUsernames=admin\n"
                 "--set policy.config.adminUsernames=admin\n"
@@ -673,6 +725,7 @@ def test_create_conflict_refetches_and_attaches_application() -> None:
         {
             "name": "HELM_ARGS",
             "value": (
+                f"--values {TEST_ARGOCD_ADDITIONAL_VALUES}\n"
                 "--namespace app-code-instance\n"
                 "--set policy.config.allowedUsernames=admin\\,alice\\,root.admin\n"
                 "--set policy.config.adminUsernames=admin\\,alice\\,root.admin\n"

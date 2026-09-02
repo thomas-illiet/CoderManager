@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     argocd_target_revision: str | None = None
     argocd_project_name: str | None = None
     argocd_destination_name: str | None = None
+    argocd_additional_values: str | None = None
     allow_unauthenticated_api: bool = False
     oidc_issuer_url: str | None = None
     oidc_client_id: str | None = None

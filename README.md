@@ -271,8 +271,11 @@ hostname suffix used by every public instance URL. Argo CD labels and the CyberA
 backslash-escaped so Helm keeps each list as one value; the chart still receives the comma-separated
 string.
 Both the Argo CD destination and `HELM_ARGS` target the `app-code-instance` namespace.
-`HELM_ARGS` does not load an environment-specific values file and does not inject an environment
-Helm value.
+When `CODER_MANAGER_ARGOCD_ADDITIONAL_VALUES` contains a non-empty single-line value, `HELM_ARGS`
+starts with `--values <value>`. For example, deployments can select `values-dev.yaml`,
+`values-stg.yaml`, or `values-prd.yaml`. An absent, empty, or whitespace-only value omits the
+`--values` argument. Surrounding whitespace is removed; otherwise the configured single-line text
+is passed unchanged. Coder Manager does not inject an environment Helm value.
 At reconciliation time, `HELM_ARGS` sets `global.baseDomain` to the instance's complete public
 hostname (the immutable slug followed by the configured base domain), without the `https://`
 scheme. It also sets
@@ -293,7 +296,8 @@ Configure Argo CD with `CODER_MANAGER_ARGOCD_URL`,
 `CODER_MANAGER_ARGOCD_TOKEN`, `CODER_MANAGER_ARGOCD_REPOSITORY_URL`,
 `CODER_MANAGER_ARGOCD_REPOSITORY_PATH`, `CODER_MANAGER_ARGOCD_TARGET_REVISION`,
 `CODER_MANAGER_ARGOCD_REGION`, `CODER_MANAGER_ARGOCD_APPLICATION_PREFIX`,
-`CODER_MANAGER_ARGOCD_PROJECT_NAME`, and `CODER_MANAGER_ARGOCD_DESTINATION_NAME`. Configure the
+`CODER_MANAGER_ARGOCD_PROJECT_NAME`, `CODER_MANAGER_ARGOCD_DESTINATION_NAME`, and optional
+worker-only `CODER_MANAGER_ARGOCD_ADDITIONAL_VALUES`. Configure the
 single CyberArk plugin map with `CODER_MANAGER_CYBERARK_APP_ID`,
 `CODER_MANAGER_CYBERARK_CERT_NAME`, `CODER_MANAGER_CYBERARK_KEY_NAME`, and
 `CODER_MANAGER_CYBERARK_SAFE`. `.env.example` lists the complete configuration. TLS certificate

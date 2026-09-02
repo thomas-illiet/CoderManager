@@ -80,6 +80,7 @@ class ArgoCdConfig(ArgoCdClientConfig):
     repository_path: str
     target_revision: str
     destination_name: str
+    additional_values: str | None
     cyberark: CyberArkParameters
     default_admins: tuple[str, ...]
 
@@ -120,6 +121,10 @@ class ArgoCdConfig(ArgoCdClientConfig):
             repository_path=_required_value(required, "CODER_MANAGER_ARGOCD_REPOSITORY_PATH"),
             target_revision=_required_value(required, "CODER_MANAGER_ARGOCD_TARGET_REVISION"),
             destination_name=_required_value(required, "CODER_MANAGER_ARGOCD_DESTINATION_NAME"),
+            additional_values=_optional_single_line_value(
+                settings.argocd_additional_values,
+                "CODER_MANAGER_ARGOCD_ADDITIONAL_VALUES",
+            ),
             cyberark=CyberArkParameters(
                 app_id=_required_value(required, "CODER_MANAGER_CYBERARK_APP_ID"),
                 cert_name=_required_value(required, "CODER_MANAGER_CYBERARK_CERT_NAME"),
@@ -137,6 +142,18 @@ def _required_value(values: Mapping[str, str | None], name: str) -> str:
     if value is None:  # pragma: no cover - checked by caller
         raise ArgoCdConfigurationError(name)
     return value.strip()
+
+
+def _optional_single_line_value(value: str | None, name: str) -> str | None:
+    """Return one trimmed optional setting while rejecting line injection."""
+
+    if value is None:
+        return None
+    if "\r" in value or "\n" in value:
+        msg = f"{name} cannot contain line breaks"
+        raise ArgoCdConfigurationError(msg)
+    normalized = value.strip()
+    return normalized or None
 
 
 def _application_prefix(raw_value: str, setting_name: str) -> str:

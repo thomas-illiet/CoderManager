@@ -90,6 +90,8 @@ def application_payload(
             helm_values.database_schema,
         ),
     ]
+    if config.additional_values is not None:
+        helm_argument_lines.insert(0, f"--values {config.additional_values}")
     if helm_values.kubeconfig is not None:
         kubeconfig_base64 = b64encode(helm_values.kubeconfig.get_secret_value()).decode("ascii")
         helm_argument_lines.append(_helm_scalar_argument("server.config.kube", kubeconfig_base64))
