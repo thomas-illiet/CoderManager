@@ -19,6 +19,10 @@ class CoderTemplateVersion:
     id: UUID
     status: str
     archived: bool
+    job_id: UUID | None = None
+    error: str | None = None
+    error_code: str | None = None
+    logs_overflowed: bool = False
 
 
 @dataclass(frozen=True, slots=True)

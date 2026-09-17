@@ -1987,6 +1987,69 @@ def test_template_creation_http_contract() -> None:
     ]
 
 
+def test_template_import_failure_exposes_bounded_redacted_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Expose useful Coder job context while redacting values and bounding logs."""
+
+    version_id = uuid4()
+    job_id = uuid4()
+    secret = "registry-password-value"  # noqa: S105 - synthetic redaction fixture
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Return one failed import and provisioner diagnostics containing a secret."""
+
+        if request.url.path.endswith("/logs"):
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "log_level": "error",
+                        "stage": "terraform",
+                        "output": f"provider login failed with {secret}",
+                    }
+                ],
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": str(version_id),
+                "archived": False,
+                "job": {
+                    "id": str(job_id),
+                    "status": "failed",
+                    "error": f"required provider rejected {secret}",
+                    "error_code": "REQUIRED_TEMPLATE_VARIABLES",
+                    "logs_overflowed": True,
+                },
+            },
+        )
+
+    with (
+        CoderClient(
+            "https://coder.example.test",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(CoderRequestError) as raised,
+    ):
+        client.wait_template_version(
+            version_id,
+            timeout_seconds=1,
+            poll_interval_seconds=0.001,
+            sensitive_values=(secret,),
+        )
+
+    message = str(raised.value)
+    assert str(version_id) in message
+    assert str(job_id) in message
+    assert "REQUIRED_TEMPLATE_VARIABLES" in message
+    assert "reason=required provider rejected <redacted>" in message
+    assert secret not in message
+    assert secret not in caplog.text
+    assert "[terraform] [error] provider login failed with <redacted>" in caplog.text
+    assert "logs_overflowed=True" in caplog.text
+
+
 def test_template_lookup_exposes_active_version_and_delete_is_idempotent() -> None:
     """Recover templates by ID or name and treat a DELETE 404 as convergence."""
 

@@ -527,6 +527,7 @@ def sync_template_target(  # noqa: PLR0913
                     timeout_seconds=settings.template_sync_timeout_seconds,
                     poll_interval_seconds=settings.template_sync_poll_interval_seconds,
                     heartbeat=heartbeat,
+                    sensitive_values=tuple(value for _name, value in preparation.system_values),
                 )
             if remote_version.archived:
                 client.unarchive_template_version(remote_version.id)

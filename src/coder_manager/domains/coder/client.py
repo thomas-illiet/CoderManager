@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import quote
@@ -35,6 +36,10 @@ if TYPE_CHECKING:
 BUILD_VERSION_HEADER = "X-Coder-Build-Version"
 CONNECT_TIMEOUT_SECONDS = 5.0
 READ_TIMEOUT_SECONDS = 30.0
+TEMPLATE_IMPORT_ERROR_MAX_CHARS = 4096
+TEMPLATE_IMPORT_LOG_MAX_CHARS = 8192
+TEMPLATE_IMPORT_LOG_MAX_ENTRIES = 50
+logger = logging.getLogger(__name__)
 WORKSPACE_STATUSES = frozenset(
     {
         "pending",
@@ -544,6 +549,7 @@ class CoderClient:
         timeout_seconds: int,
         poll_interval_seconds: float,
         heartbeat: Callable[[], None] | None = None,
+        sensitive_values: tuple[str, ...] = (),
     ) -> CoderTemplateVersion:
         """Poll a provisioner import until success, terminal failure, or timeout."""
 
@@ -553,7 +559,21 @@ class CoderClient:
             if version.status == "succeeded":
                 return version
             if version.status in {"failed", "canceled", "cancelled"}:
-                msg = "Coder template import failed"
+                details = [
+                    "Coder template import failed",
+                    f"version_id={version.id}",
+                    f"status={version.status}",
+                ]
+                if version.job_id is not None:
+                    details.append(f"job_id={version.job_id}")
+                if version.error_code:
+                    details.append(f"error_code={version.error_code}")
+                if version.error:
+                    details.append(
+                        "reason=" + self._sanitize_diagnostic(version.error, sensitive_values)[0]
+                    )
+                self._log_template_import_failure(version, sensitive_values)
+                msg = ": ".join((details[0], ", ".join(details[1:])))
                 raise CoderRequestError(msg)
             if time.monotonic() >= deadline:
                 msg = "Coder template import timed out"
@@ -561,6 +581,85 @@ class CoderClient:
             if heartbeat is not None:
                 heartbeat()
             time.sleep(poll_interval_seconds)
+
+    def _log_template_import_failure(
+        self,
+        version: CoderTemplateVersion,
+        sensitive_values: tuple[str, ...],
+    ) -> None:
+        """Log a bounded, redacted provisioner excerpt without hiding the primary error."""
+
+        try:
+            lines, truncated = self.template_version_logs(
+                version.id,
+                sensitive_values=sensitive_values,
+            )
+        except (CoderRequestError, httpx.HTTPError) as error:
+            logger.warning(
+                "Could not retrieve Coder template import logs for version %s: %s",
+                version.id,
+                error,
+            )
+            return
+        logger.error(
+            "Coder template import diagnostics version_id=%s job_id=%s error_code=%s "
+            "logs_overflowed=%s logs_truncated=%s\n%s",
+            version.id,
+            version.job_id,
+            version.error_code,
+            version.logs_overflowed,
+            truncated,
+            "\n".join(lines) if lines else "<no provisioner logs returned>",
+        )
+
+    def template_version_logs(
+        self,
+        version_id: UUID,
+        *,
+        sensitive_values: tuple[str, ...] = (),
+    ) -> tuple[tuple[str, ...], bool]:
+        """Return a bounded, redacted tail of one template import's provisioner logs."""
+
+        path = f"api/v2/templateversions/{version_id}/logs"
+        response = self._client.get(path)
+        self._raise_for_response(response, "GET", path, httpx.codes.OK)
+        payload = self._json_array(response, path)
+        rendered: list[str] = []
+        for entry in payload[-TEMPLATE_IMPORT_LOG_MAX_ENTRIES:]:
+            level = entry.get("log_level")
+            stage = entry.get("stage")
+            output = entry.get("output")
+            if not all(isinstance(value, str) for value in (level, stage, output)):
+                continue
+            line, _ = self._sanitize_diagnostic(
+                f"[{stage}] [{level}] {output}",
+                sensitive_values,
+                max_chars=TEMPLATE_IMPORT_LOG_MAX_CHARS,
+            )
+            rendered.append(line)
+
+        truncated = len(payload) > TEMPLATE_IMPORT_LOG_MAX_ENTRIES
+        while sum(len(line) + 1 for line in rendered) > TEMPLATE_IMPORT_LOG_MAX_CHARS:
+            rendered.pop(0)
+            truncated = True
+        return tuple(rendered), truncated
+
+    @staticmethod
+    def _sanitize_diagnostic(
+        value: str,
+        sensitive_values: tuple[str, ...],
+        *,
+        max_chars: int = TEMPLATE_IMPORT_ERROR_MAX_CHARS,
+    ) -> tuple[str, bool]:
+        """Redact known values, normalize whitespace, and bound remote diagnostics."""
+
+        sanitized = " ".join(value.split())
+        for sensitive in sorted(filter(None, sensitive_values), key=len, reverse=True):
+            sanitized = sanitized.replace(sensitive, "<redacted>")
+        truncated = len(sanitized) > max_chars
+        if truncated:
+            sanitized = sanitized[: max_chars - 3] + "..."
+        return sanitized, truncated
 
     @staticmethod
     def _raise_for_response(
@@ -647,6 +746,10 @@ class CoderClient:
             id=cls._uuid_field(payload, "id", path),
             status=job["status"],
             archived=payload.get("archived") is True,
+            job_id=cls._optional_uuid_field(job, "id", path),
+            error=job.get("error") if isinstance(job.get("error"), str) else None,
+            error_code=(job.get("error_code") if isinstance(job.get("error_code"), str) else None),
+            logs_overflowed=job.get("logs_overflowed") is True,
         )
 
     @classmethod

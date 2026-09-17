@@ -1015,12 +1015,14 @@ async def test_target_sync_creates_first_remote_template(
             timeout_seconds: float,
             poll_interval_seconds: float,
             heartbeat: object,
+            sensitive_values: tuple[str, ...],
         ) -> CoderTemplateVersion:
             """Complete the deterministic import while exercising the heartbeat."""
 
             assert selected_version == expected_version_id
             assert timeout_seconds > poll_interval_seconds
             assert callable(heartbeat)
+            assert sensitive_values == ("registry.example.com",)
             heartbeat()
             calls.append("wait")
             return CoderTemplateVersion(expected_version_id, "succeeded", archived=False)
